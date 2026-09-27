@@ -1,6 +1,6 @@
-//! Protected Nostr-local administration over a mode-0600 Unix socket.
+//! Protected Discord-local administration over a mode-0600 Unix socket.
 
-use crate::store::NostrStore;
+use crate::store::DiscordStore;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -48,7 +48,7 @@ pub type AdminScope = Arc<std::collections::BTreeSet<String>>;
 pub fn spawn(
     socket: PathBuf,
     scope: AdminScope,
-    store: Arc<Mutex<NostrStore>>,
+    store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move { serve(&socket, scope, store, master_key).await })
@@ -57,7 +57,7 @@ pub fn spawn(
 pub async fn serve(
     socket: &Path,
     scope: AdminScope,
-    store: Arc<Mutex<NostrStore>>,
+    store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> Result<()> {
     prepare_socket(socket)?;
@@ -70,7 +70,7 @@ pub async fn serve(
         let key = master_key.clone();
         tokio::spawn(async move {
             if let Err(error) = handle(stream, scope, store, key).await {
-                tracing::warn!(error = %error, "nostr local admin request failed");
+                tracing::warn!(error = %error, "discord local admin request failed");
             }
         });
     }
@@ -79,7 +79,7 @@ pub async fn serve(
 async fn handle(
     stream: UnixStream,
     scope: AdminScope,
-    store: Arc<Mutex<NostrStore>>,
+    store: Arc<Mutex<DiscordStore>>,
     key: Arc<[u8; 32]>,
 ) -> Result<()> {
     let (read, mut write) = stream.into_split();
@@ -104,7 +104,7 @@ async fn handle(
 fn apply(
     request: Request,
     scope: &std::collections::BTreeSet<String>,
-    store: &Mutex<NostrStore>,
+    store: &Mutex<DiscordStore>,
     key: &[u8; 32],
 ) -> Response {
     let id = request.id.clone();
@@ -203,11 +203,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[tokio::test]
-    async fn s5_nostr_admin_is_exact_scoped_mode_0600_and_redacts_secret() {
+    async fn s5_discord_admin_is_exact_scoped_mode_0600_and_redacts_secret() {
         let temp = tempfile::tempdir().unwrap();
         let socket = temp.path().join("admin.sock");
         let store = Arc::new(Mutex::new(
-            NostrStore::open(&temp.path().join("owner.db")).unwrap(),
+            DiscordStore::open(&temp.path().join("owner.db")).unwrap(),
         ));
         let inspect = store.clone();
         let scope = Arc::new(std::collections::BTreeSet::from([
@@ -249,7 +249,7 @@ mod tests {
 
         let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let secret_config = base64::engine::general_purpose::STANDARD.encode(
-            br#"{"relays":["wss://relay.example"],"self_pubkey":"0000000000000000000000000000000000000000000000000000000000000000","name":"bot","secret":"config-leak"}"#,
+            br#"{"agent_id":"a","self_bot_id":"123456789012345678","token":"config-leak"}"#,
         );
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         let request = json!({"id":"secret-config","op":"upsert","scope_instance_id":instance_id,
@@ -264,9 +264,8 @@ mod tests {
         assert!(line.contains("\"ok\":false"));
         assert!(inspect.lock().unwrap().get(instance_id).unwrap().is_none());
 
-        let config = base64::engine::general_purpose::STANDARD.encode(
-            br#"{"relays":["wss://relay.example"],"self_pubkey":"0000000000000000000000000000000000000000000000000000000000000000","name":"bot","access":{"owner":["1111111111111111111111111111111111111111111111111111111111111111"]}}"#,
-        );
+        let config = base64::engine::general_purpose::STANDARD
+            .encode(br#"{"agent_id":"a","self_bot_id":"123456789012345678"}"#);
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         let request = json!({"id":"2","op":"upsert","scope_instance_id":instance_id,
             "instance_id":instance_id,"agent_id":"a","subject_id":1,

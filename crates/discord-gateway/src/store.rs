@@ -1,6 +1,6 @@
-//! Nostr-owned durable configuration, policy, identity, credential, and lifecycle store.
+//! Discord-owned durable configuration, policy, identity, credential, and lifecycle store.
 
-use crate::{config::AccessConfig, secret_store};
+use crate::secret_store;
 use anyhow::{Context as _, Result};
 use opencrab_process_supervisor::lifecycle::{LifecycleState, PersistedLifecycle};
 use rusqlite::{params, Connection, OptionalExtension as _};
@@ -82,7 +82,6 @@ pub struct InstanceRow {
     pub process_nonce: Option<String>,
     pub failure_count: u32,
     pub retry_at_unix_ms: Option<i64>,
-    pub access: AccessConfig,
 }
 
 impl InstanceRow {
@@ -98,24 +97,18 @@ impl InstanceRow {
     }
 }
 
-pub struct NostrStore {
+pub struct DiscordStore {
     path: PathBuf,
     conn: Connection,
 }
 
-impl NostrStore {
-    /// Offline S8 upgrades an old gateway database inside its destination transaction.
-    pub fn initialize_schema(conn: &Connection) -> Result<()> {
-        conn.execute_batch(SCHEMA)?;
-        Ok(())
-    }
-
+impl DiscordStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
-        Self::initialize_schema(&conn)?;
+        conn.execute_batch(SCHEMA)?;
         Ok(Self {
             path: path.into(),
             conn,
@@ -179,7 +172,7 @@ impl NostrStore {
     }
 
     pub fn get(&self, instance_id: &str) -> Result<Option<InstanceRow>> {
-        let Some(mut row) = self.conn.query_row(
+        self.conn.query_row(
             "SELECT instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,
                     subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,
                     core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms
@@ -206,42 +199,9 @@ impl NostrStore {
                     process_nonce: row.get(15)?,
                     failure_count: u32::try_from(failures).unwrap_or(u32::MAX),
                     retry_at_unix_ms: row.get(17)?,
-                    access: AccessConfig::default(),
                 })
             },
-        ).optional()? else { return Ok(None); };
-        row.access = self.access_config(instance_id)?;
-        Ok(Some(row))
-    }
-
-    pub fn access_config(&self, instance_id: &str) -> Result<AccessConfig> {
-        let mut access = AccessConfig::default();
-        let mut stmt = self.conn.prepare(
-            "SELECT role,external_id,relationship_id FROM identity_projections
-             WHERE instance_id=?1 ORDER BY role,external_id",
-        )?;
-        let rows = stmt.query_map(params![instance_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })?;
-        for row in rows {
-            let (role, external_id, relationship_id) = row?;
-            match role.as_str() {
-                "owner" => access.owner.push(external_id),
-                "trusted" | "trusted_user" => access.trusted_users.push(external_id),
-                "followee" => access.followees.push(external_id),
-                "co_agent" => {
-                    access
-                        .co_agents
-                        .insert(external_id, relationship_id.unwrap_or_default());
-                }
-                _ => {}
-            }
-        }
-        Ok(access)
+        ).optional().map_err(Into::into)
     }
 
     pub fn retry_due_error(
@@ -418,11 +378,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn s5_nostr_store_encrypts_secret_and_persists_lifecycle_restart() {
+    fn s5_discord_store_encrypts_secret_and_persists_lifecycle_restart() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("nostr.db");
+        let path = temp.path().join("discord.db");
         let key = [7_u8; 32];
-        let store = NostrStore::open(&path).unwrap();
+        let store = DiscordStore::open(&path).unwrap();
         let generation = store
             .upsert_desired(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -463,7 +423,7 @@ mod tests {
         assert!(!bytes
             .windows(b"grant-secret-at-rest".len())
             .any(|window| window == b"grant-secret-at-rest"));
-        let reopened = NostrStore::open(&path).unwrap();
+        let reopened = DiscordStore::open(&path).unwrap();
         let row = reopened
             .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
             .unwrap()
@@ -476,58 +436,9 @@ mod tests {
     }
 
     #[test]
-    fn identity_projections_are_gateway_access_authority() {
+    fn s5_discord_disabled_and_nonready_instances_never_eligible() {
         let temp = tempfile::tempdir().unwrap();
-        let store = NostrStore::open(&temp.path().join("nostr.db")).unwrap();
-        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        store
-            .upsert_desired(
-                id,
-                "agent",
-                7,
-                "Y29uZmln",
-                &["opaque-address".into()],
-                "token",
-                None,
-                true,
-                &[8; 32],
-            )
-            .unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO identity_projections(instance_id,role,external_id,relationship_id,relationship_revision)
-                 VALUES (?1,'owner',?2,NULL,NULL),
-                        (?1,'trusted_user',?3,NULL,NULL),
-                        (?1,'followee',?4,NULL,NULL),
-                        (?1,'co_agent',?5,'peer-agent',NULL)",
-                params![
-                    id,
-                    "11".repeat(32),
-                    "22".repeat(32),
-                    "33".repeat(32),
-                    "44".repeat(32),
-                ],
-            )
-            .unwrap();
-
-        let row = store.get(id).unwrap().unwrap();
-        assert_eq!(row.access.owner, vec!["11".repeat(32)]);
-        assert_eq!(row.access.trusted_users, vec!["22".repeat(32)]);
-        assert_eq!(row.access.followees, vec!["33".repeat(32)]);
-        assert_eq!(
-            row.access
-                .co_agents
-                .get(&"44".repeat(32))
-                .map(String::as_str),
-            Some("peer-agent")
-        );
-    }
-
-    #[test]
-    fn s5_nostr_disabled_and_nonready_instances_never_eligible() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = NostrStore::open(&temp.path().join("nostr.db")).unwrap();
+        let store = DiscordStore::open(&temp.path().join("discord.db")).unwrap();
         let generation = store
             .upsert_desired(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

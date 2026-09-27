@@ -1,9 +1,6 @@
-//! Nostr-owned lifecycle daemon. Core is reached only through a generic control trait.
+//! Discord-owned lifecycle daemon. Core is reached only through a generic control trait.
 
-use crate::{
-    config,
-    store::{InstanceRow, NostrStore},
-};
+use crate::store::{DiscordStore, InstanceRow};
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use opencrab_process_supervisor::{
@@ -25,36 +22,14 @@ pub struct DaemonConfig {
     pub core_socket: PathBuf,
     pub child_binary: PathBuf,
     pub placement_dir: PathBuf,
-    pub nostaro_bin: PathBuf,
+    #[serde(default)]
+    pub attachment_spool_root: Option<PathBuf>,
     #[serde(default = "default_reconcile_millis")]
     pub reconcile_millis: u64,
 }
 
 fn default_reconcile_millis() -> u64 {
     1_000
-}
-
-// Core retains only generic final-delivery compatibility. Runtime Nostr config and
-// gateway admission authority stay gateway-owned.
-const DEFAULT_CORE_CONFIG_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoic2F5In0=";
-
-fn core_config_b64_for_runtime_config(config_b64: &str) -> Result<String> {
-    use base64::Engine as _;
-    let value: serde_json::Value = serde_json::from_slice(&config::decode_config_b64(config_b64)?)
-        .context("runtime config is not valid JSON")?;
-    let delivery_mode = value
-        .get("delivery_mode")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("say");
-    anyhow::ensure!(
-        matches!(delivery_mode, "say" | "tool_driven"),
-        "delivery_mode must be say or tool_driven"
-    );
-    if delivery_mode == "say" {
-        return Ok(DEFAULT_CORE_CONFIG_B64.to_string());
-    }
-    let core_config = serde_json::json!({ "delivery_mode": delivery_mode });
-    Ok(base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&core_config)?))
 }
 
 fn retry_deadline(row: &InstanceRow) -> i64 {
@@ -79,7 +54,6 @@ impl DaemonConfig {
             ("core_socket", &self.core_socket),
             ("child_binary", &self.child_binary),
             ("placement_dir", &self.placement_dir),
-            ("nostaro_bin", &self.nostaro_bin),
         ] {
             anyhow::ensure!(path.is_absolute(), "{name} must be absolute");
         }
@@ -167,7 +141,6 @@ impl GateReconciler for UdsGateReconciler {
         desired: &InstanceRow,
         subject_grant: Option<&str>,
     ) -> Result<VerifiedInstance> {
-        let core_config_b64 = core_config_b64_for_runtime_config(&desired.config_b64)?;
         let observed = self
             .client
             .reconcile(opencrab_gate_client::admin::ReconcileDesired {
@@ -175,7 +148,7 @@ impl GateReconciler for UdsGateReconciler {
                 kind_id: &self.kind_id,
                 subject_id: desired.subject_id,
                 enabled: desired.enabled,
-                config_b64: &core_config_b64,
+                config_b64: &desired.config_b64,
                 subject_grant,
                 addresses: &desired.addresses,
             })
@@ -224,7 +197,7 @@ pub trait SpawnerFactory: Send + Sync {
 }
 
 struct StoreObserver {
-    store: Arc<Mutex<NostrStore>>,
+    store: Arc<Mutex<DiscordStore>>,
     generation: u64,
     nonce: String,
 }
@@ -259,8 +232,8 @@ impl StoreObserver {
     }
 }
 
-pub struct NostrDaemon<R, F> {
-    store: Arc<Mutex<NostrStore>>,
+pub struct DiscordDaemon<R, F> {
+    store: Arc<Mutex<DiscordStore>>,
     key: Arc<[u8; 32]>,
     reconciler: Arc<R>,
     factory: Arc<F>,
@@ -268,13 +241,13 @@ pub struct NostrDaemon<R, F> {
     startup_recovered: std::sync::atomic::AtomicBool,
 }
 
-impl<R, F> NostrDaemon<R, F>
+impl<R, F> DiscordDaemon<R, F>
 where
     R: GateReconciler + 'static,
     F: SpawnerFactory + 'static,
 {
     pub fn new(
-        store: NostrStore,
+        store: DiscordStore,
         key: [u8; 32],
         reconciler: Arc<R>,
         factory: Arc<F>,
@@ -289,7 +262,7 @@ where
         })
     }
 
-    pub fn store(&self) -> Arc<Mutex<NostrStore>> {
+    pub fn store(&self) -> Arc<Mutex<DiscordStore>> {
         self.store.clone()
     }
 
@@ -556,7 +529,7 @@ fn prepare_readiness_listener(path: &Path) -> Result<tokio::net::UnixListener> {
 
 async fn wait_for_child_readiness<F: SpawnerFactory + 'static>(
     listener: tokio::net::UnixListener,
-    store: Arc<Mutex<NostrStore>>,
+    store: Arc<Mutex<DiscordStore>>,
     supervisors: Arc<ProcessSupervisorSet>,
     factory: Arc<F>,
     instance_id: String,
@@ -565,7 +538,10 @@ async fn wait_for_child_readiness<F: SpawnerFactory + 'static>(
 ) {
     use tokio::io::AsyncReadExt as _;
     let ready = async {
-        let (mut stream, _) = listener.accept().await?;
+        let (_, mut stream) = {
+            let (stream, address) = listener.accept().await?;
+            (address, stream)
+        };
         let mut bytes = Vec::new();
         stream.read_to_end(&mut bytes).await?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
@@ -609,7 +585,7 @@ struct ProductionFactory {
     child_binary: PathBuf,
     core_socket: PathBuf,
     placement_dir: PathBuf,
-    nostaro_bin: PathBuf,
+    attachment_spool_root: Option<PathBuf>,
 }
 
 impl SpawnerFactory for ProductionFactory {
@@ -699,6 +675,7 @@ impl SpawnerFactory for ProductionFactory {
                 .join(format!("{}.control.sock", row.instance_id)),
         )
     }
+
     fn for_instance(
         &self,
         row: &InstanceRow,
@@ -708,23 +685,16 @@ impl SpawnerFactory for ProductionFactory {
         let revision = row.core_revision.context("verified revision missing")?;
         std::fs::create_dir_all(&self.placement_dir)?;
         let path = self.placement_dir.join(format!("{}.json", row.instance_id));
-        anyhow::ensure!(
-            row.addresses.len() == 1,
-            "Nostr instance requires exactly one address"
-        );
-        let runtime_config_b64 = config::canonicalize_config_b64_with_gateway_access(
-            &row.config_b64,
-            row.access.clone(),
-        )?;
-        let core_config_b64 = core_config_b64_for_runtime_config(&runtime_config_b64)?;
+        let control_socket = self
+            .control_socket(row, "")
+            .expect("production control socket");
         let value = serde_json::json!({
             "core_socket": self.core_socket,
-            "nostaro_bin": self.nostaro_bin,
-            "control_socket":self.control_socket(row,"").expect("production control socket"),
-            "start_nonce":start_nonce,
+            "attachment_spool_root": self.attachment_spool_root,
+            "control_socket": control_socket,
+            "start_nonce": start_nonce,
             "instances": [{"instance_id":row.instance_id,"revision":revision,
-                "address":row.addresses[0],"config_b64":runtime_config_b64,
-                "core_config_b64": core_config_b64}]
+                "addresses":row.addresses,"config_b64":row.config_b64}]
         });
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
@@ -735,8 +705,8 @@ impl SpawnerFactory for ProductionFactory {
                 self.child_binary.clone(),
                 path,
                 secret,
-                crate::secret::SECRET_ENV,
-                "nostr-adapter",
+                crate::secret::TOKEN_ENV,
+                "discord-adapter",
                 row.instance_id.clone(),
             ),
         ))
@@ -747,25 +717,25 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     config.validate()?;
     let lock_path = config.database_path.with_extension("lock");
     let _lock = opencrab_process_supervisor::lock::StoreLock::acquire(&lock_path)
-        .context("another Nostr daemon owns this store")?;
-    let encoded_key = crate::secret::take_master_key().context("Nostr master key is required")?;
+        .context("another Discord daemon owns this store")?;
+    let encoded_key = crate::secret::take_master_key().context("Discord master key is required")?;
     let key = crate::secret_store::parse_master_key(&encoded_key)?;
     let mut raw = [0_u8; 32];
     raw.copy_from_slice(&key[..]);
-    let store = NostrStore::open(&config.database_path)?;
+    let store = DiscordStore::open(&config.database_path)?;
     let client = opencrab_gate_client::admin::GateAdminClient::from_credential_file(
         config.gate_admin_socket.clone(),
         &config.gate_admin_credential,
     )?;
-    let daemon = NostrDaemon::new(
+    let daemon = DiscordDaemon::new(
         store,
         raw,
-        Arc::new(UdsGateReconciler::new(client, "nostr")),
+        Arc::new(UdsGateReconciler::new(client, "discord")),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),
             placement_dir: config.placement_dir.clone(),
-            nostaro_bin: config.nostaro_bin.clone(),
+            attachment_spool_root: config.attachment_spool_root.clone(),
         }),
     )?;
     let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());

@@ -47,6 +47,21 @@ impl GateReconciler for OfflineGate {
     }
 }
 
+struct FailingGate;
+#[async_trait]
+impl GateReconciler for FailingGate {
+    async fn observe(
+        &self,
+        _: &InstanceRow,
+    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Mismatch)
+    }
+
+    async fn reconcile(&self, _: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
+        anyhow::bail!("core unavailable")
+    }
+}
+
 struct RecoveryGate(opencrab_process_supervisor::lifecycle::CoreObservation);
 #[async_trait]
 impl GateReconciler for RecoveryGate {
@@ -137,7 +152,7 @@ impl ChildSpawner for FakeSpawner {
         &self.target
     }
     fn service_name(&self) -> &str {
-        "nostr-adapter"
+        "discord-adapter"
     }
 }
 
@@ -167,12 +182,12 @@ fn daemon(
     enabled: bool,
 ) -> (
     tempfile::TempDir,
-    NostrDaemon<FakeGate, FakeFactory>,
+    DiscordDaemon<FakeGate, FakeFactory>,
     Arc<AtomicUsize>,
     Arc<Notify>,
 ) {
     let temp = tempfile::tempdir().unwrap();
-    let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     store
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -195,14 +210,14 @@ fn daemon(
     });
     (
         temp,
-        NostrDaemon::new(store, [9; 32], Arc::new(FakeGate), factory).unwrap(),
+        DiscordDaemon::new(store, [9; 32], Arc::new(FakeGate), factory).unwrap(),
         started,
         exit,
     )
 }
 
 #[tokio::test]
-async fn s5_nostr_daemon_runs_and_crash_state_persists_while_server_is_stopped() {
+async fn s5_discord_daemon_runs_and_crash_state_persists_while_server_is_stopped() {
     let (_temp, daemon, started, exit) = daemon(true);
     daemon.reconcile_once().await.unwrap();
     for _ in 0..100 {
@@ -282,10 +297,10 @@ async fn s5_nostr_daemon_runs_and_crash_state_persists_while_server_is_stopped()
 }
 
 #[tokio::test]
-async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped() {
+async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("owner.db");
-    let store = NostrStore::open(&path).unwrap();
+    let store = DiscordStore::open(&path).unwrap();
     let generation = store
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -315,8 +330,8 @@ async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped()
     drop(store);
 
     let started = Arc::new(AtomicUsize::new(0));
-    let daemon = NostrDaemon::new(
-        NostrStore::open(&path).unwrap(),
+    let daemon = DiscordDaemon::new(
+        DiscordStore::open(&path).unwrap(),
         [9; 32],
         Arc::new(OfflineGate),
         Arc::new(FakeFactory {
@@ -338,27 +353,7 @@ async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped()
 }
 
 #[tokio::test]
-async fn s5_nostr_disabled_and_nonready_instances_never_spawn() {
-    let (_temp, daemon, started, _) = daemon(false);
-    daemon.reconcile_once().await.unwrap();
-    tokio::task::yield_now().await;
-    assert_eq!(started.load(Ordering::SeqCst), 0);
-    let row = daemon
-        .store()
-        .lock()
-        .unwrap()
-        .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        row.lifecycle_state,
-        opencrab_process_supervisor::lifecycle::LifecycleState::Disabled
-    );
-    daemon.shutdown().await;
-}
-
-#[tokio::test]
-async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observations() {
+async fn s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observations() {
     use opencrab_process_supervisor::lifecycle::{
         CoreObservation, LifecycleState, ProcessObservation,
     };
@@ -371,7 +366,7 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observati
         LifecycleState::Error,
     ] {
         let temp = tempfile::tempdir().unwrap();
-        let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+        let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
         let enabled = state != LifecycleState::Disabled;
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let generation = store
@@ -417,7 +412,7 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observati
         }
         let reaped = Arc::new(AtomicUsize::new(0));
         let cleaned = Arc::new(AtomicUsize::new(0));
-        let daemon = NostrDaemon::new(
+        let daemon = DiscordDaemon::new(
             store,
             [9; 32],
             Arc::new(RecoveryGate(if enabled {
@@ -460,13 +455,13 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observati
 }
 
 #[tokio::test]
-async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
+async fn s5_discord_running_loss_and_stale_process_are_reaped_to_durable_error() {
     use opencrab_process_supervisor::lifecycle::{
         CoreObservation, LifecycleState, ProcessObservation,
     };
     for observation in [ProcessObservation::Missing, ProcessObservation::StaleLive] {
         let temp = tempfile::tempdir().unwrap();
-        let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
+        let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let generation = store
             .upsert_desired(id, "agent", 7, "e30=", &[], "token", None, true, &[9; 32])
@@ -478,7 +473,7 @@ async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
         store.record_started(id, generation, 4242, "nonce").unwrap();
         store.mark_running(id, generation, 4242, "nonce").unwrap();
         let reaped = Arc::new(AtomicUsize::new(0));
-        let daemon = NostrDaemon::new(
+        let daemon = DiscordDaemon::new(
             store,
             [9; 32],
             Arc::new(RecoveryGate(CoreObservation::ExactEnabled)),
@@ -508,140 +503,193 @@ async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
     }
 }
 
-#[test]
-fn production_placement_uses_gateway_access_and_opaque_core_config() {
-    use crate::config::{decode_config_b64, parse_instance_config, AccessConfig};
-    use opencrab_process_supervisor::lifecycle::LifecycleState;
-
+#[tokio::test]
+async fn s5_discord_reconciliation_failure_is_durable_and_does_not_kill_daemon() {
     let temp = tempfile::tempdir().unwrap();
-    let runtime_config = {
-        use base64::Engine as _;
-        base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec(&serde_json::json!({
-                "relays": ["wss://example.invalid"],
-                "self_pubkey": "aa".repeat(32),
-                "name": "crab",
-                "access": { "owner": ["bb".repeat(32)] }
-            }))
-            .unwrap(),
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    store
+        .upsert_desired(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "agent",
+            7,
+            "e30=",
+            &[],
+            "token-secret",
+            Some("grant-secret"),
+            true,
+            &[9; 32],
         )
-    };
-    let row = InstanceRow {
-        instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-        agent_id: "agent".into(),
-        subject_id: 7,
-        config_b64: runtime_config,
-        addresses: vec!["nostr-a1".into()],
-        credential_envelope: String::new(),
-        subject_grant_envelope: None,
-        enabled: true,
-        desired_generation: 1,
-        applied_generation: Some(1),
-        lifecycle_state: LifecycleState::Ready,
-        core_revision: Some(4),
-        core_digest: Some("digest".into()),
-        core_bindings: vec![],
-        process_id: None,
-        process_nonce: None,
-        failure_count: 0,
-        retry_at_unix_ms: None,
-        access: AccessConfig {
-            trusted_users: vec!["cc".repeat(32)],
-            ..AccessConfig::default()
-        },
-    };
-    let factory = ProductionFactory {
-        child_binary: "/bin/true".into(),
-        core_socket: "/tmp/opencrab-core.sock".into(),
-        placement_dir: temp.path().into(),
-        nostaro_bin: "/bin/true".into(),
-    };
-
-    let _spawner = factory
-        .for_instance(&row, zeroize::Zeroizing::new(b"secret".to_vec()), "nonce")
         .unwrap();
-    let placement_path = temp.path().join(format!("{}.json", row.instance_id));
-    let value: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(placement_path).unwrap()).unwrap();
-    let instance = &value["instances"][0];
-    assert_eq!(instance["core_config_b64"], DEFAULT_CORE_CONFIG_B64);
-    let cfg = parse_instance_config(
-        &decode_config_b64(instance["config_b64"].as_str().unwrap()).unwrap(),
+    let daemon = DiscordDaemon::new(
+        store,
+        [9; 32],
+        Arc::new(FailingGate),
+        Arc::new(FakeFactory {
+            started: Arc::new(AtomicUsize::new(0)),
+            exit: Arc::new(Notify::new()),
+            kills: Arc::new(AtomicUsize::new(0)),
+        }),
     )
     .unwrap();
-    assert!(
-        cfg.access.owner.is_empty(),
-        "legacy config access must not survive"
+    assert!(daemon.reconcile_once().await.is_ok());
+    assert_eq!(
+        daemon
+            .store()
+            .lock()
+            .unwrap()
+            .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap()
+            .lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Error
     );
-    assert_eq!(cfg.access.trusted_users, vec!["cc".repeat(32)]);
+    daemon.shutdown().await;
 }
 
-#[test]
-fn production_placement_fails_loud_without_gateway_access() {
-    use crate::config::AccessConfig;
-    use opencrab_process_supervisor::lifecycle::LifecycleState;
-
+#[tokio::test]
+async fn s5_discord_malformed_readiness_reaps_child_and_persists_retry() {
+    use tokio::io::AsyncWriteExt as _;
     let temp = tempfile::tempdir().unwrap();
-    let runtime_config = {
-        use base64::Engine as _;
-        base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec(&serde_json::json!({
-                "relays": ["wss://example.invalid"],
-                "self_pubkey": "aa".repeat(32),
-                "name": "crab",
-                "access": { "owner": ["bb".repeat(32)] }
-            }))
-            .unwrap(),
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    let generation = store
+        .upsert_desired(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "agent",
+            7,
+            "e30=",
+            &[],
+            "token-secret",
+            None,
+            true,
+            &[9; 32],
         )
-    };
-    let row = InstanceRow {
-        instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-        agent_id: "agent".into(),
-        subject_id: 7,
-        config_b64: runtime_config,
-        addresses: vec!["nostr-a1".into()],
-        credential_envelope: String::new(),
-        subject_grant_envelope: None,
-        enabled: true,
-        desired_generation: 1,
-        applied_generation: Some(1),
-        lifecycle_state: LifecycleState::Ready,
-        core_revision: Some(4),
-        core_digest: Some("digest".into()),
-        core_bindings: vec![],
-        process_id: None,
-        process_nonce: None,
-        failure_count: 0,
-        retry_at_unix_ms: None,
-        access: AccessConfig::default(),
-    };
-    let factory = ProductionFactory {
-        child_binary: "/bin/true".into(),
-        core_socket: "/tmp/opencrab-core.sock".into(),
-        placement_dir: temp.path().into(),
-        nostaro_bin: "/bin/true".into(),
-    };
+        .unwrap();
+    store
+        .mark_provisioning("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation)
+        .unwrap();
+    store
+        .mark_verified(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            generation,
+            1,
+            "digest",
+            &[],
+            true,
+        )
+        .unwrap();
+    let store = Arc::new(Mutex::new(store));
+    let socket = temp.path().join("ready.sock");
+    let listener = prepare_readiness_listener(&socket).unwrap();
+    let supervisors = ProcessSupervisorSet::new(SupervisorConfig::daemon_owned());
+    let factory = Arc::new(FakeFactory {
+        started: Arc::new(AtomicUsize::new(0)),
+        exit: Arc::new(Notify::new()),
+        kills: Arc::new(AtomicUsize::new(0)),
+    });
+    let waiter = tokio::spawn(wait_for_child_readiness(
+        listener,
+        store.clone(),
+        supervisors,
+        factory,
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+        generation,
+        "expected".into(),
+    ));
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    stream.write_all(b"{}").await.unwrap();
+    stream.shutdown().await.unwrap();
+    waiter.await.unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+            .unwrap()
+            .unwrap()
+            .lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Error
+    );
+}
 
-    let result = factory.for_instance(&row, zeroize::Zeroizing::new(b"secret".to_vec()), "nonce");
-    let Err(err) = result else {
-        panic!("placement unexpectedly accepted empty gateway access");
-    };
-    assert!(err.to_string().contains("access"), "{err}");
+#[tokio::test]
+async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control_socket() {
+    let temp = tempfile::tempdir().unwrap();
+    let placement_dir = temp.path().join("placements");
+    std::fs::create_dir_all(&placement_dir).unwrap();
+    let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let placement = placement_dir.join(format!("{instance_id}.json"));
+    let control = placement_dir.join(format!("{instance_id}.control.sock"));
+    std::fs::write(&placement, b"owned").unwrap();
+    std::fs::write(&control, b"owned").unwrap();
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    let generation = store
+        .upsert_desired(
+            instance_id,
+            "agent",
+            7,
+            "e30=",
+            &[],
+            "token",
+            None,
+            false,
+            &[9; 32],
+        )
+        .unwrap();
+    store.mark_provisioning(instance_id, generation).unwrap();
+    store
+        .mark_verified(instance_id, generation, 1, "digest", &[], false)
+        .unwrap();
+    let daemon = DiscordDaemon::new(
+        store,
+        [9; 32],
+        Arc::new(OfflineGate),
+        Arc::new(ProductionFactory {
+            child_binary: "/bin/true".into(),
+            core_socket: temp.path().join("core.sock"),
+            placement_dir,
+            attachment_spool_root: None,
+        }),
+    )
+    .unwrap();
+    daemon.reconcile_once().await.unwrap();
+    assert!(!placement.exists());
+    assert!(!control.exists());
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn s5_discord_disabled_and_nonready_instances_never_spawn() {
+    let (_temp, daemon, started, _) = daemon(false);
+    daemon.reconcile_once().await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(started.load(Ordering::SeqCst), 0);
+    let row = daemon
+        .store()
+        .lock()
+        .unwrap()
+        .get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Disabled
+    );
+    daemon.shutdown().await;
 }
 
 #[test]
-fn s5_nostr_runtime_config_rejects_core_and_legacy_database_paths() {
+fn s5_discord_runtime_config_rejects_core_and_legacy_database_paths() {
     let value = serde_json::json!({
-        "database_path":"/tmp/nostr.db","admin_socket":"/tmp/admin.sock",
+        "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
         "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
-        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place","nostaro_bin":"/bin/true",
+        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place",
         "core_database_path":"/tmp/core.db"
     });
     assert!(serde_json::from_value::<DaemonConfig>(value).is_err());
     let legacy = serde_json::json!({
-        "database_path":"/tmp/nostr.db","admin_socket":"/tmp/admin.sock",
+        "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
         "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
-        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place","nostaro_bin":"/bin/true",
+        "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place",
         "legacy_database_path":"/tmp/core.db"
     });
     assert!(serde_json::from_value::<DaemonConfig>(legacy).is_err());

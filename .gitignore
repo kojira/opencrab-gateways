@@ -1,0 +1,28 @@
+/target
+dashboard/target/
+dashboard/Cargo.lock
+**/*.rs.bk
+# 設定などのローカルバックアップは追跡しない
+*.bak
+*.pdb
+.DS_Store
+data/
+*.db
+*.db-journal
+.env
+# 名前など構造で判定できない識別子のローカル検査一覧（1 行 1 値）
+.private-identifiers
+# node_modules はルート直下・web 配下どちらにも生成されるので depth 非依存で無視する
+node_modules/
+# vitest などのローカルキャッシュ
+.vite/
+web/dist/
+web/test-results/
+web/playwright-report/
+web/blob-report/
+*.tsbuildinfo
+.server.pid
+.web.pid
+.server.log
+.web.log
+.core/

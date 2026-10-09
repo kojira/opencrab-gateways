@@ -1,8 +1,28 @@
 //! WEBGATE §8 固定値を source から機械確認する。
 //! 採取は完了済み。テストは外部ファイルを書かない。採取値は golden にしない。
 
-const CLIENT_STATE_SRC: &str = include_str!("../../../gate-client/src/client/state_api.rs");
-const CLIENT_TRANSPORT_SRC: &str = include_str!("../../../gate-client/src/client/transport.rs");
+/// gate-client は core リポジトリにあり、rev 固定の git 依存で取り込む（Issue #1074）。
+/// 採取元はビルドに使った gate-client の実ソースで、`cargo metadata` で位置を引く。
+fn gate_client_src(relative: &str) -> String {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--offline"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo metadata");
+    assert!(out.status.success(), "cargo metadata failed: {out:?}");
+    let metadata: serde_json::Value = serde_json::from_slice(&out.stdout).expect("metadata json");
+    let manifest = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .find(|package| package["name"] == "opencrab-gate-client")
+        .and_then(|package| package["manifest_path"].as_str())
+        .expect("opencrab-gate-client package");
+    let root = std::path::Path::new(manifest)
+        .parent()
+        .expect("gate-client root");
+    std::fs::read_to_string(root.join(relative)).expect("gate-client source")
+}
 const HTTP_SRC: &str = include_str!("../../src/v3/http.rs");
 
 #[derive(Debug)]
@@ -57,11 +77,15 @@ fn source_revision() -> String {
 }
 
 fn harvest() -> Vec<Harvested> {
+    let client_state_src = gate_client_src("src/client/state_api.rs");
+    let client_transport_src = gate_client_src("src/client/transport.rs");
+    let client_state_src = client_state_src.as_str();
+    let client_transport_src = client_transport_src.as_str();
     vec![
         Harvested {
             symbol: "LIVE_QUEUE_CAP",
             source_path: "crates/gate-client/src/client/state_api.rs",
-            value: take_const_usize(CLIENT_STATE_SRC, "LIVE_QUEUE_CAP").expect("LIVE_QUEUE_CAP"),
+            value: take_const_usize(client_state_src, "LIVE_QUEUE_CAP").expect("LIVE_QUEUE_CAP"),
         },
         Harvested {
             symbol: "SSE event name (http.rs Event::event)",
@@ -71,22 +95,22 @@ fn harvest() -> Vec<Harvested> {
         Harvested {
             symbol: "SAID_TIMEOUT",
             source_path: "crates/gate-client/src/client/state_api.rs",
-            value: take_duration(CLIENT_STATE_SRC, "SAID_TIMEOUT").expect("SAID_TIMEOUT"),
+            value: take_duration(client_state_src, "SAID_TIMEOUT").expect("SAID_TIMEOUT"),
         },
         Harvested {
             symbol: "RECONNECT_MIN",
             source_path: "crates/gate-client/src/client/state_api.rs",
-            value: take_duration(CLIENT_STATE_SRC, "RECONNECT_MIN").expect("RECONNECT_MIN"),
+            value: take_duration(client_state_src, "RECONNECT_MIN").expect("RECONNECT_MIN"),
         },
         Harvested {
             symbol: "RECONNECT_MAX",
             source_path: "crates/gate-client/src/client/state_api.rs",
-            value: take_duration(CLIENT_STATE_SRC, "RECONNECT_MAX").expect("RECONNECT_MAX"),
+            value: take_duration(client_state_src, "RECONNECT_MAX").expect("RECONNECT_MAX"),
         },
         Harvested {
             symbol: "reconnect backoff rule",
             source_path: "crates/gate-client/src/client/transport.rs",
-            value: take_backoff_rule(CLIENT_TRANSPORT_SRC).expect("backoff rule"),
+            value: take_backoff_rule(client_transport_src).expect("backoff rule"),
         },
     ]
 }

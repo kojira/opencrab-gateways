@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+
+      # songbird(voice) は opus、reqwest(native-tls) は OpenSSL、
+      # audiopus_sys のビルドに cmake/pkg-config が要る。rusqlite は bundled。
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libopus-dev libssl-dev lld
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # web-gateway の実プロセス e2e は core の opencrab-server を起動する。
+      # 起動する server は Cargo.lock に固定した core rev からビルドする（試験済みの組み合わせ）。
+      - name: Resolve pinned core rev
+        id: core
+        run: |
+          rev=$(python3 scripts/core-rev.py)
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned core
+        uses: actions/checkout@v4
+        with:
+          repository: kojira/opencrab
+          ref: ${{ steps.core.outputs.rev }}
+          path: .core
+
+      - name: Build pinned opencrab-server
+        run: cargo build --locked -p opencrab-server --bin opencrab-server
+        working-directory: .core
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/core
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        env:
+          OPENCRAB_SERVER_BIN: ${{ github.workspace }}/target/core/debug/opencrab-server
+        run: cargo test --locked --workspace --all-features --no-fail-fast
+
+      - name: Rust source file size (800 lines)
+        run: bash scripts/check-file-size.sh
+
+      - name: No private identifiers
+        run: bash scripts/check-no-private-identifiers.sh
+
+  # DESIGN-SAMPLES-NODE.md §5: sample は workspace build の必須対象ではないが、
+  # merge CI の共通 conformance 行列には必須。既定 SUT は Rust binary。
+  # Node 列は OPENCRAB_CONFORMANCE_SUT で path だけ差し替える（言語名分岐なし）。
+  # Node の exact version は samples/node/.node-version。
+  conformance:
+    name: Conformance (Rust / Node / static audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+
+      # songbird(voice) は opus、reqwest(native-tls) は OpenSSL、
+      # audiopus_sys のビルドに cmake/pkg-config が要る。rusqlite は bundled。
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libopus-dev libssl-dev lld
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: samples/node/.node-version
+
+      - name: samples/node static audit
+        run: bash scripts/check-samples-node.sh
+
+      - name: Conformance (Rust SUT)
+        run: cargo test --locked -p opencrab-web-gateway --test conformance --all-features
+
+      - name: Conformance (Node SUT)
+        env:
+          OPENCRAB_CONFORMANCE_SUT: ${{ github.workspace }}/samples/node/web-gateway/web-gateway.js
+        run: cargo test --locked -p opencrab-web-gateway --test conformance --all-features

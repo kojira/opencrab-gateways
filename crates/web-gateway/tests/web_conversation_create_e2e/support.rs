@@ -107,15 +107,17 @@ impl MockLlm {
 }
 
 fn server_bin() -> PathBuf {
-    let gw = PathBuf::from(env!("CARGO_BIN_EXE_web-gateway"));
-    let server = gw.parent().unwrap().join("opencrab-server");
-    if !server.exists() {
-        let status = Command::new(env!("CARGO"))
-            .args(["build", "-p", "opencrab-server", "--bin", "opencrab-server"])
-            .status()
-            .expect("cargo build opencrab-server");
-        assert!(status.success(), "opencrab-server build failed");
-    }
+    // opencrab-server は core リポジトリでビルドする（Issue #1074）。CI は Cargo.lock に
+    // 固定した core rev を checkout してビルドし、そのパスを渡す。
+    let server = PathBuf::from(
+        std::env::var_os("OPENCRAB_SERVER_BIN")
+            .expect("OPENCRAB_SERVER_BIN must point at opencrab-server built from the pinned core rev"),
+    );
+    assert!(
+        server.exists(),
+        "opencrab-server missing at {}",
+        server.display()
+    );
     server
 }
 

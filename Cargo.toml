@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/process-supervisor",
+    "crates/web-gateway",
+    "crates/nostr-gateway",
+    "crates/discord-gateway",
+    "crates/cli-gateway",
+    "crates/gateway-e2e",
+]
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+
+[workspace.package]
+version = "0.2.17"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+rusqlite = { version = "0.32", features = ["bundled", "vtab", "backup"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+libc = "0.2"
+sha2 = "0.10"
+toml = "0.8"
+tempfile = "3"
+dashmap = "6"
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend", "voice"] }
+
+opencrab-process-supervisor = { path = "crates/process-supervisor" }
+opencrab-web-gateway = { path = "crates/web-gateway" }
+opencrab-nostr-gateway = { path = "crates/nostr-gateway" }
+opencrab-discord-gateway = { path = "crates/discord-gateway" }
+
+# core（kojira/opencrab）。gateway が試験済みの core はこの rev 1 つだけ。
+# 本番では core の commit がこの rev と一致する組み合わせだけを配備する。
+opencrab-gate-client = { git = "https://github.com/kojira/opencrab", rev = "318c893a5f4c3374dc841ca4e90765c014b2d6cc" }
+opencrab-db = { git = "https://github.com/kojira/opencrab", rev = "318c893a5f4c3374dc841ca4e90765c014b2d6cc" }
+opencrab-extgate = { git = "https://github.com/kojira/opencrab", rev = "318c893a5f4c3374dc841ca4e90765c014b2d6cc", default-features = false }
+opencrab-server = { git = "https://github.com/kojira/opencrab", rev = "318c893a5f4c3374dc841ca4e90765c014b2d6cc" }
+opencrab-llm = { git = "https://github.com/kojira/opencrab", rev = "318c893a5f4c3374dc841ca4e90765c014b2d6cc" }
+opencrab-actions = { git = "https://github.com/kojira/opencrab", rev = "318c893a5f4c3374dc841ca4e90765c014b2d6cc" }
+
+[profile.dev]
+debug = 1
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = false

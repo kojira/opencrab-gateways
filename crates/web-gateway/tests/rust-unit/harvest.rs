@@ -3,9 +3,30 @@
 
 /// gate-client は core リポジトリにあり、rev 固定の git 依存で取り込む（Issue #1074）。
 /// 採取元はビルドに使った gate-client の実ソースで、`cargo metadata` で位置を引く。
+fn host_target() -> &'static str {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else {
+        panic!("unsupported host for the harvest report")
+    }
+}
+
 fn gate_client_src(relative: &str) -> String {
     let out = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--offline"])
+        // Resolve only the host platform so metadata needs just the crates the build used.
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--filter-platform",
+            host_target(),
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("cargo metadata");

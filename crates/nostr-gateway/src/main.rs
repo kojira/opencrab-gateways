@@ -103,6 +103,20 @@ async fn run() -> anyhow::Result<()> {
     }
 
     tracing::info!("nostr-gateway running");
-    std::future::pending::<()>().await;
+    wait_for_stop_signal().await?;
+    // Returning drops the runtime and every lane task; their `kill_on_drop` children
+    // (nostaro watch/post) die with this process instead of being orphaned.
+    tracing::info!("nostr-gateway stopping");
+    Ok(())
+}
+
+async fn wait_for_stop_signal() -> anyhow::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let mut int = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
     Ok(())
 }

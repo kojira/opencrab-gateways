@@ -36,3 +36,5 @@ path = "src/main.rs"
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 libc.workspace = true
+base64 = "0.22"
+serde_json.workspace = true

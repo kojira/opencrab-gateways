@@ -80,6 +80,19 @@ async fn voice_operations_without_a_voice_runtime_report_an_error_result() {
         InvokeOutcome::Ok(v) => assert_eq!(v["ok"], false),
         _ => panic!("omitting channel_id must not be rejected as invalid input"),
     }
+    // モデルによっては省略した引数を空文字で送る。空文字は省略と同じに扱う。
+    match h
+        .handle(
+            "c2e",
+            "b",
+            "join_voice",
+            &json!({"channel_id": "", "text_channel_id": ""}),
+        )
+        .await
+    {
+        InvokeOutcome::Ok(v) => assert_eq!(v["ok"], false),
+        _ => panic!("empty-string channel ids must be treated as omitted"),
+    }
     for payload in [json!({"channel_id": "abc"}), json!({"channel_id": 5})] {
         assert!(matches!(
             h.handle("c3", "b", "join_voice", &payload).await,

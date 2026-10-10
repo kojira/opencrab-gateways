@@ -259,12 +259,16 @@ impl InvokeHandler for DiscordInvokeHandler {
             }
             "join_voice" => {
                 let channel = match payload.get("channel_id") {
+                    // 空文字は省略と同じ（モデルが省略引数を "" で送ることがある）。
                     None | Some(Value::Null) => None,
+                    Some(Value::String(id)) if id.is_empty() => None,
                     Some(Value::String(id)) if is_decimal(id) => Some(id.as_str()),
                     Some(_) => return InvokeOutcome::Rejected,
                 };
                 let text_channel = match payload.get("text_channel_id") {
+                    // 空文字は省略と同じ（モデルが省略引数を "" で送ることがある）。
                     None | Some(Value::Null) => None,
+                    Some(Value::String(id)) if id.is_empty() => None,
                     Some(Value::String(id)) if is_decimal(id) => Some(id.as_str()),
                     Some(_) => return InvokeOutcome::Rejected,
                 };

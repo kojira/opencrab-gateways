@@ -72,6 +72,9 @@ pub struct VoiceManager {
     speech: mpsc::UnboundedSender<Speech>,
     /// (guild, 話者) ごとの発話キュー。同じ話者の STT→said は区切った順に 1 本ずつ流す。
     segments: Mutex<HashMap<(u64, u64), SegmentQueue>>,
+    /// binding address ごとの、直近に said が受理された人間の発言者。channel_id を省略した
+    /// join_voice の呼びかけ手（core の invoke は発言者を運ばない）。メモリだけに持つ。
+    speakers: Mutex<HashMap<String, String>>,
 }
 
 impl VoiceManager {
@@ -99,6 +102,7 @@ impl VoiceManager {
             http,
             speech,
             segments: Mutex::new(HashMap::new()),
+            speakers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -110,7 +114,7 @@ impl VoiceManager {
     pub async fn join(
         self: &Arc<Self>,
         binding_id: &str,
-        vc_channel_id: &str,
+        vc_channel_id: Option<&str>,
         text_channel_id: Option<&str>,
     ) -> Result<Value, String> {
         load_settings(&self.config.settings_path).map_err(|e| format!("{e:#}"))?;
@@ -123,7 +127,10 @@ impl VoiceManager {
                 "text channel {text_channel} is not a bound conversation in this guild"
             ));
         }
-        let vc_channel = parse_id(vc_channel_id).ok_or("channel_id must be a channel id")?;
+        let vc_channel = match vc_channel_id {
+            Some(id) => parse_id(id).ok_or("channel_id must be a channel id")?,
+            None => self.caller_vc(guild, &own_channel).await?,
+        };
         self.player
             .join(guild, vc_channel, self.clone())
             .await
@@ -144,6 +151,60 @@ impl VoiceManager {
             "text_channel_id": text_channel,
             "note": "VC の発言は話者ごとに文字起こしされ、このテキストチャンネルの会話として届く。このチャンネルへの発言は読み上げられる。",
         }))
+    }
+
+    /// said として受理された人間の発言者を、その会話（address）の直近の呼びかけ手として覚える。
+    pub fn note_speaker(&self, address: &str, user_id: &str) {
+        self.speakers
+            .lock()
+            .unwrap()
+            .insert(address.to_string(), user_id.to_string());
+    }
+
+    /// この会話で直近に発言した人が、今この guild で入っている VC。見つからなければ理由を返し、
+    /// 別の VC を選ぶことはしない。
+    async fn caller_vc(&self, guild: u64, own_channel: &str) -> Result<u64, String> {
+        let address =
+            crate::map::address_for(&self.config.agent_id, &guild.to_string(), own_channel);
+        let speaker = self
+            .speakers
+            .lock()
+            .unwrap()
+            .get(&address)
+            .cloned()
+            .ok_or(
+                "no recent human speaker in this conversation; pass channel_id to choose the voice channel",
+            )?;
+        let state = match self
+            .transport
+            .get_voice_state(&guild.to_string(), &speaker)
+            .await
+        {
+            TransportOutcome::Ok(state) => state,
+            TransportOutcome::Rejected => {
+                return Err(format!(
+                    "the caller (user {speaker}) is not in a voice channel of this server"
+                ))
+            }
+            TransportOutcome::Indeterminate => {
+                return Err(format!(
+                    "could not look up the voice channel of the caller (user {speaker})"
+                ))
+            }
+        };
+        if let Some(state_guild) = state["guild_id"].as_str() {
+            if state_guild != guild.to_string() {
+                return Err(format!(
+                    "the caller (user {speaker}) is in a voice channel of another server"
+                ));
+            }
+        }
+        state["channel_id"]
+            .as_str()
+            .and_then(parse_id)
+            .ok_or_else(|| {
+                format!("the caller (user {speaker}) is not in a voice channel of this server")
+            })
     }
 
     pub async fn leave(&self, binding_id: &str) -> Result<Value, String> {
@@ -250,6 +311,7 @@ impl VoiceManager {
             .await;
         match outcome {
             Ok(SaidOutcome::Accepted { seq }) => {
+                self.note_speaker(&session.address, &user_id);
                 tracing::info!(address = %session.address, seq, "voice said accepted")
             }
             Ok(other) => {

@@ -15,11 +15,11 @@ use crate::ops::{BindingDeliveryTargets, DiscordInvokeHandler};
 use crate::transport::{DiscordTransport, DryRunTransport};
 use crate::voice::session::{VoiceManager, VoiceManagerConfig, VoicePlayer};
 
-const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+pub(super) const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 #[derive(Default)]
-struct FakePlayer {
-    joined: Mutex<Vec<(u64, u64)>>,
+pub(super) struct FakePlayer {
+    pub(super) joined: Mutex<Vec<(u64, u64)>>,
     left: Mutex<Vec<u64>>,
     played: Mutex<Vec<(u64, Vec<u8>)>>,
 }
@@ -40,15 +40,15 @@ impl VoicePlayer for FakePlayer {
     }
 }
 
-struct Core {
-    reader: OwnedReadHalf,
-    writer: OwnedWriteHalf,
-    client: Arc<InstanceClient>,
-    address: String,
+pub(super) struct Core {
+    pub(super) reader: OwnedReadHalf,
+    pub(super) writer: OwnedWriteHalf,
+    pub(super) client: Arc<InstanceClient>,
+    pub(super) address: String,
     _dir: tempfile::TempDir,
 }
 
-async fn core() -> Core {
+pub(super) async fn core() -> Core {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("core.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -94,6 +94,15 @@ fn manager(
     settings_path: std::path::PathBuf,
     player: Arc<FakePlayer>,
 ) -> Arc<VoiceManager> {
+    manager_with(core, settings_path, player, Arc::new(DryRunTransport))
+}
+
+pub(super) fn manager_with(
+    core: &Core,
+    settings_path: std::path::PathBuf,
+    player: Arc<FakePlayer>,
+    transport: Arc<dyn DiscordTransport>,
+) -> Arc<VoiceManager> {
     let manager = VoiceManager::new(
         VoiceManagerConfig {
             agent_id: "agent".into(),
@@ -106,13 +115,13 @@ fn manager(
             settings_path,
         },
         player,
-        Arc::new(DryRunTransport),
+        transport,
     );
     manager.attach_client(core.client.clone());
     manager
 }
 
-fn loud_pcm() -> Vec<i16> {
+pub(super) fn loud_pcm() -> Vec<i16> {
     (0..96_000)
         .map(|i| if i % 4 < 2 { 3000 } else { -3000 })
         .collect()
@@ -134,7 +143,7 @@ async fn join_requires_settings_and_a_guild_conversation() {
     let dir = tempfile::tempdir().unwrap();
     let player = Arc::new(FakePlayer::default());
     let m = manager(&core, dir.path().join("settings.json"), player.clone());
-    let err = m.join(BINDING, "555", None).await.unwrap_err();
+    let err = m.join(BINDING, Some("555"), None).await.unwrap_err();
     assert!(err.contains("not configured"), "{err}");
     assert!(player.joined.lock().unwrap().is_empty());
     std::fs::write(
@@ -142,11 +151,14 @@ async fn join_requires_settings_and_a_guild_conversation() {
         mock_http::settings_json("http://127.0.0.1:9"),
     )
     .unwrap();
-    let err = m.join("unknown-binding", "555", None).await.unwrap_err();
+    let err = m
+        .join("unknown-binding", Some("555"), None)
+        .await
+        .unwrap_err();
     assert!(err.contains("conversation"), "{err}");
-    let err = m.join(BINDING, "555", Some("77")).await.unwrap_err();
+    let err = m.join(BINDING, Some("555"), Some("77")).await.unwrap_err();
     assert!(err.contains("text channel"), "{err}");
-    let ok = m.join(BINDING, "555", None).await.unwrap();
+    let ok = m.join(BINDING, Some("555"), None).await.unwrap();
     assert_eq!(ok["status"], "joined");
     assert_eq!(*player.joined.lock().unwrap(), vec![(20, 555)]);
     let left = m.leave(BINDING).await.unwrap();
@@ -163,7 +175,7 @@ async fn transcribed_speech_becomes_said_on_the_text_channel() {
     std::fs::write(&path, mock_http::settings_json(&mock)).unwrap();
     let player = Arc::new(FakePlayer::default());
     let m = manager(&core, path, player);
-    m.join(BINDING, "555", None).await.unwrap();
+    m.join(BINDING, Some("555"), None).await.unwrap();
 
     // 自分の声と無音は STT へ送らない。
     m.process_segment(20, 999, loud_pcm()).await;
@@ -219,7 +231,7 @@ async fn posted_say_and_reply_are_spoken_in_order() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(player.played.lock().unwrap().is_empty());
 
-    m.join(BINDING, "555", None).await.unwrap();
+    m.join(BINDING, Some("555"), None).await.unwrap();
     let targets: BindingDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let transport: Arc<dyn DiscordTransport> = Arc::new(DryRunTransport);
@@ -304,7 +316,7 @@ async fn split_speech_of_one_speaker_is_posted_in_order() {
     let path = dir.path().join("settings.json");
     std::fs::write(&path, mock_http::settings_json(&mock)).unwrap();
     let m = manager(&core, path, Arc::new(FakePlayer::default()));
-    m.join(BINDING, "555", None).await.unwrap();
+    m.join(BINDING, Some("555"), None).await.unwrap();
 
     m.enqueue_segment(20, 30, loud_pcm());
     m.enqueue_segment(20, 30, loud_pcm());
@@ -327,7 +339,7 @@ async fn a_slow_speaker_does_not_hold_back_another_speaker() {
     let path = dir.path().join("settings.json");
     std::fs::write(&path, mock_http::settings_json(&mock)).unwrap();
     let m = manager(&core, path, Arc::new(FakePlayer::default()));
-    m.join(BINDING, "555", None).await.unwrap();
+    m.join(BINDING, Some("555"), None).await.unwrap();
 
     m.enqueue_segment(20, 30, loud_pcm());
     tokio::time::sleep(Duration::from_millis(100)).await;

@@ -49,6 +49,9 @@ pub trait DiscordTransport: Send + Sync {
     async fn get_message(&self, channel_id: &str, message_id: &str) -> TransportOutcome;
     /// user の生 JSON 取得（resolve uN・読み取り）。
     async fn get_user(&self, user_id: &str) -> TransportOutcome;
+    /// guild 内の user の現在の voice state（`GET /guilds/{guild}/voice-states/{user}`）。
+    /// VC にいなければ Discord は 404 を返すので Rejected。それ以外の失敗は Indeterminate。
+    async fn get_voice_state(&self, guild_id: &str, user_id: &str) -> TransportOutcome;
     /// typing インジケータを 1 回打つ（設計 §5.4）。Discord の typing は約 10 秒で失効するため、
     /// keepalive が周期的に打ち直す。best-effort——失敗は turn/say/operation を壊さない（呼び側が
     /// 三結果を握りつぶす）。dry-run では kind="typing" として観測できる。
@@ -143,6 +146,10 @@ impl DiscordTransport for DryRunTransport {
     async fn get_user(&self, user_id: &str) -> TransportOutcome {
         TransportOutcome::Ok(json!({"dry_run": true, "kind": "resolve", "user_id": user_id}))
     }
+    async fn get_voice_state(&self, _guild_id: &str, _user_id: &str) -> TransportOutcome {
+        // dry-run は VC の状態を知らない。誰も VC にいない扱いにする。
+        TransportOutcome::Rejected
+    }
     async fn broadcast_typing(&self, channel_id: &str) -> TransportOutcome {
         Self::log("typing", channel_id, "", "", "")
     }
@@ -150,7 +157,7 @@ impl DiscordTransport for DryRunTransport {
 
 // ==================== real serenity transport ====================
 
-use serenity::all::{ChannelId, CreateMessage, MessageId, ReactionType, UserId};
+use serenity::all::{ChannelId, CreateMessage, GuildId, MessageId, ReactionType, UserId};
 use serenity::http::Http;
 use std::sync::Arc;
 
@@ -278,6 +285,34 @@ impl DiscordTransport for SerenityTransport {
         }
     }
 
+    async fn get_voice_state(&self, guild_id: &str, user_id: &str) -> TransportOutcome {
+        let (Some(gid), Some(uid)) = (
+            guild_id.parse::<u64>().ok().filter(|id| *id != 0),
+            user_id.parse::<u64>().ok().filter(|id| *id != 0),
+        ) else {
+            return TransportOutcome::Rejected;
+        };
+        match self
+            .http
+            .get_user_voice_state(GuildId::new(gid), UserId::new(uid))
+            .await
+        {
+            Ok(state) => match serde_json::to_value(&state) {
+                Ok(v) => TransportOutcome::Ok(v),
+                Err(_) => TransportOutcome::Indeterminate,
+            },
+            Err(serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp)))
+                if resp.status_code.as_u16() == 404 =>
+            {
+                TransportOutcome::Rejected
+            }
+            Err(e) => {
+                tracing::warn!(error = %crate::secret::redact_token(&e.to_string()), "voice state lookup failed");
+                TransportOutcome::Indeterminate
+            }
+        }
+    }
+
     async fn broadcast_typing(&self, channel_id: &str) -> TransportOutcome {
         let Some(ch) = channel(channel_id) else {
             return TransportOutcome::Rejected;
@@ -372,6 +407,9 @@ pub(crate) mod testfake {
             TransportOutcome::Rejected
         }
         async fn get_user(&self, _u: &str) -> TransportOutcome {
+            TransportOutcome::Rejected
+        }
+        async fn get_voice_state(&self, _g: &str, _u: &str) -> TransportOutcome {
             TransportOutcome::Rejected
         }
         async fn broadcast_typing(&self, _channel_id: &str) -> TransportOutcome {

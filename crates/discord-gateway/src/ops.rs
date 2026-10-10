@@ -71,9 +71,9 @@ pub fn operation_declarations() -> Value {
     json!([
         decl_for(
             "join_voice",
-            "Discord のボイスチャンネル（VC）に参加する。channel_id に VC の ID。VC の発言は話者ごとに文字起こしされ、text_channel_id（省略時はこの会話のチャンネル）の会話として届く。そのチャンネルへの発言は VC で読み上げられる。結果に joined か失敗理由が返る。",
-            json!({"type": "object", "required": ["channel_id"], "properties": {
-                "channel_id": str_prop("参加する VC のチャンネル ID（数字）"),
+            "Discord のボイスチャンネル（VC）に参加する。通常は channel_id を省略する。省略すると、この会話で直近に発言した人（呼びかけた人）が今入っている VC に参加する。その人が VC にいなければ失敗理由が返る。別の VC を指定したいときだけ channel_id に VC の ID を渡す。VC の発言は話者ごとに文字起こしされ、text_channel_id（省略時はこの会話のチャンネル）の会話として届く。そのチャンネルへの発言は VC で読み上げられる。結果に joined か失敗理由が返る。",
+            json!({"type": "object", "properties": {
+                "channel_id": str_prop("参加する VC のチャンネル ID（数字）。通常は省略し、呼びかけた人が入っている VC に参加する"),
                 "text_channel_id": str_prop("文字起こしを届け、読み上げ元にするテキストチャンネル ID（省略時はこの会話のチャンネル）")
             }}),
             "background",
@@ -258,9 +258,10 @@ impl InvokeHandler for DiscordInvokeHandler {
                 }
             }
             "join_voice" => {
-                let Some(channel) = str_field(payload, "channel_id").filter(|c| is_decimal(c))
-                else {
-                    return InvokeOutcome::Rejected;
+                let channel = match payload.get("channel_id") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(id)) if is_decimal(id) => Some(id.as_str()),
+                    Some(_) => return InvokeOutcome::Rejected,
                 };
                 let text_channel = match payload.get("text_channel_id") {
                     None | Some(Value::Null) => None,

@@ -28,8 +28,12 @@ fn voice_operations_are_declared_for_owner_co_agent_trusted_only() {
         assert_eq!(d["sharing"], "conversation_bound");
         assert!(d["callback_schema"].is_null());
     }
+    // channel_id は任意。省略すると呼びかけた人の VC に入る（通常の使い方）。
     let join = arr.iter().find(|d| d["name"] == "join_voice").unwrap();
-    assert_eq!(join["input_schema"]["required"], json!(["channel_id"]));
+    assert!(join["input_schema"].get("required").is_none(), "{join}");
+    assert!(join["input_schema"]["properties"]["channel_id"].is_object());
+    let description = join["description"].as_str().unwrap();
+    assert!(description.contains("省略"), "{description}");
 }
 
 #[tokio::test]
@@ -71,10 +75,14 @@ async fn voice_operations_without_a_voice_runtime_report_an_error_result() {
         }
         _ => panic!("expected an error result"),
     }
-    // channel_id の欠落・非数字は入力不正。
-    for payload in [json!({}), json!({"channel_id": "abc"})] {
+    // channel_id の省略は正しい入力（呼びかけた人の VC）。非数字は入力不正。
+    match h.handle("c2", "b", "join_voice", &json!({})).await {
+        InvokeOutcome::Ok(v) => assert_eq!(v["ok"], false),
+        _ => panic!("omitting channel_id must not be rejected as invalid input"),
+    }
+    for payload in [json!({"channel_id": "abc"}), json!({"channel_id": 5})] {
         assert!(matches!(
-            h.handle("c2", "b", "join_voice", &payload).await,
+            h.handle("c3", "b", "join_voice", &payload).await,
             InvokeOutcome::Rejected
         ));
     }

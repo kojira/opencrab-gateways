@@ -197,6 +197,7 @@ fn supervise(supervision: Supervision) {
         addresses.clone(),
         attachment_spool,
         serenity_http,
+        voice.clone(),
     );
     tokio::spawn(async move {
         if let Some(fixture) = overrides.fake_events {
@@ -226,6 +227,7 @@ fn supervise(supervision: Supervision) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_on_line(
     client: Arc<InstanceClient>,
     agent_id: String,
@@ -234,6 +236,7 @@ fn build_on_line(
     configured_addresses: Vec<String>,
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
+    voice: Option<Arc<VoiceManager>>,
 ) -> OnLine {
     let model_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     Arc::new(move |line: String| {
@@ -245,6 +248,7 @@ fn build_on_line(
         let attachment_spool = attachment_spool.clone();
         let serenity_http = serenity_http.clone();
         let model_cache = model_cache.clone();
+        let voice = voice.clone();
         tokio::spawn(async move {
             if let Ok(event) = serde_json::from_str::<ModelInteractionEvent>(&line) {
                 if event.event_kind == "model_interaction" {
@@ -270,6 +274,7 @@ fn build_on_line(
                 &access,
                 &line,
                 attachment_spool.as_deref(),
+                voice.as_deref(),
             )
             .await;
         });
@@ -531,13 +536,15 @@ pub(crate) fn caller_for(access: &AccessConfig, author_id: &str) -> SaidCaller {
 }
 
 /// 受信 1 件を said へ。自分の投稿と非 ack channel は core へ送らない（§4.3・§5.1）。
-async fn handle_incoming(
+/// 受理された人間の発言者は VC 参加の呼びかけ手として `voice` に覚えさせる（D-1072）。
+pub(crate) async fn handle_incoming(
     client: &InstanceClient,
     agent_id: &str,
     self_bot_id: &str,
     access: &AccessConfig,
     line: &str,
     attachment_spool: Option<&AttachmentSpool>,
+    voice: Option<&VoiceManager>,
 ) {
     let Some(msg) = parse_event_line(line) else {
         return;
@@ -607,6 +614,9 @@ async fn handle_incoming(
             // 含める直前に付ける。record-only は読まれるまで付けない。実際の付与は consumer が
             // activity read(origin) を受けた時点で行う（#964）。
             tracing::info!(%address, seq, "said accepted");
+            if let (Some(voice), false) = (voice, msg.author.bot) {
+                voice.note_speaker(&address, &mapped.author_id);
+            }
         }
         Ok(SaidOutcome::NotAdmitted) => tracing::info!(%address, "said not admitted"),
         Ok(SaidOutcome::Disconnected) => tracing::info!(%address, "said disconnected"),

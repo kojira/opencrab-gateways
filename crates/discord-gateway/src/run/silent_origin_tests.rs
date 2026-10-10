@@ -51,6 +51,10 @@ impl DiscordTransport for RecordingTransport {
         TransportOutcome::Ok(json!({}))
     }
 
+    async fn get_voice_state(&self, _: &str, _: &str) -> TransportOutcome {
+        TransportOutcome::Rejected
+    }
+
     async fn broadcast_typing(&self, _: &str) -> TransportOutcome {
         TransportOutcome::Ok(json!({}))
     }

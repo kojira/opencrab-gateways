@@ -25,6 +25,7 @@ pub mod secret_store;
 pub mod store;
 pub mod transport;
 pub mod typing;
+pub mod voice;
 
 #[cfg(test)]
 mod model_interaction_contract_tests;

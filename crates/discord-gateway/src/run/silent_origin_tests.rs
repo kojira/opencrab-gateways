@@ -51,6 +51,10 @@ impl DiscordTransport for RecordingTransport {
         TransportOutcome::Ok(json!({}))
     }
 
+    async fn get_voice_state(&self, _: &str, _: &str) -> TransportOutcome {
+        TransportOutcome::Rejected
+    }
+
     async fn broadcast_typing(&self, _: &str) -> TransportOutcome {
         TransportOutcome::Ok(json!({}))
     }
@@ -111,6 +115,7 @@ async fn event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras()
             no_reply: "🤐".into(),
         },
         targets,
+        None,
     );
     let activity_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     for frame in [

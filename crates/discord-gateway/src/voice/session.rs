@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use opencrab_gate_client::client::{InstanceClient, PostRefuse, SaidOutcome};
 use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
@@ -53,6 +53,9 @@ struct ActiveSession {
     address: String,
 }
 
+/// 1 話者分の発話キュー（48kHz ステレオ PCM の区間）。
+type SegmentQueue = mpsc::UnboundedSender<Vec<i16>>;
+
 struct Speech {
     guild: u64,
     text: String,
@@ -67,6 +70,8 @@ pub struct VoiceManager {
     labels: Mutex<HashMap<u64, Option<String>>>,
     http: reqwest::Client,
     speech: mpsc::UnboundedSender<Speech>,
+    /// (guild, 話者) ごとの発話キュー。同じ話者の STT→said は区切った順に 1 本ずつ流す。
+    segments: Mutex<HashMap<(u64, u64), SegmentQueue>>,
 }
 
 impl VoiceManager {
@@ -93,6 +98,7 @@ impl VoiceManager {
             labels: Mutex::new(HashMap::new()),
             http,
             speech,
+            segments: Mutex::new(HashMap::new()),
         })
     }
 
@@ -143,6 +149,10 @@ impl VoiceManager {
     pub async fn leave(&self, binding_id: &str) -> Result<Value, String> {
         let (guild, _) = self.conversation(binding_id).await?;
         let session = self.sessions.lock().unwrap().remove(&guild);
+        self.segments
+            .lock()
+            .unwrap()
+            .retain(|(segment_guild, _), _| *segment_guild != guild);
         self.player
             .leave(guild)
             .await
@@ -153,6 +163,32 @@ impl VoiceManager {
             "status": "left",
             "vc_channel_id": session.map(|s| s.vc_channel.to_string()),
         }))
+    }
+
+    /// 受信側が確定した 1 発話を、その話者のキューへ積む。長い発話は区切られて複数区間になるため、
+    /// 同じ話者の区間は 1 つずつ STT→said にして順序を保つ。別の話者は別キューなので待たせない。
+    pub fn enqueue_segment(self: &Arc<Self>, guild: u64, user: u64, pcm_48k_stereo: Vec<i16>) {
+        let mut segments = self.segments.lock().unwrap();
+        let queue = segments
+            .entry((guild, user))
+            .or_insert_with(|| self.spawn_segment_queue(guild, user));
+        // 消費側が止まっていたら（panic 等）キューを作り直して取りこぼさない。
+        if let Err(mpsc::error::SendError(pcm)) = queue.send(pcm_48k_stereo) {
+            let queue = self.spawn_segment_queue(guild, user);
+            let _ = queue.send(pcm);
+            segments.insert((guild, user), queue);
+        }
+    }
+
+    fn spawn_segment_queue(self: &Arc<Self>, guild: u64, user: u64) -> SegmentQueue {
+        let (queue, pending) = mpsc::unbounded_channel();
+        tokio::spawn(transcribe_serially(
+            pending,
+            Arc::downgrade(self),
+            guild,
+            user,
+        ));
+        queue
     }
 
     /// 確定した 1 発話を STT にかけ、VC に結びついたテキストチャンネルの said にする。
@@ -283,6 +319,20 @@ impl VoiceManager {
 
 fn parse_id(raw: &str) -> Option<u64> {
     raw.parse::<u64>().ok().filter(|id| *id != 0)
+}
+
+async fn transcribe_serially(
+    mut pending: mpsc::UnboundedReceiver<Vec<i16>>,
+    manager: Weak<VoiceManager>,
+    guild: u64,
+    user: u64,
+) {
+    while let Some(pcm) = pending.recv().await {
+        let Some(manager) = manager.upgrade() else {
+            return;
+        };
+        manager.process_segment(guild, user, pcm).await;
+    }
 }
 
 async fn speak_serially(

@@ -269,3 +269,75 @@ async fn posted_say_and_reply_are_spoken_in_order() {
     );
     consumer.abort();
 }
+
+/// core 側で said を `n` 件受け、受けた順に (author_id, text) を返す。各 said には ok を返す。
+async fn receive_saids(core: &mut Core, n: usize) -> Vec<(String, String)> {
+    let mut got = Vec::new();
+    while got.len() < n {
+        let frame: Value =
+            tokio::time::timeout(Duration::from_secs(5), read_frame(&mut core.reader))
+                .await
+                .expect("said did not arrive")
+                .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+                .unwrap();
+        assert_eq!(frame["m"], "said", "{frame}");
+        write_json(
+            &mut core.writer,
+            &json!({"id":frame["id"],"m":"ok","seq":got.len() + 1}),
+        )
+        .await
+        .unwrap();
+        got.push((
+            frame["author_id"].as_str().unwrap().to_string(),
+            frame["text"].as_str().unwrap().to_string(),
+        ));
+    }
+    got
+}
+
+#[tokio::test]
+async fn split_speech_of_one_speaker_is_posted_in_order() {
+    // 1 つ目の区間の STT が 2 つ目より遅くても、同じ話者の発言は区切った順に said になる。
+    let (mock, _) = mock_http::spawn_sequenced(vec![(400, "前半"), (0, "後半")]).await;
+    let mut core = core().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, mock_http::settings_json(&mock)).unwrap();
+    let m = manager(&core, path, Arc::new(FakePlayer::default()));
+    m.join(BINDING, "555", None).await.unwrap();
+
+    m.enqueue_segment(20, 30, loud_pcm());
+    m.enqueue_segment(20, 30, loud_pcm());
+    let saids = receive_saids(&mut core, 2).await;
+    assert_eq!(
+        saids,
+        vec![
+            ("30".to_string(), "（音声）前半".to_string()),
+            ("30".to_string(), "（音声）後半".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_slow_speaker_does_not_hold_back_another_speaker() {
+    // 話者ごとの順序は守るが、話者 30 の STT 待ちで話者 40 の発言を止めない。
+    let (mock, _) = mock_http::spawn_sequenced(vec![(600, "遅い人"), (0, "速い人")]).await;
+    let mut core = core().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, mock_http::settings_json(&mock)).unwrap();
+    let m = manager(&core, path, Arc::new(FakePlayer::default()));
+    m.join(BINDING, "555", None).await.unwrap();
+
+    m.enqueue_segment(20, 30, loud_pcm());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    m.enqueue_segment(20, 40, loud_pcm());
+    let saids = receive_saids(&mut core, 2).await;
+    assert_eq!(
+        saids,
+        vec![
+            ("40".to_string(), "（音声）速い人".to_string()),
+            ("30".to_string(), "（音声）遅い人".to_string()),
+        ]
+    );
+}

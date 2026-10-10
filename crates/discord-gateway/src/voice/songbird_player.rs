@@ -43,24 +43,27 @@ impl VoicePlayer for SongbirdPlayer {
         channel: u64,
         manager: Arc<VoiceManager>,
     ) -> anyhow::Result<()> {
-        let call = self
-            .songbird
-            .join(
-                guild_id(guild)?,
-                ChannelId(NonZeroU64::new(channel).context("channel id 0")?),
-            )
-            .await
-            .context("songbird join (does the bot have Connect permission?)")?;
+        let channel = ChannelId(NonZeroU64::new(channel).context("channel id 0")?);
+        let call = self.songbird.get_or_insert(guild_id(guild)?);
         let receiver = Receiver {
             guild,
             manager,
             segments: Arc::new(Mutex::new(SsrcSegments::default())),
         };
-        let mut call = call.lock().await;
-        call.remove_all_global_events();
-        call.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
-        call.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());
-        call.add_global_event(CoreEvent::ClientDisconnect.into(), receiver);
+        // 受信ハンドラは接続前に張る。接続完了後に張ると、その間の発話（VoiceTick）を取りこぼす。
+        // 再 join（VC 移動・注入先変更）では同じ Call が再利用されるので、古いハンドラは外して張り替える。
+        let connecting = {
+            let mut call = call.lock().await;
+            call.remove_all_global_events();
+            call.add_global_event(CoreEvent::SpeakingStateUpdate.into(), receiver.clone());
+            call.add_global_event(CoreEvent::VoiceTick.into(), receiver.clone());
+            call.add_global_event(CoreEvent::ClientDisconnect.into(), receiver);
+            call.join(channel).await
+        };
+        connecting
+            .context("songbird join (does the bot have Connect permission?)")?
+            .await
+            .context("songbird join (does the bot have Connect permission?)")?;
         Ok(())
     }
 
@@ -106,9 +109,7 @@ impl Receiver {
 
     fn dispatch(&self, finished: Vec<FinishedSpeech>) {
         for (user, pcm) in finished {
-            let manager = self.manager.clone();
-            let guild = self.guild;
-            tokio::spawn(async move { manager.process_segment(guild, user, pcm).await });
+            self.manager.enqueue_segment(self.guild, user, pcm);
         }
     }
 }

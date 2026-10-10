@@ -15,16 +15,28 @@ pub struct Recorded {
 pub const WAV_FROM_TTS: &[u8] = b"RIFF-fake-wav-from-voicevox";
 
 pub async fn spawn(stt_text: &'static str) -> (String, Arc<Recorded>) {
+    spawn_sequenced(vec![(0, stt_text)]).await
+}
+
+/// STT が受けた n 番目の要求に `replies[n]`（遅延 ms と本文）で答える。尽きたら最後を繰り返す。
+pub async fn spawn_sequenced(replies: Vec<(u64, &'static str)>) -> (String, Arc<Recorded>) {
     let recorded = Arc::new(Recorded::default());
     let app = Router::new()
         .route(
             "/v1/audio/transcriptions",
-            post(
-                move |State(r): State<Arc<Recorded>>, body: Bytes| async move {
-                    r.stt_bodies.lock().unwrap().push(body.to_vec());
-                    axum::Json(serde_json::json!({ "text": stt_text }))
-                },
-            ),
+            post(move |State(r): State<Arc<Recorded>>, body: Bytes| {
+                let replies = replies.clone();
+                async move {
+                    let n = {
+                        let mut bodies = r.stt_bodies.lock().unwrap();
+                        bodies.push(body.to_vec());
+                        bodies.len() - 1
+                    };
+                    let (delay_ms, text) = replies[n.min(replies.len() - 1)];
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    axum::Json(serde_json::json!({ "text": text }))
+                }
+            }),
         )
         .route(
             "/audio_query",

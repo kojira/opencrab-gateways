@@ -18,6 +18,7 @@ use opencrab_gate_client::{InvokeHandler, InvokeOutcome};
 
 use crate::map::parse_origin;
 use crate::transport::{DiscordTransport, TransportOutcome};
+use crate::voice::session::VoiceManager;
 
 /// #915: 1 binding 内の発話 id → Discord 投稿先。発話 id は既存の say delivery_id /
 /// reply call_id をそのまま使う。
@@ -42,25 +43,51 @@ pub fn operation_declarations() -> Value {
     // 投稿・操作系は sub-engine へ出さない（not_exposed）。イベント参照は conversation_bound
     // （DI-02 の既存 gateway tool 可視性規則に対応・D17-13 で legacy `discord_add_reaction` の
     // Blocked+ConversationBound と同等以上に厳格であることを確認済み）。
+    let all_callers = json!(["co_agent", "guest", "owner", "trusted"]);
+    // VC 参加は他のメンバーに聞こえる行為なので guest には許さない（D-1072）。
+    let voice_callers = json!(["co_agent", "owner", "trusted"]);
+    let decl_for =
+        |name: &str, desc: &str, input: Value, dispatch: &str, effect: &str, callers: &Value| {
+            json!({
+                "name": name,
+                "description": desc,
+                "input_schema": input,
+                "output_schema": null,
+                "callback_schema": null,
+                "authorization": {"allowed_callers": callers},
+                "dispatch": dispatch,
+                "sub_engine": "not_exposed",
+                "sharing": "conversation_bound",
+                "effect": effect,
+            })
+        };
     let decl = |name: &str, desc: &str, input: Value, dispatch: &str, effect: &str| {
-        json!({
-            "name": name,
-            "description": desc,
-            "input_schema": input,
-            "output_schema": null,
-            "callback_schema": null,
-            "authorization": {"allowed_callers": ["co_agent", "guest", "owner", "trusted"]},
-            "dispatch": dispatch,
-            "sub_engine": "not_exposed",
-            "sharing": "conversation_bound",
-            "effect": effect,
-        })
+        decl_for(name, desc, input, dispatch, effect, &all_callers)
     };
     let str_prop = |desc: &str| json!({"type": "string", "description": desc});
     // 短縮参照フィールド（uN/eN）。core はこの標示 field だけを実 ID へ解決する。
     let ref_prop =
         |desc: &str| json!({"type": "string", "description": desc, "format": "short-ref"});
     json!([
+        decl_for(
+            "join_voice",
+            "Discord のボイスチャンネル（VC）に参加する。channel_id に VC の ID。VC の発言は話者ごとに文字起こしされ、text_channel_id（省略時はこの会話のチャンネル）の会話として届く。そのチャンネルへの発言は VC で読み上げられる。結果に joined か失敗理由が返る。",
+            json!({"type": "object", "required": ["channel_id"], "properties": {
+                "channel_id": str_prop("参加する VC のチャンネル ID（数字）"),
+                "text_channel_id": str_prop("文字起こしを届け、読み上げ元にするテキストチャンネル ID（省略時はこの会話のチャンネル）")
+            }}),
+            "background",
+            "state_change",
+            &voice_callers,
+        ),
+        decl_for(
+            "leave_voice",
+            "この会話のサーバーで参加中の Discord ボイスチャンネル（VC）から退出する。",
+            json!({"type": "object", "properties": {}}),
+            "background",
+            "state_change",
+            &voice_callers,
+        ),
         decl(
             "reaction",
             "会話の e番号のメッセージに絵文字リアクションを付ける。event に e番号、emoji に絵文字。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数のリアクションは1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N reactions, put N reaction calls in THIS response.",
@@ -97,21 +124,24 @@ pub fn operation_declarations() -> Value {
 pub struct DiscordInvokeHandler {
     transport: Arc<dyn DiscordTransport>,
     targets: BindingDeliveryTargets,
+    voice: Option<Arc<VoiceManager>>,
 }
 
 impl DiscordInvokeHandler {
     pub fn new(transport: Arc<dyn DiscordTransport>) -> Self {
-        Self {
-            transport,
-            targets: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self::with_voice(transport, Arc::new(Mutex::new(HashMap::new())), None)
     }
 
-    pub(crate) fn with_targets(
+    pub(crate) fn with_voice(
         transport: Arc<dyn DiscordTransport>,
         targets: BindingDeliveryTargets,
+        voice: Option<Arc<VoiceManager>>,
     ) -> Self {
-        Self { transport, targets }
+        Self {
+            transport,
+            targets,
+            voice,
+        }
     }
 }
 
@@ -121,6 +151,11 @@ fn str_field<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
 
 fn is_decimal(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// join/leave の結果。失敗理由はモデルへ返す（`operation_rejected` だけでは直せないため）。
+fn voice_outcome(result: Result<Value, String>) -> InvokeOutcome {
+    InvokeOutcome::Ok(result.unwrap_or_else(|error| json!({"ok": false, "error": error})))
 }
 
 fn to_invoke_outcome(out: TransportOutcome) -> InvokeOutcome {
@@ -183,6 +218,9 @@ impl InvokeHandler for DiscordInvokeHandler {
                     return InvokeOutcome::Rejected;
                 };
                 let outcome = deliver_reply(&self.transport, &ch, &msg, text).await;
+                if let (TransportOutcome::Ok(_), Some(voice)) = (&outcome, &self.voice) {
+                    voice.speak_posted(&ch, text);
+                }
                 if let TransportOutcome::Ok(result) = &outcome {
                     if let Some(message_id) = result.get("message_id").and_then(Value::as_str) {
                         targets_for(&self.targets, binding_id)
@@ -219,6 +257,27 @@ impl InvokeHandler for DiscordInvokeHandler {
                     InvokeOutcome::Rejected
                 }
             }
+            "join_voice" => {
+                let Some(channel) = str_field(payload, "channel_id").filter(|c| is_decimal(c))
+                else {
+                    return InvokeOutcome::Rejected;
+                };
+                let text_channel = match payload.get("text_channel_id") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(id)) if is_decimal(id) => Some(id.as_str()),
+                    Some(_) => return InvokeOutcome::Rejected,
+                };
+                let Some(voice) = &self.voice else {
+                    return voice_outcome(Err("voice is not available in this gateway".into()));
+                };
+                voice_outcome(voice.join(binding_id, channel, text_channel).await)
+            }
+            "leave_voice" => {
+                let Some(voice) = &self.voice else {
+                    return voice_outcome(Err("voice is not available in this gateway".into()));
+                };
+                voice_outcome(voice.leave(binding_id).await)
+            }
             // 宣言外は正常な core からは来ない。fail-closed（§5.1）。
             _ => InvokeOutcome::Rejected,
         }
@@ -235,15 +294,18 @@ mod tests {
     }
 
     #[test]
-    fn declarations_are_sorted_and_three_callback_free() {
+    fn declarations_are_sorted_and_callback_free() {
         let decls = operation_declarations();
         let arr = decls.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 5);
         let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "name UTF-8 昇順（DESIGN-DI §3.1）");
-        assert_eq!(names, vec!["reaction", "reply", "resolve"]);
+        assert_eq!(
+            names,
+            vec!["join_voice", "leave_voice", "reaction", "reply", "resolve"]
+        );
         for d in arr {
             assert!(d["callback_schema"].is_null(), "フェーズ1は callback なし");
             assert_eq!(d["sub_engine"], "not_exposed");
@@ -375,7 +437,8 @@ mod tests {
     #[tokio::test]
     async fn only_successful_reply_registers_completed_target() {
         let targets: BindingDeliveryTargets = Arc::new(Mutex::new(HashMap::new()));
-        let h = DiscordInvokeHandler::with_targets(Arc::new(DryRunTransport), Arc::clone(&targets));
+        let h =
+            DiscordInvokeHandler::with_voice(Arc::new(DryRunTransport), Arc::clone(&targets), None);
         assert!(matches!(
             h.handle(
                 "reply-call",

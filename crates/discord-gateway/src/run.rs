@@ -34,6 +34,8 @@ use crate::ops::{
 use crate::post::{deliver_say, SayDelivery};
 use crate::receive::{run_fake_events_once, run_serenity_receive, OnLine};
 use crate::transport::{DiscordTransport, DryRunTransport, SerenityTransport, TransportOutcome};
+use crate::voice::session::{VoiceManager, VoiceManagerConfig};
+use crate::voice::songbird_player::{songbird_config, SongbirdPlayer};
 
 const RETRY: Duration = Duration::from_millis(200);
 
@@ -45,6 +47,28 @@ pub fn spawn_instance(
     token: Option<Arc<String>>,
     overrides: HarnessOverrides,
     attachment_spool_root: Option<PathBuf>,
+) -> anyhow::Result<Arc<InstanceClient>> {
+    spawn_instance_with_voice(
+        socket,
+        place,
+        config_bytes,
+        token,
+        overrides,
+        attachment_spool_root,
+        None,
+    )
+}
+
+/// [`spawn_instance`] に VC（D-1072）を加える。`voice_settings` は VC 設定ファイルの位置で、
+/// production（serenity 接続あり）のときだけ songbird を登録する。
+pub fn spawn_instance_with_voice(
+    socket: PathBuf,
+    place: &InstancePlacement,
+    config_bytes: &[u8],
+    token: Option<Arc<String>>,
+    overrides: HarnessOverrides,
+    attachment_spool_root: Option<PathBuf>,
+    voice_settings: Option<PathBuf>,
 ) -> anyhow::Result<Arc<InstanceClient>> {
     if overrides.is_active() {
         tracing::warn!(
@@ -71,11 +95,29 @@ pub fn spawn_instance(
             (serenity, Some(http))
         };
 
+    let songbird = (serenity_http.is_some() && overrides.fake_events.is_none())
+        .then(|| songbird::Songbird::serenity_from_config(songbird_config()));
+    let voice = voice_settings
+        .zip(songbird.clone())
+        .map(|(settings_path, songbird)| {
+            VoiceManager::new(
+                VoiceManagerConfig {
+                    agent_id: cfg.agent_id.clone(),
+                    self_bot_id: cfg.self_bot_id.clone(),
+                    access: cfg.access.clone(),
+                    addresses: place.addresses.clone(),
+                    settings_path,
+                },
+                Arc::new(SongbirdPlayer::new(songbird)),
+                transport.clone(),
+            )
+        });
     let delivery_targets: BindingDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let invoke_handler: Arc<dyn InvokeHandler> = Arc::new(DiscordInvokeHandler::with_targets(
+    let invoke_handler: Arc<dyn InvokeHandler> = Arc::new(DiscordInvokeHandler::with_voice(
         transport.clone(),
         Arc::clone(&delivery_targets),
+        voice.clone(),
     ));
 
     let client = InstanceClient::spawn_with_operations(
@@ -91,6 +133,9 @@ pub fn spawn_instance(
         },
         invoke_handler,
     );
+    if let Some(voice) = &voice {
+        voice.attach_client(client.clone());
+    }
 
     let attachment_spool = attachment_spool_root
         .as_deref()
@@ -107,6 +152,8 @@ pub fn spawn_instance(
         delivery_targets,
         attachment_spool,
         serenity_http,
+        songbird: voice.as_ref().and(songbird),
+        voice,
     });
     Ok(client)
 }
@@ -121,6 +168,8 @@ struct Supervision {
     delivery_targets: BindingDeliveryTargets,
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
+    songbird: Option<Arc<songbird::Songbird>>,
+    voice: Option<Arc<VoiceManager>>,
 }
 
 fn supervise(supervision: Supervision) {
@@ -134,6 +183,8 @@ fn supervise(supervision: Supervision) {
         delivery_targets,
         attachment_spool,
         serenity_http,
+        songbird,
+        voice,
     } = supervision;
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
     // 👀 は受信時ではなく say consumer 側（activity started）で付けるので、受信は transport/
@@ -153,7 +204,7 @@ fn supervise(supervision: Supervision) {
                 tracing::error!(error = %e, "fake events failed");
             }
         } else if let Some(token) = token {
-            if let Err(e) = run_serenity_receive(&token, on_line).await {
+            if let Err(e) = run_serenity_receive(&token, on_line, songbird).await {
                 tracing::error!(error = %e, "serenity receive ended");
             }
         } else {
@@ -170,6 +221,7 @@ fn supervise(supervision: Supervision) {
             cfg.agent_id.clone(),
             cfg.system_reactions.clone(),
             Arc::clone(&delivery_targets),
+            voice.clone(),
         );
     }
 }
@@ -464,7 +516,7 @@ async fn react_system_on(
     }
 }
 
-fn caller_for(access: &AccessConfig, author_id: &str) -> SaidCaller {
+pub(crate) fn caller_for(access: &AccessConfig, author_id: &str) -> SaidCaller {
     if access.owners.iter().any(|id| id == author_id) {
         SaidCaller::Owner
     } else if let Some(agent_id) = access.co_agents.get(author_id) {
@@ -573,13 +625,14 @@ async fn handle_incoming(
     }
 }
 
-fn spawn_say_consumer(
+pub(crate) fn spawn_say_consumer(
     client: Arc<InstanceClient>,
     address: String,
     transport: Arc<dyn DiscordTransport>,
     agent_id: String,
     reactions: SystemReactions,
     delivery_targets: BindingDeliveryTargets,
+    voice: Option<Arc<VoiceManager>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // address → channel snowflake（say はこの channel への通常投稿）。
@@ -609,6 +662,9 @@ fn spawn_say_consumer(
                     match deliver_say(&transport, channel, &text).await {
                         SayDelivery::Posted { message_id } => {
                             tracing::info!(%address, "say posted");
+                            if let Some(voice) = &voice {
+                                voice.speak_posted(channel, &text);
+                            }
                             if let Some(own) = &message_id {
                                 if let Some(binding_id) = client.binding_for_address(&address).await
                                 {

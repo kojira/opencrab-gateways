@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Discord VC 設定</title>
+<style>
+body { font-family: sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; }
+fieldset { margin-bottom: 1em; }
+label { display: block; margin: .5em 0; }
+input, select { width: 100%; box-sizing: border-box; padding: .3em; }
+#status { white-space: pre-wrap; margin-top: 1em; }
+table { width: 100%; }
+</style>
+</head>
+<body>
+<h1>Discord VC 設定</h1>
+<p>保存すると次の参加・発話・読み上げから反映されます。gateway の再起動は不要です。</p>
+<form id="form">
+<fieldset>
+<legend>音声認識（STT）</legend>
+<label>エンドポイント（/v1 まで）<input name="stt_base_url" required></label>
+<label>モデル名<input name="stt_model" required></label>
+<label>言語（空欄なら送らない）<input name="stt_language"></label>
+</fieldset>
+<fieldset>
+<legend>読み上げ（VOICEVOX）</legend>
+<label>エンドポイント<input name="tts_base_url" required></label>
+<label>既定の話者<select name="tts_default_voice"></select></label>
+<p>エージェントごとの話者（agent ID ごと。空欄の行は保存しません）</p>
+<table id="agents"></table>
+<button type="button" id="add-agent">行を追加</button>
+</fieldset>
+<button type="submit">保存</button>
+<button type="button" id="reload-speakers">話者一覧を読み込む</button>
+<button type="button" id="test-tts">読み上げをテスト</button>
+<button type="button" id="test-stt">音声認識をテスト</button>
+</form>
+<div id="status"></div>
+<script>
+const api = "api/voice-settings";
+const form = document.getElementById("form");
+const status = document.getElementById("status");
+let speakers = [];
+
+function say(text) { status.textContent = text; }
+
+function speakerOptions(select, value) {
+  select.innerHTML = "";
+  const known = new Set();
+  for (const sp of speakers) {
+    for (const st of sp.styles) {
+      const opt = document.createElement("option");
+      opt.value = String(st.id);
+      opt.textContent = `${sp.name}（${st.name}）: ${st.id}`;
+      select.appendChild(opt);
+      known.add(String(st.id));
+    }
+  }
+  if (value && !known.has(value)) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = value;
+    select.appendChild(opt);
+  }
+  select.value = value || "";
+}
+
+function addAgentRow(agent, voice) {
+  const tr = document.createElement("tr");
+  const td1 = document.createElement("td");
+  const input = document.createElement("input");
+  input.className = "agent-id";
+  input.value = agent || "";
+  td1.appendChild(input);
+  const td2 = document.createElement("td");
+  const select = document.createElement("select");
+  select.className = "agent-voice";
+  speakerOptions(select, voice);
+  td2.appendChild(select);
+  tr.append(td1, td2);
+  document.getElementById("agents").appendChild(tr);
+}
+
+function currentAgentRows() {
+  return [...document.querySelectorAll("#agents tr")].map(tr => [
+    tr.querySelector(".agent-id").value.trim(),
+    tr.querySelector(".agent-voice").value,
+  ]);
+}
+
+function fill(s) {
+  form.stt_base_url.value = s.stt.base_url;
+  form.stt_model.value = s.stt.model;
+  form.stt_language.value = s.stt.language || "";
+  form.tts_base_url.value = s.tts.base_url;
+  speakerOptions(form.tts_default_voice, s.tts.default_voice);
+  document.getElementById("agents").innerHTML = "";
+  for (const [agent, voice] of Object.entries(s.tts.agent_voices || {})) addAgentRow(agent, voice);
+}
+
+function collect() {
+  const agentVoices = {};
+  for (const [agent, voice] of currentAgentRows()) if (agent) agentVoices[agent] = voice;
+  const stt = { base_url: form.stt_base_url.value.trim(), model: form.stt_model.value.trim() };
+  if (form.stt_language.value.trim()) stt.language = form.stt_language.value.trim();
+  return {
+    stt,
+    tts: {
+      provider: "voicevox",
+      base_url: form.tts_base_url.value.trim(),
+      default_voice: form.tts_default_voice.value,
+      agent_voices: agentVoices,
+    },
+  };
+}
+
+async function errorText(res) {
+  try { return (await res.json()).error || res.statusText; } catch { return res.statusText; }
+}
+
+async function loadSpeakers() {
+  const res = await fetch(`${api}/speakers`);
+  if (!res.ok) { say(`話者一覧を読み込めません: ${await errorText(res)}`); return; }
+  speakers = await res.json();
+  const keepDefault = form.tts_default_voice.value;
+  const rows = currentAgentRows();
+  speakerOptions(form.tts_default_voice, keepDefault);
+  document.getElementById("agents").innerHTML = "";
+  for (const [agent, voice] of rows) addAgentRow(agent, voice);
+  say("話者一覧を読み込みました。");
+}
+
+async function load() {
+  const res = await fetch(api);
+  if (res.status === 404) {
+    say("まだ設定されていません。入力して保存してください。");
+    speakerOptions(form.tts_default_voice, "");
+    return;
+  }
+  if (!res.ok) { say(`読み込めません: ${await errorText(res)}`); return; }
+  fill(await res.json());
+  await loadSpeakers();
+}
+
+form.addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const res = await fetch(api, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(collect()),
+  });
+  say(res.ok ? "保存しました。" : `保存できません: ${await errorText(res)}`);
+});
+
+document.getElementById("add-agent").onclick = () => addAgentRow("", form.tts_default_voice.value);
+document.getElementById("reload-speakers").onclick = loadSpeakers;
+
+document.getElementById("test-tts").onclick = async () => {
+  say("合成しています…");
+  const res = await fetch(`${api}/test-tts`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "読み上げのテストです。", voice: form.tts_default_voice.value }),
+  });
+  if (!res.ok) { say(`読み上げできません: ${await errorText(res)}`); return; }
+  new Audio(URL.createObjectURL(await res.blob())).play();
+  say("保存済みの設定で読み上げました。");
+};
+
+document.getElementById("test-stt").onclick = async () => {
+  say("音声認識しています…");
+  const res = await fetch(`${api}/test-stt`, { method: "POST" });
+  if (!res.ok) { say(`音声認識できません: ${await errorText(res)}`); return; }
+  const body = await res.json();
+  say(`読み上げた文: ${body.expected}\n認識した文: ${body.text}`);
+};
+
+load();
+</script>
+</body>
+</html>

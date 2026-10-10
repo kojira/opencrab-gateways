@@ -79,7 +79,12 @@ pub fn parse_origin(origin: &str) -> Option<(String, String)> {
 /// `discord:voice:v1:{text_channel}:{guild}:{user}:{nanos}`（D-1072）。
 /// Discord 上に対応する message が無いので、reply / reaction / resolve の対象にならない
 /// （[`parse_origin`] は None を返す）。
-pub fn voice_origin_for(text_channel_id: &str, guild_id: &str, user_id: &str, nanos: u128) -> String {
+pub fn voice_origin_for(
+    text_channel_id: &str,
+    guild_id: &str,
+    user_id: &str,
+    nanos: u128,
+) -> String {
     format!("discord:voice:v1:{text_channel_id}:{guild_id}:{user_id}:{nanos}")
 }
 

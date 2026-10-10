@@ -1,4 +1,4 @@
-use super::super::tts_text::{clean_for_tts, MAX_TTS_CHARS};
+use super::super::tts_text::{clean_for_tts, split_sentences, MAX_TTS_CHARS};
 
 #[test]
 fn strips_code_blocks_and_replaces_urls() {
@@ -39,4 +39,43 @@ fn plain_text_passes_through() {
 #[test]
 fn only_code_or_markup_becomes_empty_or_placeholder() {
     assert_eq!(clean_for_tts("**__~~||"), "");
+}
+
+#[test]
+fn split_sentences_keeps_each_terminator_with_its_sentence() {
+    assert_eq!(
+        split_sentences("こんにちは。元気です！本当?はい!"),
+        vec!["こんにちは。", "元気です！", "本当?", "はい!"]
+    );
+}
+
+#[test]
+fn split_sentences_keeps_consecutive_terminators_together() {
+    assert_eq!(
+        split_sentences("えっ！？まさか。。そう?!"),
+        vec!["えっ！？", "まさか。。", "そう?!"]
+    );
+}
+
+#[test]
+fn split_sentences_splits_at_newlines_and_trims() {
+    assert_eq!(
+        split_sentences("一行目\n二行目。 三行目\n\n"),
+        vec!["一行目", "二行目。", "三行目"]
+    );
+}
+
+#[test]
+fn split_sentences_keeps_trailing_text_without_terminator() {
+    assert_eq!(
+        split_sentences("終わった。まだ続く"),
+        vec!["終わった。", "まだ続く"]
+    );
+}
+
+#[test]
+fn split_sentences_drops_empty_and_whitespace_only_segments() {
+    assert!(split_sentences("").is_empty());
+    assert_eq!(split_sentences("  \n 。"), vec!["。"]);
+    assert!(split_sentences(" \n \t ").is_empty());
 }

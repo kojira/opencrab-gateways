@@ -66,3 +66,34 @@ pub fn clean_for_tts(text: &str) -> String {
         trimmed
     }
 }
+
+/// 読み上げ本文を文単位に分ける。「。！？!?」と改行で区切り、終止記号は直前の文に付ける
+/// （「！？」のような連続も 1 つの文末として残す）。空白だけの区間は捨てる。
+/// 文ごとに合成・再生すると、長文でも最初の文の再生を全文の合成完了まで待たずに始められる。
+pub fn split_sentences(text: &str) -> Vec<String> {
+    fn is_terminator(c: char) -> bool {
+        matches!(c, '。' | '！' | '？' | '!' | '?')
+    }
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    let mut flush = |current: &mut String| {
+        let trimmed = current.trim();
+        if !trimmed.is_empty() {
+            sentences.push(trimmed.to_string());
+        }
+        current.clear();
+    };
+    while let Some(c) = chars.next() {
+        if c == '\n' || c == '\r' {
+            flush(&mut current);
+            continue;
+        }
+        current.push(c);
+        if is_terminator(c) && !chars.peek().copied().is_some_and(is_terminator) {
+            flush(&mut current);
+        }
+    }
+    flush(&mut current);
+    sentences
+}

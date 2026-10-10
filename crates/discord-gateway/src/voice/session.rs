@@ -405,15 +405,25 @@ async fn speak_serially(
     http: reqwest::Client,
 ) {
     while let Some(Speech { guild, text }) = queue.recv().await {
-        let result = async {
-            let settings = load_settings(&settings_path)?;
-            let voice = settings.tts.voice_for_agent(&agent_id);
-            let wav = clients::synthesize(&http, &settings.tts, &text, voice).await?;
-            player.play(guild, wav).await
-        }
-        .await;
-        if let Err(error) = result {
-            tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
+        let settings = match load_settings(&settings_path) {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
+                continue;
+            }
+        };
+        let voice = settings.tts.voice_for_agent(&agent_id);
+        // 文ごとに合成し、合成できた文から再生キューへ積む（play は songbird へ積むだけ）。
+        // 1 文の失敗は warn にして次の文へ進む。
+        for sentence in tts_text::split_sentences(&text) {
+            let result = async {
+                let wav = clients::synthesize(&http, &settings.tts, &sentence, voice).await?;
+                player.play(guild, wav).await
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
+            }
         }
     }
 }

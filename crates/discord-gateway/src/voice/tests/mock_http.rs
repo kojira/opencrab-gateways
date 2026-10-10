@@ -10,6 +10,8 @@ use axum::Router;
 pub struct Recorded {
     pub stt_bodies: Mutex<Vec<Vec<u8>>>,
     pub tts_queries: Mutex<Vec<(String, String)>>,
+    /// `/synthesis` 要求を受けた時刻（受けた順）。
+    pub synthesis_started: Mutex<Vec<std::time::Instant>>,
 }
 
 pub const WAV_FROM_TTS: &[u8] = b"RIFF-fake-wav-from-voicevox";
@@ -20,6 +22,14 @@ pub async fn spawn(stt_text: &'static str) -> (String, Arc<Recorded>) {
 
 /// STT が受けた n 番目の要求に `replies[n]`（遅延 ms と本文）で答える。尽きたら最後を繰り返す。
 pub async fn spawn_sequenced(replies: Vec<(u64, &'static str)>) -> (String, Arc<Recorded>) {
+    spawn_with_synthesis_delay(replies, 0).await
+}
+
+/// `spawn_sequenced` に加え、`/synthesis` の各要求に `synthesis_delay_ms` だけ遅れて答える。
+pub async fn spawn_with_synthesis_delay(
+    replies: Vec<(u64, &'static str)>,
+    synthesis_delay_ms: u64,
+) -> (String, Arc<Recorded>) {
     let recorded = Arc::new(Recorded::default());
     let app = Router::new()
         .route(
@@ -51,7 +61,17 @@ pub async fn spawn_sequenced(replies: Vec<(u64, &'static str)>) -> (String, Arc<
                 },
             ),
         )
-        .route("/synthesis", post(|| async { WAV_FROM_TTS.to_vec() }))
+        .route(
+            "/synthesis",
+            post(move |State(r): State<Arc<Recorded>>| async move {
+                r.synthesis_started
+                    .lock()
+                    .unwrap()
+                    .push(std::time::Instant::now());
+                tokio::time::sleep(std::time::Duration::from_millis(synthesis_delay_ms)).await;
+                WAV_FROM_TTS.to_vec()
+            }),
+        )
         .route(
             "/speakers",
             get(|| async {

@@ -21,7 +21,8 @@ pub(super) const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 pub(super) struct FakePlayer {
     pub(super) joined: Mutex<Vec<(u64, u64)>>,
     left: Mutex<Vec<u64>>,
-    played: Mutex<Vec<(u64, Vec<u8>)>>,
+    pub(super) played: Mutex<Vec<(u64, Vec<u8>)>>,
+    pub(super) played_at: Mutex<Vec<std::time::Instant>>,
 }
 
 #[async_trait::async_trait]
@@ -36,6 +37,10 @@ impl VoicePlayer for FakePlayer {
     }
     async fn play(&self, guild: u64, wav: Vec<u8>) -> anyhow::Result<()> {
         self.played.lock().unwrap().push((guild, wav));
+        self.played_at
+            .lock()
+            .unwrap()
+            .push(std::time::Instant::now());
         Ok(())
     }
 }
@@ -127,7 +132,7 @@ pub(super) fn loud_pcm() -> Vec<i16> {
         .collect()
 }
 
-async fn wait_played(player: &FakePlayer, n: usize) {
+pub(super) async fn wait_played(player: &FakePlayer, n: usize) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while player.played.lock().unwrap().len() < n {
             tokio::time::sleep(Duration::from_millis(10)).await;

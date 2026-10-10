@@ -37,6 +37,8 @@ sha2 = "0.10"
 toml = "0.8"
 tempfile = "3"
 dashmap = "6"
+# Discord VC（D-1072）。2026 年から VC は DAVE（E2E 暗号）必須のため 0.6 以上。
+songbird = { version = "0.6", default-features = false, features = ["serenity", "driver", "gateway", "receive", "rustls", "tungstenite", "builtin-queue"] }
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend", "voice"] }
 
 opencrab-process-supervisor = { path = "crates/process-supervisor" }

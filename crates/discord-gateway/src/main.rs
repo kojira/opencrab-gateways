@@ -7,8 +7,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use opencrab_discord_gateway::config::{decode_config_b64, Placement};
 use opencrab_discord_gateway::harness::HarnessOverrides;
-use opencrab_discord_gateway::run::spawn_instance;
+use opencrab_discord_gateway::run::spawn_instance_with_voice;
 use opencrab_discord_gateway::secret::take_bot_token;
+use opencrab_discord_gateway::voice::settings::settings_path_for_placement;
 
 fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -30,7 +31,13 @@ async fn run() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let first = args
         .next()
-        .context("usage: discord-gateway daemon <config.json> | instance <placement.json>")?;
+        .context("usage: discord-gateway daemon <config.json> | instance <placement.json> | voice-settings <settings.json> <port>")?;
+    if first == "voice-settings" {
+        let usage = "usage: discord-gateway voice-settings <settings.json> <port>";
+        let path = args.next().map(PathBuf::from).context(usage)?;
+        let port = args.next().context(usage)?.parse::<u16>().context(usage)?;
+        return opencrab_discord_gateway::voice::settings_http::run(path, port).await;
+    }
     if first == "daemon" {
         let path = args
             .next()
@@ -74,13 +81,16 @@ async fn run() -> anyhow::Result<()> {
         .first()
         .context("validated placement has no instance")?;
     let bytes = decode_config_b64(&inst.config_b64)?;
-    let client = spawn_instance(
+    // VC 設定は placement の隣の voice/settings.json（無ければ VC は「未設定」を返す）。
+    let voice_settings = settings_path_for_placement(&path);
+    let client = spawn_instance_with_voice(
         socket,
         inst,
         &bytes,
         token,
         overrides,
         attachment_spool_root,
+        Some(voice_settings),
     )?;
     if let (Some(control), Some(nonce)) = (control, start_nonce) {
         let addresses = inst.addresses.clone();

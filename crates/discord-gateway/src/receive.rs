@@ -157,20 +157,28 @@ impl EventHandler for Forwarder {
 
 /// production の受信ループ。token は env 由来の値のみ（他へ出さない）。切断時は serenity が
 /// 内部で再接続する。返るのは致命的失敗時だけ。
-pub async fn run_serenity_receive(token: &str, on_line: OnLine) -> anyhow::Result<()> {
-    let intents = GatewayIntents::GUILD_MESSAGES
+/// `songbird` があれば VC（D-1072）用に登録し、voice state の intent を足す。
+pub async fn run_serenity_receive(
+    token: &str,
+    on_line: OnLine,
+    songbird: Option<Arc<songbird::Songbird>>,
+) -> anyhow::Result<()> {
+    let mut intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILDS;
-    let mut client = Client::builder(token, intents)
-        .event_handler(Forwarder { on_line })
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "serenity client build failed: {}",
-                crate::secret::redact_token(&e.to_string())
-            )
-        })?;
+    let mut builder = Client::builder(token, intents).event_handler(Forwarder { on_line });
+    if let Some(songbird) = songbird {
+        intents |= GatewayIntents::GUILD_VOICE_STATES;
+        builder =
+            songbird::SerenityInit::register_songbird_with(builder.intents(intents), songbird);
+    }
+    let mut client = builder.await.map_err(|e| {
+        anyhow::anyhow!(
+            "serenity client build failed: {}",
+            crate::secret::redact_token(&e.to_string())
+        )
+    })?;
     client.start().await.map_err(|e| {
         anyhow::anyhow!(
             "serenity gateway ended: {}",

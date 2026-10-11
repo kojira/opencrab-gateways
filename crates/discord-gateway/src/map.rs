@@ -75,6 +75,49 @@ pub fn parse_origin(origin: &str) -> Option<(String, String)> {
     }
 }
 
+/// VC 発話（STT 結果）の版付き anchor。
+/// `discord:voice:v1:{text_channel}:{guild}:{user}:{nanos}`（D-1072）。
+/// Discord 上に対応する message が無いので、reply / reaction / resolve の対象にならない
+/// （[`parse_origin`] は None を返す）。
+pub fn voice_origin_for(
+    text_channel_id: &str,
+    guild_id: &str,
+    user_id: &str,
+    nanos: u128,
+) -> String {
+    format!("discord:voice:v1:{text_channel_id}:{guild_id}:{user_id}:{nanos}")
+}
+
+/// VC 発話 origin の成分。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceOrigin {
+    pub text_channel_id: String,
+    pub guild_id: String,
+    pub user_id: String,
+    pub nanos: String,
+}
+
+/// VC 発話 origin を分解する。message origin・不正形は None。
+pub fn parse_voice_origin(origin: &str) -> Option<VoiceOrigin> {
+    let rest = origin.strip_prefix("discord:voice:v1:")?;
+    let parts: Vec<&str> = rest.split(':').collect();
+    let [text_channel_id, guild_id, user_id, nanos] = parts.as_slice() else {
+        return None;
+    };
+    if ![text_channel_id, guild_id, user_id, nanos]
+        .iter()
+        .all(|part| is_decimal(part))
+    {
+        return None;
+    }
+    Some(VoiceOrigin {
+        text_channel_id: text_channel_id.to_string(),
+        guild_id: guild_id.to_string(),
+        user_id: user_id.to_string(),
+        nanos: nanos.to_string(),
+    })
+}
+
 /// binding address（= session id）を組む: `discord-{agent_id}-{guild_id}-{channel_id}`。
 /// DM は guild 成分が空。agent_id は core `agents.id`。
 pub fn address_for(agent_id: &str, guild_id: &str, channel_id: &str) -> String {
@@ -178,6 +221,27 @@ mod tests {
         assert_eq!(parse_origin(&o), Some(("100".into(), "200".into())));
         assert_eq!(parse_origin("nostr:event:v1:default:aa"), None);
         assert_eq!(parse_origin("discord:message:v1:xx:200"), None);
+    }
+
+    #[test]
+    fn voice_origin_roundtrip_and_is_not_a_message_anchor() {
+        let o = voice_origin_for("10", "20", "30", 40);
+        assert_eq!(o, "discord:voice:v1:10:20:30:40");
+        assert_eq!(
+            parse_voice_origin(&o),
+            Some(VoiceOrigin {
+                text_channel_id: "10".into(),
+                guild_id: "20".into(),
+                user_id: "30".into(),
+                nanos: "40".into(),
+            })
+        );
+        // reply / reaction / resolve が使う message anchor としては解釈されない。
+        assert_eq!(parse_origin(&o), None);
+        assert_eq!(parse_voice_origin("discord:message:v1:10:20"), None);
+        assert_eq!(parse_voice_origin("discord:voice:v1:10:20:30"), None);
+        assert_eq!(parse_voice_origin("discord:voice:v1:10:20:x:40"), None);
+        assert_eq!(parse_voice_origin("discord:voice:v1:10:20:30:40:50"), None);
     }
 
     #[test]

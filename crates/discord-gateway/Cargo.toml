@@ -26,6 +26,11 @@ libc.workspace = true
 opencrab-process-supervisor.workspace = true
 async-trait.workspace = true
 serenity.workspace = true
+songbird.workspace = true
+# songbird の symphonia レジストリに wav/pcm デコーダを有効化する（TTS 再生用）
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm"] }
+dashmap.workspace = true
+axum.workspace = true
 reqwest.workspace = true
 opencrab-gate-client.workspace = true
 

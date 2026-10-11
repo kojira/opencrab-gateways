@@ -24,6 +24,9 @@ pub struct DaemonConfig {
     pub placement_dir: PathBuf,
     #[serde(default)]
     pub attachment_spool_root: Option<PathBuf>,
+    /// Core-owned outbox of workspace files to attach (D-1079), passed to each child placement.
+    #[serde(default)]
+    pub attachment_outbox_root: Option<PathBuf>,
     #[serde(default = "default_reconcile_millis")]
     pub reconcile_millis: u64,
 }
@@ -56,6 +59,12 @@ impl DaemonConfig {
             ("placement_dir", &self.placement_dir),
         ] {
             anyhow::ensure!(path.is_absolute(), "{name} must be absolute");
+        }
+        if let Some(path) = &self.attachment_outbox_root {
+            anyhow::ensure!(
+                path.is_absolute(),
+                "attachment_outbox_root must be absolute"
+            );
         }
         anyhow::ensure!(
             self.reconcile_millis > 0,
@@ -586,6 +595,7 @@ struct ProductionFactory {
     core_socket: PathBuf,
     placement_dir: PathBuf,
     attachment_spool_root: Option<PathBuf>,
+    attachment_outbox_root: Option<PathBuf>,
 }
 
 impl SpawnerFactory for ProductionFactory {
@@ -691,6 +701,7 @@ impl SpawnerFactory for ProductionFactory {
         let value = serde_json::json!({
             "core_socket": self.core_socket,
             "attachment_spool_root": self.attachment_spool_root,
+            "attachment_outbox_root": self.attachment_outbox_root,
             "control_socket": control_socket,
             "start_nonce": start_nonce,
             "instances": [{"instance_id":row.instance_id,"revision":revision,
@@ -736,6 +747,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             core_socket: config.core_socket.clone(),
             placement_dir: config.placement_dir.clone(),
             attachment_spool_root: config.attachment_spool_root.clone(),
+            attachment_outbox_root: config.attachment_outbox_root.clone(),
         }),
     )?;
     let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());

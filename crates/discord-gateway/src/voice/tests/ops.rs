@@ -8,7 +8,7 @@ use crate::transport::DryRunTransport;
 
 #[test]
 fn voice_operations_are_declared_for_owner_co_agent_trusted_only() {
-    let decls = operation_declarations();
+    let decls = operation_declarations(false);
     let arr = decls.as_array().unwrap();
     let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
     assert_eq!(

@@ -14,6 +14,15 @@ pub enum TransportOutcome {
     Indeterminate,
 }
 
+/// reply に添付する 1 ファイル。core の outbox から読み、size と sha256 を検証済みの中身。
+pub struct ReplyFile {
+    /// Discord に表示するファイル名。
+    pub name: String,
+    pub bytes: Vec<u8>,
+    /// 検証済み sha256（小文字 hex）。dry-run のログに中身の代わりに出す。
+    pub sha256: String,
+}
+
 /// dry-run が say/reply/reaction/resolve を残す tracing target。テスト/QC がこの target で拾う。
 pub const DRY_RUN_LOG_TARGET: &str = "opencrab_discordgate::dry_run";
 
@@ -28,6 +37,14 @@ pub trait DiscordTransport: Send + Sync {
         channel_id: &str,
         message_id: &str,
         content: &str,
+    ) -> TransportOutcome;
+    /// ファイル付きの返信（reply DI の `files`）。全ファイルを 1 通の返信に添付する。
+    async fn reply_message_with_files(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+        files: Vec<ReplyFile>,
     ) -> TransportOutcome;
     /// message への reaction（reaction DI）。
     async fn add_reaction(
@@ -120,6 +137,32 @@ impl DiscordTransport for DryRunTransport {
         );
         TransportOutcome::Ok(json!({"dry_run": true, "kind": "reply", "message_id": own_id}))
     }
+    async fn reply_message_with_files(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+        files: Vec<ReplyFile>,
+    ) -> TransportOutcome {
+        // ファイルの中身はログに出さない（名前・サイズ・sha256 だけ）。
+        let own_id = next_dry_run_message_id();
+        let files: Vec<serde_json::Value> = files
+            .iter()
+            .map(|f| json!({"name": f.name, "size": f.bytes.len(), "sha256": f.sha256}))
+            .collect();
+        tracing::info!(
+            target: DRY_RUN_LOG_TARGET,
+            kind = "reply",
+            channel = channel_id,
+            message = message_id,
+            reply_id = %own_id,
+            emoji = "",
+            body = %content,
+            files = %serde_json::Value::Array(files),
+            "DRY_RUN discord op (not sent)"
+        );
+        TransportOutcome::Ok(json!({"dry_run": true, "kind": "reply", "message_id": own_id}))
+    }
     async fn add_reaction(
         &self,
         channel_id: &str,
@@ -157,7 +200,9 @@ impl DiscordTransport for DryRunTransport {
 
 // ==================== real serenity transport ====================
 
-use serenity::all::{ChannelId, CreateMessage, GuildId, MessageId, ReactionType, UserId};
+use serenity::all::{
+    ChannelId, CreateAttachment, CreateMessage, GuildId, MessageId, ReactionType, UserId,
+};
 use serenity::http::Http;
 use std::sync::Arc;
 
@@ -224,6 +269,31 @@ impl DiscordTransport for SerenityTransport {
         let builder = CreateMessage::new()
             .content(content)
             .reference_message((ch, mid));
+        match ch.send_message(&self.http, builder).await {
+            Ok(m) => TransportOutcome::Ok(json!({"message_id": m.id.get().to_string()})),
+            Err(e) => classify_write_err(&e),
+        }
+    }
+
+    async fn reply_message_with_files(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+        files: Vec<ReplyFile>,
+    ) -> TransportOutcome {
+        let (Some(ch), Some(mid)) = (channel(channel_id), message(message_id)) else {
+            return TransportOutcome::Rejected;
+        };
+        // サイズ超過（413）や添付権限なし（403）は classify_write_err で Rejected になる。
+        let builder = CreateMessage::new()
+            .content(content)
+            .reference_message((ch, mid))
+            .add_files(
+                files
+                    .into_iter()
+                    .map(|f| CreateAttachment::bytes(f.bytes, f.name)),
+            );
         match ch.send_message(&self.http, builder).await {
             Ok(m) => TransportOutcome::Ok(json!({"message_id": m.id.get().to_string()})),
             Err(e) => classify_write_err(&e),
@@ -336,8 +406,11 @@ pub(crate) mod testfake {
 
     #[derive(Default)]
     pub(crate) struct RecordingTransport {
-        /// (kind, body) の呼び出し列。kind は "say"（create_message）/ "reply"（reply_message）。
+        /// (kind, body) の呼び出し列。kind は "say"（create_message）/ "reply"（reply_message・
+        /// reply_message_with_files）。
         pub calls: Mutex<Vec<(String, String)>>,
+        /// 呼び出しごとの添付ファイル名（calls と同じ index・添付なしは空）。
+        pub files: Mutex<Vec<Vec<String>>>,
         /// この index（0 始まり）の write を失敗させる。None なら全成功。
         pub fail_at: Option<usize>,
         /// 失敗時に Rejected でなく Indeterminate を返す。
@@ -348,6 +421,16 @@ pub(crate) mod testfake {
 
     impl RecordingTransport {
         fn record_write(&self, kind: &str, body: &str) -> TransportOutcome {
+            self.record_write_with_files(kind, body, Vec::new())
+        }
+
+        fn record_write_with_files(
+            &self,
+            kind: &str,
+            body: &str,
+            files: Vec<String>,
+        ) -> TransportOutcome {
+            self.files.lock().unwrap().push(files);
             let mut c = self.calls.lock().unwrap();
             let idx = c.len();
             c.push((kind.to_string(), body.to_string()));
@@ -379,6 +462,10 @@ pub(crate) mod testfake {
                 .collect()
         }
 
+        pub(crate) fn file_names(&self) -> Vec<Vec<String>> {
+            self.files.lock().unwrap().clone()
+        }
+
         pub(crate) fn typing_count(&self) -> usize {
             self.typing_count.load(Ordering::SeqCst)
         }
@@ -396,6 +483,16 @@ pub(crate) mod testfake {
             content: &str,
         ) -> TransportOutcome {
             self.record_write("reply", content)
+        }
+        async fn reply_message_with_files(
+            &self,
+            _channel_id: &str,
+            _message_id: &str,
+            content: &str,
+            files: Vec<ReplyFile>,
+        ) -> TransportOutcome {
+            let names = files.into_iter().map(|f| f.name).collect();
+            self.record_write_with_files("reply", content, names)
         }
         async fn add_reaction(&self, _c: &str, _m: &str, _e: &str) -> TransportOutcome {
             TransportOutcome::Ok(json!({"reacted": true}))

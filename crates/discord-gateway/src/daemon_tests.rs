@@ -648,6 +648,7 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
             core_socket: temp.path().join("core.sock"),
             placement_dir,
             attachment_spool_root: None,
+            attachment_outbox_root: None,
         }),
     )
     .unwrap();
@@ -693,4 +694,63 @@ fn s5_discord_runtime_config_rejects_core_and_legacy_database_paths() {
         "legacy_database_path":"/tmp/core.db"
     });
     assert!(serde_json::from_value::<DaemonConfig>(legacy).is_err());
+}
+
+#[test]
+fn d1079_production_placement_carries_attachment_outbox_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let placement_dir = temp.path().join("placements");
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: temp.path().join("core.sock"),
+        placement_dir: placement_dir.clone(),
+        attachment_spool_root: Some(temp.path().join("inbox")),
+        attachment_outbox_root: Some(temp.path().join("outbox")),
+    };
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let generation = store
+        .upsert_desired(
+            instance_id,
+            "agent",
+            7,
+            "e30=",
+            &[],
+            "token",
+            None,
+            true,
+            &[9; 32],
+        )
+        .unwrap();
+    store.mark_provisioning(instance_id, generation).unwrap();
+    store
+        .mark_verified(instance_id, generation, 1, "digest", &[], true)
+        .unwrap();
+    let row = store.get(instance_id).unwrap().unwrap();
+    factory
+        .for_instance(&row, zeroize::Zeroizing::new(b"token".to_vec()), "nonce")
+        .unwrap();
+    let written: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(placement_dir.join(format!("{instance_id}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        written["attachment_outbox_root"],
+        serde_json::json!(temp.path().join("outbox"))
+    );
+}
+
+#[test]
+fn d1079_daemon_config_requires_absolute_attachment_outbox_root() {
+    let config = |root: &str| {
+        serde_json::from_value::<DaemonConfig>(serde_json::json!({
+            "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
+            "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
+            "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place",
+            "attachment_outbox_root": root
+        }))
+        .unwrap()
+    };
+    config("/tmp/outbox").validate().unwrap();
+    assert!(config("outbox").validate().is_err());
 }

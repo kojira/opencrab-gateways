@@ -54,20 +54,20 @@ pub fn spawn_instance(
         config_bytes,
         token,
         overrides,
-        attachment_spool_root,
+        (attachment_spool_root, None),
         None,
     )
 }
 
 /// [`spawn_instance`] に VC（D-1072）を加える。`voice_settings` は VC 設定ファイルの位置で、
-/// production（serenity 接続あり）のときだけ songbird を登録する。
+/// production（serenity 接続あり）のときだけ songbird を登録する。outbox は D-1079 の送信添付。
 pub fn spawn_instance_with_voice(
     socket: PathBuf,
     place: &InstancePlacement,
     config_bytes: &[u8],
     token: Option<Arc<String>>,
     overrides: HarnessOverrides,
-    attachment_spool_root: Option<PathBuf>,
+    (attachment_spool_root, attachment_outbox_root): (Option<PathBuf>, Option<PathBuf>),
     voice_settings: Option<PathBuf>,
 ) -> anyhow::Result<Arc<InstanceClient>> {
     if overrides.is_active() {
@@ -114,11 +114,12 @@ pub fn spawn_instance_with_voice(
         });
     let delivery_targets: BindingDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let invoke_handler: Arc<dyn InvokeHandler> = Arc::new(DiscordInvokeHandler::with_voice(
+    let invoke_handler = DiscordInvokeHandler::with_voice(
         transport.clone(),
         Arc::clone(&delivery_targets),
         voice.clone(),
-    ));
+    )
+    .with_outbox_root(attachment_outbox_root.clone());
 
     let client = InstanceClient::spawn_with_operations(
         socket,
@@ -127,11 +128,11 @@ pub fn spawn_instance_with_voice(
         cfg.self_bot_id.clone(),
         digest,
         SayPolicy::AcceptToLiveQueue,
-        Some(operation_declarations()),
+        Some(operation_declarations(attachment_outbox_root.is_some())),
         opencrab_gate_client::RuntimeCapabilities {
             final_delivery: opencrab_gate_client::FinalDelivery::OperationDriven,
         },
-        invoke_handler,
+        Arc::new(invoke_handler) as Arc<dyn InvokeHandler>,
     );
     if let Some(voice) = &voice {
         voice.attach_client(client.clone());

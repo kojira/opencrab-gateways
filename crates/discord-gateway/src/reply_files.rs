@@ -10,10 +10,19 @@ use crate::transport::ReplyFile;
 
 /// Discord が 1 メッセージに付けられる添付の上限。
 pub(crate) const MAX_REPLY_FILES: usize = 10;
+/// 1 ファイルの上限。Discord の上限はサーバーのブーストで変わるので、ここでは巨大ファイルを
+/// メモリへ読み込まないための上限だけを置き、それ以下は Discord の 413（Rejected）に任せる。
+pub(crate) const MAX_REPLY_FILE_BYTES: u64 = 500 * 1024 * 1024;
+
+/// descriptor の申告サイズが全て上限以下か。読み込む前に判定する。
+pub(crate) fn within_size_cap(files: &[OutboundFile]) -> bool {
+    files.iter().all(|file| file.size <= MAX_REPLY_FILE_BYTES)
+}
 
 /// payload の `files` を読み込む。`files` が無い・null なら空。不正な descriptor（旧 core の
-/// 生パスを含む）、読めない写し、size/sha256 の不一致、上限超過、outbox 未設定は `None`
-/// （呼び出し側は送信せず Rejected にする）。
+/// 生パスを含む）、読めない写し、size/sha256 の不一致、個数・サイズの上限超過、outbox 未設定は
+/// `None`（呼び出し側は送信せず Rejected にする）。core は応答した時点で写しを消すので、送信前に
+/// 全ファイルを読み切って検証する。
 pub(crate) async fn load_reply_files(
     payload: &Value,
     outbox_root: Option<&Path>,
@@ -32,6 +41,10 @@ pub(crate) async fn load_reply_files(
     };
     if files.len() > MAX_REPLY_FILES {
         tracing::warn!(count = files.len(), "reply files rejected: too many files");
+        return None;
+    }
+    if !within_size_cap(&files) {
+        tracing::warn!("reply files rejected: a file is larger than the cap");
         return None;
     }
     tokio::task::spawn_blocking(move || read_all(&outbox_root, files))

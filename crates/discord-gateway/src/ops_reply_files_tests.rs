@@ -234,3 +234,42 @@ async fn reply_without_files_is_unchanged() {
     assert_eq!(rec.kinds(), vec!["reply"]);
     assert_eq!(rec.file_names(), vec![Vec::<String>::new()]);
 }
+
+#[tokio::test]
+async fn oversized_descriptor_is_rejected_without_sending() {
+    let outbox = tempfile::tempdir().unwrap();
+    // Over the cap the descriptor is rejected before open_verified. (Reading it would also fail
+    // with a size mismatch; the pre-read cap itself is checked by the within_size_cap test.)
+    let mut a = stage(outbox.path(), "huge.bin", b"small");
+    a["size"] = json!(crate::reply_files::MAX_REPLY_FILE_BYTES + 1);
+    let rec = Arc::new(RecordingTransport::default());
+    let out = handler(&rec, Some(outbox.path()))
+        .handle(
+            "c1",
+            "binding",
+            "reply",
+            &json!({"event": EVENT, "text": "hi", "files": [a]}),
+        )
+        .await;
+    assert_rejected_without_transport(&rec, out).await;
+}
+
+#[test]
+fn size_cap_is_checked_on_descriptors_before_reading() {
+    use crate::reply_files::{within_size_cap, MAX_REPLY_FILE_BYTES};
+    use opencrab_gate_client::OutboundFile;
+    assert_eq!(MAX_REPLY_FILE_BYTES, 500 * 1024 * 1024);
+    let descriptor = |size: u64| {
+        OutboundFile::parse(&json!({
+            "id": "11111111-1111-4111-8111-111111111111", "name": "x.bin",
+            "media_type": null, "size": size, "sha256": sha_hex(b""),
+            "local_path": "inst/11111111-1111-4111-8111-111111111111.bin",
+        }))
+        .unwrap()
+    };
+    assert!(within_size_cap(&[descriptor(MAX_REPLY_FILE_BYTES)]));
+    assert!(!within_size_cap(&[
+        descriptor(1),
+        descriptor(MAX_REPLY_FILE_BYTES + 1)
+    ]));
+}

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct Placement {
     pub core_socket: String,
     pub nostaro_bin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_outbox_root: Option<std::path::PathBuf>,
     pub instances: Vec<InstancePlacement>,
 }
 
@@ -120,6 +122,13 @@ impl Placement {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self
+            .attachment_outbox_root
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute())
+        {
+            anyhow::bail!("attachment_outbox_root must be absolute");
+        }
         if self.core_socket.is_empty() || !self.core_socket.starts_with('/') {
             anyhow::bail!("core_socket must be an absolute path");
         }
@@ -314,6 +323,7 @@ mod tests {
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
             nostaro_bin: "nostaro".into(),
+            attachment_outbox_root: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,

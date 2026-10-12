@@ -36,3 +36,4 @@ opencrab-actions.workspace = true
 opencrab-gate-client.workspace = true
 opencrab-nostr-gateway.workspace = true
 opencrab-discord-gateway.workspace = true
+opencrab-gateway.workspace = true

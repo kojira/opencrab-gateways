@@ -69,6 +69,7 @@ pub fn spawn_instance(
     secret: Option<Arc<String>>,
     nostaro_bin: PathBuf,
     overrides: HarnessOverrides,
+    attachment_outbox_root: Option<PathBuf>,
 ) -> anyhow::Result<Arc<InstanceClient>> {
     if overrides.is_active() {
         tracing::warn!(
@@ -94,14 +95,20 @@ pub fn spawn_instance(
     // DI 能力宣言（§9.2）と invoke handler を hello に載せて接続する。invoke は nostaro CLI 実行へ
     // 写す（reply/reaction/repost/follow/unfollow/kind0/upload/resolve）。秘密鍵は env 注入のみ。
     // Nostr は単一契約: 本文だけなら通常配送し、指定投稿への操作が必要な時だけ tool を使う。
-    let (operations, runtime_capabilities) = runtime_contract();
-    let invoke_handler: Arc<dyn opencrab_gate_client::InvokeHandler> =
-        Arc::new(crate::ops::NostrInvokeHandler::new(
+    let (operations, runtime_capabilities) = runtime_contract(
+        attachment_outbox_root
+            .as_ref()
+            .is_some_and(|p| p.is_absolute()),
+    );
+    let invoke_handler: Arc<dyn opencrab_gate_client::InvokeHandler> = Arc::new(
+        crate::ops::NostrInvokeHandler::new(
             nostaro_bin.clone(),
             post_config.clone(),
             secret.as_ref().map(|s| s.as_str().to_string()),
             overrides.dry_run,
-        ));
+        )
+        .with_attachments(attachment_outbox_root, cfg.self_pubkey.clone()),
+    );
     let client = InstanceClient::spawn_with_operations(
         socket,
         place.instance_id.clone(),
@@ -131,9 +138,9 @@ pub fn spawn_instance(
     Ok(client)
 }
 
-fn runtime_contract() -> (Option<serde_json::Value>, RuntimeCapabilities) {
+fn runtime_contract(files_enabled: bool) -> (Option<serde_json::Value>, RuntimeCapabilities) {
     (
-        Some(crate::ops::operation_declarations()),
+        Some(crate::ops::operation_declarations_with_files(files_enabled)),
         RuntimeCapabilities {
             final_delivery: FinalDelivery::OperationDriven,
         },

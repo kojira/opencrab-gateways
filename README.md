@@ -60,6 +60,16 @@ over 500 MiB, or `files` without a configured outbox is rejected without sending
 files are read and verified before the reply is sent, because the core deletes the outbox copies
 once the gateway answers. Without the key, `reply` does not declare `files`.
 
+## Nostr attachment upload
+
+Nostr attachments use `POST https://share.yabu.me/api/v2/media` with multipart
+`no_transform=true` and NIP-98 authorization over the exact request body. The
+unversioned `/upload` serves a legacy response; Blossom PUT can transform images.
+The NIP-94 original/output hashes and size must match the original file. Before
+publishing its URL, the gateway downloads it once and verifies the original bytes'
+SHA-256 and size. Pending, unavailable, or converted content is indeterminate;
+the gateway does not retry the upload or poll for completion.
+
 ## License
 
 MIT

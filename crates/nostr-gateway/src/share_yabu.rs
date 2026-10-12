@@ -123,7 +123,7 @@ pub(crate) async fn upload(
         .await
         .map_err(|_| UploadError::Uncertain)?;
     match response.status().as_u16() {
-        200 | 201 | 202 => {}
+        200..=202 => {}
         401 | 402 | 403 | 413 | 415 | 429 => return Err(UploadError::Refused),
         _ => return Err(UploadError::Uncertain),
     }

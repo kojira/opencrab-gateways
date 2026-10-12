@@ -36,11 +36,34 @@ GREP_SCOPE=(-- .)
 PRIVATE_IDENTIFIERS=.private-identifiers
 fail=0
 
+# These two public crates.io archive SHA-256 hashes were independently verified.
+# Exempt only their exact Cargo.lock package/version/source/checksum occurrences
+# from snowflake detection, never from .private-identifiers. Split hash literals
+# so this checker does not itself introduce another numeric-pattern occurrence.
+SNOWFLAKE_CHECKSUM_HITS="$(awk '
+  BEGIN {
+    bip39 = "90dbd31c982272292" "39363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
+    cbc = "26b52a9543ae338f279b96b0b9fed9c809374" "4685043739079ce85cd58f289a6"
+  }
+  p4 == "[[package]]" &&
+  p1 == "source = \"registry+https://github.com/rust-lang/crates.io-index\"" &&
+  ((p3 == "name = \"bip39\"" && p2 == "version = \"2.2.2\"" &&
+    $0 == "checksum = \"" bip39 "\"") ||
+   (p3 == "name = \"cbc\"" && p2 == "version = \"0.1.2\"" &&
+    $0 == "checksum = \"" cbc "\"")) {
+    print "Cargo.lock:" NR ":" $0
+  }
+  { p4 = p3; p3 = p2; p2 = p1; p1 = $0 }
+' Cargo.lock 2>/dev/null || true)"
+
 report_fixed_hits() {
   local kind=$1
   local value=$2
   local hits
   hits="$(git grep -nIF -e "$value" "${GREP_SCOPE[@]}" 2>/dev/null || true)"
+  if [ "$kind" = 'Discord snowflake' ] && [ -n "$SNOWFLAKE_CHECKSUM_HITS" ]; then
+    hits="$(printf '%s\n' "$hits" | grep -vFx -e "$SNOWFLAKE_CHECKSUM_HITS" || true)"
+  fi
   if [ -n "$hits" ]; then
     echo "[error] ${kind} が追跡ファイルに入っています:"
     printf '%s\n' "$hits" | head -20

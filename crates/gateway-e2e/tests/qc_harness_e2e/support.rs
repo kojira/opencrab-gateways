@@ -691,6 +691,7 @@ async fn wire_instance(
         None,
         PathBuf::from("/nonexistent/nostaro"),
         overrides,
+        None,
     )
     .expect("spawn_instance");
 

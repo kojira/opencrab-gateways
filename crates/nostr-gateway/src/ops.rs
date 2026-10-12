@@ -23,6 +23,10 @@ const OP_TIMEOUT: Duration = Duration::from_secs(30);
 /// hello の `operations` 配列（§9.2・確定スキーマ）。全 write は callback なし・非同期。引数は
 /// セッション局所短縮参照（`event`=e番号 / `user`=u番号）。core は値の platform 意味を解釈しない。
 pub fn operation_declarations() -> Value {
+    operation_declarations_with_files(false)
+}
+
+pub fn operation_declarations_with_files(enabled: bool) -> Value {
     // class: 投稿・操作系は sub-engine へ出さない（not_exposed）。イベント/話者を参照する op は
     // conversation_bound、agent 全体の設定系は agent_bound（DI-02 の既存規則に対応）。
     let conv = |sub: &str, sharing: &str| json!({"sub_engine": sub, "sharing": sharing});
@@ -47,7 +51,7 @@ pub fn operation_declarations() -> Value {
     let ref_prop =
         |desc: &str| json!({"type": "string", "description": desc, "format": "short-ref"});
     // 配列は name の UTF-8 昇順（follow < kind0 < reaction < reply < repost < resolve < say < unfollow < upload）。
-    json!([
+    let mut operations = json!([
         decl(
             "follow",
             "指定ユーザーをフォローする。user に会話で見えている u番号を渡す。",
@@ -116,7 +120,21 @@ pub fn operation_declarations() -> Value {
             json!({"type": "object", "required": ["path"], "properties": {"path": str_prop("アップロードするファイルの相対パス")}}),
             conv("not_exposed", "agent_bound"),
         ),
-    ])
+    ]);
+    if enabled {
+        for op in operations.as_array_mut().unwrap() {
+            if matches!(op["name"].as_str(), Some("reply" | "say")) {
+                op["input_schema"]["properties"]["files"] = json!({
+                    "type":"array",
+                    "items":{"type":"string", "format":"workspace-file"},
+                    "description":"Workspace files, up to 10 and 100 MiB total. Supported images, videos, MP3, PDF, text/code and fonts only; ZIP/CSV/WAV and unknown types are not supported."
+                });
+                let description = op["description"].as_str().unwrap().to_owned();
+                op["description"] = Value::String(format!("{description} Files are uploaded publicly to share.yabu.me and their URLs appended to this note. No automatic removal or guaranteed permanence; partial uploads may remain on failure. No upload receipt or visible failure reply is guaranteed."));
+            }
+        }
+    }
+    operations
 }
 
 /// nostaro 実行結果（三結果へ写す前段）。
@@ -135,6 +153,9 @@ pub struct NostrInvokeHandler {
     /// spawn せず本文・種別を `DRY_RUN_LOG_TARGET` へ残して成功 ack する。read（resolve）は
     /// 副作用が無いので dry-run でも通常経路（外部依存が無ければ Rejected）。
     dry_run: bool,
+    attachment_outbox_root: Option<PathBuf>,
+    self_pubkey: String,
+    upload_policy: crate::share_yabu::UploadPolicy,
 }
 
 impl NostrInvokeHandler {
@@ -149,6 +170,121 @@ impl NostrInvokeHandler {
             config_path,
             secret,
             dry_run,
+            attachment_outbox_root: None,
+            self_pubkey: String::new(),
+            upload_policy: crate::share_yabu::UploadPolicy::default(),
+        }
+    }
+
+    pub fn with_attachments(mut self, root: Option<PathBuf>, self_pubkey: String) -> Self {
+        self.attachment_outbox_root = root;
+        self.self_pubkey = self_pubkey;
+        self
+    }
+
+    async fn attachment_urls(
+        &self,
+        call_id: &str,
+        payload: &Value,
+    ) -> Result<Vec<String>, InvokeOutcome> {
+        use crate::{attachments, share_yabu};
+        let mut transmission_possible = false;
+        let deadline = tokio::time::Instant::now() + self.upload_policy.phase_timeout;
+        let phase = async {
+            let files = attachments::descriptors(payload).map_err(|_| InvokeOutcome::Rejected)?;
+            if files.is_empty() {
+                return Ok(Vec::new());
+            }
+            let keys = attachments::signer(self.secret.as_deref(), &self.self_pubkey)
+                .map_err(|_| InvokeOutcome::Rejected)?;
+            let verified = attachments::verify_all(self.attachment_outbox_root.as_deref(), files)
+                .await
+                .map_err(|_| InvokeOutcome::Rejected)?;
+            let client = self
+                .upload_policy
+                .client()
+                .map_err(|_| InvokeOutcome::Rejected)?;
+            let mut urls = Vec::new();
+            for (index, file) in verified.into_iter().enumerate() {
+                let auth = share_yabu::authorization(&keys, &file.sha256).map_err(|_| {
+                    if urls.is_empty() {
+                        InvokeOutcome::Rejected
+                    } else {
+                        InvokeOutcome::Indeterminate
+                    }
+                })?;
+                // The outer timeout interrupts active I/O; this check also fences
+                // a ready next stage when the deadline elapsed between polls.
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(if urls.is_empty() {
+                        InvokeOutcome::Rejected
+                    } else {
+                        InvokeOutcome::Indeterminate
+                    });
+                }
+                let hash = file.sha256.clone();
+                tracing::info!(
+                    call_id,
+                    index,
+                    hash,
+                    post_attempted = false,
+                    outcome = "upload_started",
+                    "attachment stage"
+                );
+                transmission_possible = true;
+                let result = share_yabu::upload(&self.upload_policy, &client, file, auth).await;
+                match result {
+                    Ok(url) => {
+                        tracing::info!(call_id, index, hash, url = %url.chars().take(2048).collect::<String>(), post_attempted = false, outcome = "uploaded", "attachment stage");
+                        urls.push(url);
+                    }
+                    Err(error) => {
+                        let rejected =
+                            urls.is_empty() && matches!(error, share_yabu::UploadError::Refused);
+                        tracing::warn!(
+                            call_id,
+                            index,
+                            hash,
+                            post_attempted = false,
+                            outcome = if rejected {
+                                "rejected"
+                            } else {
+                                "indeterminate"
+                            },
+                            "attachment stage"
+                        );
+                        return Err(if rejected {
+                            InvokeOutcome::Rejected
+                        } else {
+                            InvokeOutcome::Indeterminate
+                        });
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(InvokeOutcome::Indeterminate);
+            }
+            Ok(urls)
+        };
+        match tokio::time::timeout_at(deadline, phase).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!(
+                    call_id,
+                    post_attempted = false,
+                    outcome = if transmission_possible {
+                        "indeterminate"
+                    } else {
+                        "rejected"
+                    },
+                    "attachment phase deadline"
+                );
+                Err(if transmission_possible {
+                    InvokeOutcome::Indeterminate
+                } else {
+                    InvokeOutcome::Rejected
+                })
+            }
         }
     }
 
@@ -221,7 +357,7 @@ fn run_to_outcome(run: Run) -> InvokeOutcome {
 impl InvokeHandler for NostrInvokeHandler {
     async fn handle(
         &self,
-        _call_id: &str,
+        call_id: &str,
         _binding_id: &str,
         operation: &str,
         payload: &Value,
@@ -252,7 +388,7 @@ impl InvokeHandler for NostrInvokeHandler {
         }
         // 入力欠落・不正は確定拒否（外部 I/O 0）。argv は "--" でオプション終端して positional を渡す。
         let dash = || "--".to_string();
-        let argv: Vec<String> = match operation {
+        let mut argv: Vec<String> = match operation {
             "reply" => {
                 let (Some(origin), Some(text)) =
                     (str_field(payload, "event"), str_field(payload, "text"))
@@ -291,7 +427,10 @@ impl InvokeHandler for NostrInvokeHandler {
                     return InvokeOutcome::Rejected;
                 };
                 let mut a = vec!["post".to_string()];
-                if let Some(user) = str_field(payload, "user") {
+                if let Some(value) = payload.get("user") {
+                    let Some(user) = value.as_str() else {
+                        return InvokeOutcome::Rejected;
+                    };
                     // core が u番号を pubkey へ解決済み。未解決（u番号のまま等）は投稿しない。
                     if !is_hex64(user) {
                         return InvokeOutcome::Rejected;
@@ -355,9 +494,43 @@ impl InvokeHandler for NostrInvokeHandler {
             // 宣言外は正常な core からは来ない。fail-closed。
             _ => return InvokeOutcome::Rejected,
         };
+        let mut uploaded = false;
+        if matches!(operation, "reply" | "say") {
+            let correlation: String = call_id.chars().take(128).collect();
+            let urls = match self.attachment_urls(&correlation, payload).await {
+                Ok(urls) => urls,
+                Err(outcome) => {
+                    tracing::warn!(
+                        call_id = correlation,
+                        post_attempted = false,
+                        outcome = if matches!(outcome, InvokeOutcome::Rejected) {
+                            "rejected"
+                        } else {
+                            "indeterminate"
+                        },
+                        "attachment operation stopped"
+                    );
+                    return outcome;
+                }
+            };
+            if !urls.is_empty() {
+                uploaded = true;
+                let text = argv.last_mut().expect("reply/say text argv");
+                text.push_str("\n\n");
+                text.push_str(&urls.join("\n"));
+            }
+        }
         // resolve は read（副作用なし）。他は relay/外部へ書く（二重投稿防止のため非ゼロ=Indeterminate）。
         let publishes = operation != "resolve";
-        run_to_outcome(self.run(&argv, publishes).await)
+        let result = self.run(&argv, publishes).await;
+        if uploaded {
+            tracing::info!(call_id = %call_id.chars().take(128).collect::<String>(), post_attempted = true,
+                outcome = if matches!(result, Run::Ok(_)) { "ok" } else { "indeterminate" }, "attachment publication");
+            if !matches!(result, Run::Ok(_)) {
+                return InvokeOutcome::Indeterminate;
+            }
+        }
+        run_to_outcome(result)
     }
 }
 
@@ -518,3 +691,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "attachment_tests.rs"]
+mod attachment_tests;

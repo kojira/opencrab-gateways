@@ -74,6 +74,7 @@ async fn run() -> anyhow::Result<()> {
             secret.clone(),
             nostaro_bin.clone(),
             overrides.clone(),
+            place.attachment_outbox_root.clone(),
         )?;
         readiness.push((client, inst.address.clone()));
     }

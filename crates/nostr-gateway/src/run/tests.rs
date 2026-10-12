@@ -3,7 +3,7 @@ use crate::watch::plan_watch_args;
 
 #[test]
 fn nostr_runtime_always_supports_plain_delivery_and_optional_operations() {
-    let (operations, capabilities) = runtime_contract();
+    let (operations, capabilities) = runtime_contract(false);
 
     assert_eq!(capabilities.final_delivery, FinalDelivery::OperationDriven);
     assert!(

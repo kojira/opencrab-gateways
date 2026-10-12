@@ -555,6 +555,7 @@ fn production_placement_uses_gateway_access_and_opaque_core_config() {
         core_socket: "/tmp/opencrab-core.sock".into(),
         placement_dir: temp.path().into(),
         nostaro_bin: "/bin/true".into(),
+        attachment_outbox_root: Some(temp.path().join("outbox")),
     };
 
     let _spawner = factory
@@ -563,6 +564,15 @@ fn production_placement_uses_gateway_access_and_opaque_core_config() {
     let placement_path = temp.path().join(format!("{}.json", row.instance_id));
     let value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(placement_path).unwrap()).unwrap();
+    let placement: crate::config::Placement = serde_json::from_value(value.clone()).unwrap();
+    placement.validate().unwrap();
+    assert_eq!(
+        placement.attachment_outbox_root,
+        factory.attachment_outbox_root
+    );
+    let mut relative = placement;
+    relative.attachment_outbox_root = Some("relative".into());
+    assert!(relative.validate().is_err());
     let instance = &value["instances"][0];
     assert_eq!(instance["core_config_b64"], DEFAULT_CORE_CONFIG_B64);
     let cfg = parse_instance_config(
@@ -620,6 +630,7 @@ fn production_placement_fails_loud_without_gateway_access() {
         core_socket: "/tmp/opencrab-core.sock".into(),
         placement_dir: temp.path().into(),
         nostaro_bin: "/bin/true".into(),
+        attachment_outbox_root: Some(temp.path().join("outbox")),
     };
 
     let result = factory.for_instance(&row, zeroize::Zeroizing::new(b"secret".to_vec()), "nonce");

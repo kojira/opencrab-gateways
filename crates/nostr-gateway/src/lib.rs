@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod admission;
+mod attachments;
 pub mod config;
 pub mod daemon;
 pub mod dedup;
@@ -13,6 +14,7 @@ pub mod post;
 pub mod run;
 pub mod secret;
 pub mod secret_store;
+mod share_yabu;
 pub mod store;
 pub mod watch;
 

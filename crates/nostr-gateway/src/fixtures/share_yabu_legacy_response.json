@@ -1,0 +1,11 @@
+{
+  "result": true,
+  "description": "File exist in database, returning existing URL",
+  "status": "completed",
+  "id": 1,
+  "pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+  "url": "https://cdn.example.test/converted.webp",
+  "hash": "1fb7440b8189c15abe2934c8c87f10c43922fc57bd5c8ceabc1ee1420bb437a1",
+  "magnet": "",
+  "tags": []
+}

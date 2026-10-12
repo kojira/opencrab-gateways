@@ -60,6 +60,13 @@ over 500 MiB, or `files` without a configured outbox is rejected without sending
 files are read and verified before the reply is sent, because the core deletes the outbox copies
 once the gateway answers. Without the key, `reply` does not declare `files`.
 
+## Nostr attachment upload
+
+Nostr attachments use `PUT https://share.yabu.me/api/v2/media/upload` with Blossom
+kind-24242 authorization. The unversioned `/upload` serves a legacy response and
+must not be used. Returned descriptors must match the original SHA-256 and size;
+converted content is not accepted as the original attachment.
+
 ## License
 
 MIT

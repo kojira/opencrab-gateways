@@ -315,6 +315,14 @@ async fn partial_effect_outcomes_never_retry_or_publish_incomplete_batch() {
         (vec![Response::Status(413)], true, 1),
         (vec![Response::Status(500)], false, 1),
         (vec![Response::Body("not json".into())], false, 1),
+        // Sanitized real legacy response: never publish its converted URL.
+        (
+            vec![Response::Body(
+                include_str!("fixtures/share_yabu_legacy_response.json").into(),
+            )],
+            false,
+            1,
+        ),
         (vec![Response::Body("x".repeat(65537))], false, 1),
         (vec![Response::Valid, Response::Status(413)], false, 2),
     ] {

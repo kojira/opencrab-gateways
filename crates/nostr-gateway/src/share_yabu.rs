@@ -8,7 +8,8 @@ use serde::Deserialize;
 
 use crate::attachments::VerifiedFile;
 
-const ENDPOINT: &str = "https://share.yabu.me/upload";
+// The unversioned /upload selects the server's legacy response contract.
+const ENDPOINT: &str = "https://share.yabu.me/api/v2/media/upload";
 const RESPONSE_LIMIT: usize = 64 * 1024;
 
 pub(crate) struct UploadPolicy {
@@ -132,4 +133,15 @@ pub(crate) async fn upload(
         return Err(UploadError::Uncertain);
     }
     Ok(descriptor.url)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn default_policy_uses_versioned_blossom_endpoint() {
+        assert_eq!(
+            super::UploadPolicy::default().endpoint,
+            "https://share.yabu.me/api/v2/media/upload"
+        );
+    }
 }

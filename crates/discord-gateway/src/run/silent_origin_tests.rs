@@ -24,6 +24,15 @@ impl DiscordTransport for RecordingTransport {
     async fn reply_message(&self, _: &str, _: &str, _: &str) -> TransportOutcome {
         TransportOutcome::Ok(json!({}))
     }
+    async fn reply_message_with_files(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: Vec<crate::transport::ReplyFile>,
+    ) -> TransportOutcome {
+        TransportOutcome::Ok(json!({}))
+    }
 
     async fn add_reaction(&self, _: &str, _: &str, _: &str) -> TransportOutcome {
         TransportOutcome::Ok(json!({}))

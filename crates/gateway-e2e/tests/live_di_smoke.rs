@@ -460,7 +460,7 @@ async fn run_gate(
         self_bot_id.to_string(),
         config_digest,
         SayPolicy::AcceptToLiveQueue,
-        Some(opencrab_discord_gateway::ops::operation_declarations()),
+        Some(opencrab_discord_gateway::ops::operation_declarations(false)),
         opencrab_gate_client::RuntimeCapabilities {
             final_delivery: opencrab_gate_client::FinalDelivery::OperationDriven,
         },

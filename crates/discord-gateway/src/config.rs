@@ -10,6 +10,10 @@ pub struct Placement {
     /// backward-compatible attachment-free placements.
     #[serde(default)]
     pub attachment_spool_root: Option<String>,
+    /// Core-owned outbox of workspace files to attach (D-1079). When absent, `reply` does not
+    /// declare `files`.
+    #[serde(default)]
+    pub attachment_outbox_root: Option<String>,
     pub instances: Vec<InstancePlacement>,
 }
 
@@ -120,6 +124,11 @@ impl Placement {
         if let Some(root) = &self.attachment_spool_root {
             if !std::path::Path::new(root).is_absolute() {
                 anyhow::bail!("attachment_spool_root must be an absolute path");
+            }
+        }
+        if let Some(root) = &self.attachment_outbox_root {
+            if !std::path::Path::new(root).is_absolute() {
+                anyhow::bail!("attachment_outbox_root must be an absolute path");
             }
         }
         if self.instances.len() != 1 {
@@ -281,6 +290,7 @@ mod tests {
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
+            attachment_outbox_root: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -297,10 +307,28 @@ mod tests {
     }
 
     #[test]
+    fn attachment_outbox_root_must_be_absolute() {
+        let place = |root: &str| Placement {
+            core_socket: "/tmp/g.sock".into(),
+            attachment_spool_root: None,
+            attachment_outbox_root: Some(root.into()),
+            instances: vec![InstancePlacement {
+                instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                revision: 1,
+                addresses: vec!["discord-agent-x-100-200".into()],
+                config_b64: encode(&sample_config()),
+            }],
+        };
+        place("/data/attachments/outbox").validate().unwrap();
+        assert!(place("data/attachments/outbox").validate().is_err());
+    }
+
+    #[test]
     fn empty_addresses_fail_loud() {
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
+            attachment_outbox_root: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -341,6 +369,7 @@ mod tests {
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
+            attachment_outbox_root: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -411,6 +440,7 @@ mod tests {
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
+            attachment_outbox_root: None,
             instances: vec![
                 instance("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
                 instance("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),

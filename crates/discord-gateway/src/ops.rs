@@ -8,6 +8,7 @@
 //! D17-05/D17-12（profile data）裁定後の後続スライス。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -17,7 +18,8 @@ use tokio::sync::Mutex;
 use opencrab_gate_client::{InvokeHandler, InvokeOutcome};
 
 use crate::map::parse_origin;
-use crate::transport::{DiscordTransport, TransportOutcome};
+use crate::reply_files::load_reply_files;
+use crate::transport::{DiscordTransport, ReplyFile, TransportOutcome};
 use crate::voice::session::VoiceManager;
 
 /// #915: 1 binding 内の発話 id → Discord 投稿先。発話 id は既存の say delivery_id /
@@ -39,7 +41,10 @@ pub(crate) async fn targets_for(
 }
 
 /// hello の `operations` 配列（§7.2・フェーズ1最小・name UTF-8 昇順）。
-pub fn operation_declarations() -> Value {
+///
+/// `reply_files` は placement に core の outbox（`attachment_outbox_root`）があるときだけ true。
+/// true のときだけ reply に `files`（`"format": "workspace-file"`）を宣言する（D-1079）。
+pub fn operation_declarations(reply_files: bool) -> Value {
     // 投稿・操作系は sub-engine へ出さない（not_exposed）。イベント参照は conversation_bound
     // （DI-02 の既存 gateway tool 可視性規則に対応・D17-13 で legacy `discord_add_reaction` の
     // Blocked+ConversationBound と同等以上に厳格であることを確認済み）。
@@ -101,10 +106,7 @@ pub fn operation_declarations() -> Value {
         decl(
             "reply",
             "reply を呼ぶ応答では、地の文に何も書かない（最後の行の NO_REPLY だけは書いてよい）。地の文は別の発言として投稿されるので、返信が二重になる。会話の e番号のメッセージに返信する。event に e番号、text に返信本文。返信の本文は text にだけ書く。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。複数の返信は1回の応答でまとめて呼んでよく、分けて呼び直す必要はない。In a response that calls reply, write no plain text except an optional final NO_REPLY line; plain text is posted as a separate message and would duplicate the reply. Put the reply body only in text. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response. If you need N replies, put N reply calls in THIS response.",
-            json!({"type": "object", "required": ["event", "text"], "properties": {
-                "event": ref_prop("返信先メッセージの短縮参照（例 e7）"),
-                "text": str_prop("返信本文")
-            }}),
+            reply_input(reply_files),
             "utterance",
             "utterance",
         ),
@@ -120,11 +122,29 @@ pub fn operation_declarations() -> Value {
     ])
 }
 
+/// reply の input_schema。`files` は outbox があるときだけ宣言する。
+fn reply_input(reply_files: bool) -> Value {
+    let mut input = json!({"type": "object", "required": ["event", "text"], "properties": {
+        "event": {"type": "string", "description": "返信先メッセージの短縮参照（例 e7）", "format": "short-ref"},
+        "text": {"type": "string", "description": "返信本文"}
+    }});
+    if reply_files {
+        input["properties"]["files"] = json!({
+            "type": "array",
+            "description": "返信に添付するワークスペースのファイル（ワークスペースからの相対パス・最大10個）。Workspace-relative paths of files to attach to this reply (at most 10).",
+            "items": {"type": "string", "format": "workspace-file"}
+        });
+    }
+    input
+}
+
 /// Discord の invoke handler。短縮参照解決済み payload を Discord REST（transport）へ写す。
 pub struct DiscordInvokeHandler {
     transport: Arc<dyn DiscordTransport>,
     targets: BindingDeliveryTargets,
     voice: Option<Arc<VoiceManager>>,
+    /// core の outbox（`attachment_outbox_root`）。None なら reply の `files` は Rejected。
+    outbox_root: Option<PathBuf>,
 }
 
 impl DiscordInvokeHandler {
@@ -141,7 +161,14 @@ impl DiscordInvokeHandler {
             transport,
             targets,
             voice,
+            outbox_root: None,
         }
+    }
+
+    /// reply の `files` を読む core の outbox を設定する（D-1079）。
+    pub fn with_outbox_root(mut self, outbox_root: Option<PathBuf>) -> Self {
+        self.outbox_root = outbox_root;
+        self
     }
 }
 
@@ -179,13 +206,25 @@ async fn deliver_reply(
     channel_id: &str,
     message_id: &str,
     text: &str,
+    files: Vec<ReplyFile>,
 ) -> TransportOutcome {
     let mut last: Option<TransportOutcome> = None;
+    // 添付は先頭チャンク（返信）にだけ付ける。
+    let mut files = Some(files).filter(|f| !f.is_empty());
     for (i, chunk) in crate::post::split_for_discord(text).into_iter().enumerate() {
         let out = if i == 0 {
-            transport
-                .reply_message(channel_id, message_id, &chunk)
-                .await
+            match files.take() {
+                Some(files) => {
+                    transport
+                        .reply_message_with_files(channel_id, message_id, &chunk, files)
+                        .await
+                }
+                None => {
+                    transport
+                        .reply_message(channel_id, message_id, &chunk)
+                        .await
+                }
+            }
         } else {
             transport.create_message(channel_id, &chunk).await
         };
@@ -217,7 +256,11 @@ impl InvokeHandler for DiscordInvokeHandler {
                 let Some((ch, msg)) = parse_origin(event) else {
                     return InvokeOutcome::Rejected;
                 };
-                let outcome = deliver_reply(&self.transport, &ch, &msg, text).await;
+                let Some(files) = load_reply_files(payload, self.outbox_root.as_deref()).await
+                else {
+                    return InvokeOutcome::Rejected;
+                };
+                let outcome = deliver_reply(&self.transport, &ch, &msg, text, files).await;
                 if let (TransportOutcome::Ok(_), Some(voice)) = (&outcome, &self.voice) {
                     voice.speak_posted(&ch, text);
                 }
@@ -290,6 +333,10 @@ impl InvokeHandler for DiscordInvokeHandler {
 }
 
 #[cfg(test)]
+#[path = "ops_reply_files_tests.rs"]
+mod reply_files_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::DryRunTransport;
@@ -300,7 +347,7 @@ mod tests {
 
     #[test]
     fn declarations_are_sorted_and_callback_free() {
-        let decls = operation_declarations();
+        let decls = operation_declarations(false);
         let arr = decls.as_array().unwrap();
         assert_eq!(arr.len(), 5);
         let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
@@ -343,7 +390,7 @@ mod tests {
 
     #[test]
     fn short_ref_fields_are_marked() {
-        let decls = operation_declarations();
+        let decls = operation_declarations(false);
         let arr = decls.as_array().unwrap();
         let reply = arr.iter().find(|d| d["name"] == "reply").unwrap();
         assert_eq!(
@@ -479,6 +526,7 @@ mod tests {
             "100",
             "200",
             "hi",
+            Vec::new(),
         )
         .await;
         assert_eq!(rec.kinds(), vec!["reply"], "2000字以下は 1 通の reply");
@@ -495,6 +543,7 @@ mod tests {
             "100",
             "200",
             &"あ".repeat(2500),
+            Vec::new(),
         )
         .await;
 
@@ -528,6 +577,7 @@ mod tests {
             "100",
             "200",
             &"い".repeat(5000),
+            Vec::new(),
         )
         .await;
         assert!(matches!(out, TransportOutcome::Rejected));
@@ -541,7 +591,7 @@ mod tests {
     /// 現 tip では #922 の JP-only 文が入っているため **赤**。
     #[test]
     fn utterance_descriptions_match_914_english() {
-        let decls = operation_declarations();
+        let decls = operation_declarations(false);
         let arr = decls.as_array().unwrap();
         let desc = |name: &str| -> String {
             arr.iter()

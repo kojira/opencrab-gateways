@@ -42,6 +42,24 @@ OPENCRAB_SERVER_BIN=/path/to/opencrab-server cargo test --workspace --all-featur
 CI checks out the locked core rev, builds `opencrab-server` from it, and runs the tests and the
 conformance suite against both the Rust and the Node implementation.
 
+## Discord placement: attachments
+
+The Discord daemon config and each child placement accept two optional absolute paths:
+
+| Key | Meaning |
+|---|---|
+| `attachment_spool_root` | Core-provided inbox where the gateway downloads inbound Discord attachments |
+| `attachment_outbox_root` | Core-owned outbox of workspace files the agent attaches to a reply. Use the core's `<db_dir>/attachments/outbox` |
+
+When `attachment_outbox_root` is set, `reply` declares an optional `files` argument
+(`"format": "workspace-file"`). The core copies each workspace file into the outbox and passes a
+descriptor; the gateway re-verifies size and sha256 and attaches the files to the first chunk of
+the reply (at most 10, each at most 500 MiB; Discord's own smaller limit is reported as a
+rejection). A malformed descriptor, an unreadable or mismatched copy, more than 10 files, a file
+over 500 MiB, or `files` without a configured outbox is rejected without sending anything. All
+files are read and verified before the reply is sent, because the core deletes the outbox copies
+once the gateway answers. Without the key, `reply` does not declare `files`.
+
 ## License
 
 MIT

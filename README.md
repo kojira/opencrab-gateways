@@ -62,10 +62,13 @@ once the gateway answers. Without the key, `reply` does not declare `files`.
 
 ## Nostr attachment upload
 
-Nostr attachments use `PUT https://share.yabu.me/api/v2/media/upload` with Blossom
-kind-24242 authorization. The unversioned `/upload` serves a legacy response and
-must not be used. Returned descriptors must match the original SHA-256 and size;
-converted content is not accepted as the original attachment.
+Nostr attachments use `POST https://share.yabu.me/api/v2/media` with multipart
+`no_transform=true` and NIP-98 authorization over the exact request body. The
+unversioned `/upload` serves a legacy response; Blossom PUT can transform images.
+The NIP-94 original/output hashes and size must match the original file. Before
+publishing its URL, the gateway downloads it once and verifies the original bytes'
+SHA-256 and size. Pending, unavailable, or converted content is indeterminate;
+the gateway does not retry the upload or poll for completion.
 
 ## License
 

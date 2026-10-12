@@ -1,0 +1,60 @@
+{
+  "status": "success",
+  "message": "File enqueued for processing",
+  "processing_url": "",
+  "payment_request": "",
+  "nip94_event": {
+    "id": "",
+    "pubkey": "0000000000000000000000000000000000000000000000000000000000000000",
+    "created_at": 0,
+    "kind": 1063,
+    "tags": [
+      [
+        "url",
+        "https://cdn.example.test/original.png"
+      ],
+      [
+        "m",
+        "image/png"
+      ],
+      [
+        "x",
+        "06b9ee7050bf7337f09d4267b79c2db6753882b42295a775b680b07bb2c46089"
+      ],
+      [
+        "ox",
+        "06b9ee7050bf7337f09d4267b79c2db6753882b42295a775b680b07bb2c46089"
+      ],
+      [
+        "size",
+        "6852"
+      ],
+      [
+        "dim",
+        "512x512"
+      ],
+      [
+        "magnet",
+        ""
+      ],
+      [
+        "blurhash",
+        "UKHIBEa}0yoK7Lo1{{fj0yWW-pjt+ZjZ7Ma|"
+      ],
+      [
+        "no_transform",
+        "true"
+      ],
+      [
+        "payment_request",
+        ""
+      ],
+      [
+        "visibility",
+        "1"
+      ]
+    ],
+    "content": "",
+    "sig": ""
+  }
+}

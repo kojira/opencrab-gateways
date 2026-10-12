@@ -67,6 +67,9 @@ impl Fixture {
 #[derive(Clone)]
 enum Response {
     Valid,
+    DownloadStatus(u16),
+    DownloadBody(Vec<u8>),
+    DownloadRedirect(String),
     Status(u16),
     Body(String),
     Stall,
@@ -80,6 +83,7 @@ struct Request {
 struct Server {
     endpoint: String,
     requests: Arc<Mutex<Vec<Request>>>,
+    downloads: Arc<Mutex<usize>>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Server {
@@ -93,7 +97,11 @@ impl Server {
         let endpoint = format!("http://{}/upload", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
+        let downloads = Arc::new(Mutex::new(0));
+        let download_count = downloads.clone();
+        let base = endpoint.trim_end_matches("/upload").to_owned();
         let task = tokio::spawn(async move {
+            let mut stored = Vec::<(Vec<u8>, Response)>::new();
             let mut index = 0;
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -102,6 +110,39 @@ impl Server {
                     head.push(socket.read_u8().await.unwrap());
                 }
                 let headers = String::from_utf8(head).unwrap();
+                if headers.starts_with("GET ") {
+                    assert!(!headers.to_lowercase().contains("authorization:"));
+                    let path = headers.split_whitespace().nth(1).unwrap();
+                    let file_index = path
+                        .strip_prefix("/file-")
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap();
+                    let (original, response) = &stored[file_index];
+                    let (status, bytes, extra) = match response {
+                        Response::DownloadStatus(status) => (*status, Vec::new(), String::new()),
+                        Response::DownloadBody(body) => (200, body.clone(), String::new()),
+                        Response::DownloadRedirect(url) => {
+                            (307, Vec::new(), format!("Location: {url}\r\n"))
+                        }
+                        _ => (200, original.clone(), String::new()),
+                    };
+                    *download_count.lock().unwrap() += 1;
+                    use std::io::Write as _;
+                    writeln!(
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&effects)
+                            .unwrap(),
+                        "download-{file_index}"
+                    )
+                    .unwrap();
+                    let head = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n", bytes.len());
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&bytes).await;
+                    continue;
+                }
                 let length = header(&headers, "content-length").parse::<usize>().unwrap();
                 let mut body = vec![0; length];
                 socket.read_exact(&mut body).await.unwrap();
@@ -109,7 +150,28 @@ impl Server {
                     .get(index)
                     .unwrap_or(&Response::Status(500))
                     .clone();
-                let hash = format!("{:x}", Sha256::digest(&body));
+                let file = if headers.starts_with("POST ") {
+                    let boundary = header(&headers, "content-type")
+                        .split("boundary=")
+                        .nth(1)
+                        .unwrap();
+                    let file_header = body
+                        .windows(b"name=\"file\"; filename".len())
+                        .position(|w| w == b"name=\"file\"; filename")
+                        .unwrap();
+                    let start = file_header
+                        + body[file_header..]
+                            .windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                            .unwrap()
+                        + 4;
+                    let end = body.len() - format!("\r\n--{boundary}--\r\n").len();
+                    body[start..end].to_vec()
+                } else {
+                    body.clone()
+                };
+                let descriptor = no_transform_descriptor(&format!("{base}/file-{index}"), &file);
+                stored.push((file, response.clone()));
                 captured.lock().unwrap().push(Request { headers, body });
                 use std::io::Write as _;
                 writeln!(
@@ -122,16 +184,22 @@ impl Server {
                 )
                 .unwrap();
                 let (status, body, extra) = match response {
-                    Response::Valid => (201, json!({"url":format!("https://cdn.example.test/file-{index}?v=1"), "sha256":hash,"size":length}).to_string(), String::new()),
+                    Response::Valid
+                    | Response::DownloadStatus(_)
+                    | Response::DownloadBody(_)
+                    | Response::DownloadRedirect(_) => (202, descriptor.to_string(), String::new()),
                     Response::Held(release) => {
                         release.notified().await;
-                        (201, json!({"url":format!("https://cdn.example.test/file-{index}?v=1"), "sha256":hash,"size":length}).to_string(), String::new())
+                        (202, descriptor.to_string(), String::new())
                     }
                     Response::Status(status) => (status, String::new(), String::new()),
                     Response::Body(body) => (200, body, String::new()),
                     Response::Redirect(url) => (307, String::new(), format!("Location: {url}\r\n")),
                     Response::Stall => {
-                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n").await.unwrap();
+                        socket
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+                            .await
+                            .unwrap();
                         tokio::time::sleep(Duration::from_secs(10)).await;
                         continue;
                     }
@@ -144,12 +212,31 @@ impl Server {
         Self {
             endpoint,
             requests,
+            downloads,
             task,
         }
     }
     fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
+}
+fn no_transform_descriptor(url: &str, bytes: &[u8]) -> Value {
+    let mut value: Value = serde_json::from_str(include_str!(
+        "fixtures/share_yabu_no_transform_response.json"
+    ))
+    .unwrap();
+    for tag in value["nip94_event"]["tags"].as_array_mut().unwrap() {
+        let replacement = match tag[0].as_str().unwrap() {
+            "url" => Some(url.to_owned()),
+            "x" | "ox" => Some(format!("{:x}", Sha256::digest(bytes))),
+            "size" => Some(bytes.len().to_string()),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            tag[1] = json!(replacement);
+        }
+    }
+    value
 }
 fn header<'a>(headers: &'a str, name: &str) -> &'a str {
     headers
@@ -193,26 +280,31 @@ async fn reply_and_say_upload_verified_bytes_then_publish_once_with_ordered_urls
         } else {
             format!("post\n--mention\n{id}\n--\n")
         };
-        assert_eq!(argv, format!("--config\n{}\n{args}hello\n\nhttps://cdn.example.test/file-0?v=1\nhttps://cdn.example.test/file-1?v=1\n", f.handler.config_path.display()));
+        let base = server.endpoint.trim_end_matches("/upload");
+        assert_eq!(
+            argv,
+            format!(
+                "--config\n{}\n{args}hello\n\n{base}/file-0\n{base}/file-1\n",
+                f.handler.config_path.display()
+            )
+        );
         assert_eq!(
             std::fs::read_to_string(f.dir.path().join("effects")).unwrap(),
-            "upload-0\nupload-1\npost\n"
+            "upload-0\ndownload-0\nupload-1\ndownload-1\npost\n"
         );
         let requests = server.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         for (i, request) in requests.iter().enumerate() {
-            assert!(request.headers.starts_with("PUT /upload HTTP/1.1\r\n"));
-            assert_eq!(
-                request.body,
-                if i == 0 {
-                    b"first".as_slice()
-                } else {
-                    b"second".as_slice()
-                }
-            );
-            assert_eq!(header(&request.headers, "content-type"), "text/plain");
+            assert!(request.headers.starts_with("POST /upload HTTP/1.1\r\n"));
+            let body = String::from_utf8(request.body.clone()).unwrap();
+            assert!(body.contains("name=\"no_transform\"\r\n\r\ntrue\r\n"));
+            assert!(body.contains(&format!(
+                "Content-Type: text/plain\r\n\r\n{}\r\n",
+                if i == 0 { "first" } else { "second" }
+            )));
+            assert!(header(&request.headers, "content-type")
+                .starts_with("multipart/form-data; boundary="));
             let hash = format!("{:x}", Sha256::digest(&request.body));
-            assert_eq!(header(&request.headers, "x-sha-256"), hash);
             let encoded = header(&request.headers, "authorization")
                 .strip_prefix("Nostr ")
                 .unwrap();
@@ -228,15 +320,15 @@ async fn reply_and_say_upload_verified_bytes_then_publish_once_with_ordered_urls
             // independently of the uploader's builder path.
             event.verify().unwrap();
             assert_eq!(event.pubkey, f.keys.public_key());
-            assert_eq!(event.kind, nostr::Kind::Custom(24242));
-            assert_eq!(event.content, "Upload");
+            assert_eq!(event.kind, nostr::Kind::Custom(27235));
+            assert_eq!(event.content, "");
             let value = serde_json::to_value(&event).unwrap();
             assert_eq!(
                 value["tags"],
                 json!([
-                    ["t", "upload"],
-                    ["x", hash],
-                    ["expiration", (event.created_at.as_u64() + 300).to_string()]
+                    ["u", server.endpoint],
+                    ["method", "POST"],
+                    ["payload", hash]
                 ])
             );
             assert!(
@@ -347,6 +439,63 @@ async fn partial_effect_outcomes_never_retry_or_publish_incomplete_batch() {
 }
 
 #[tokio::test]
+async fn queued_upload_requires_exact_download_before_publication() {
+    let _env = crate::ENV_LOCK.lock().await;
+    for response in [
+        Response::DownloadStatus(404),
+        Response::DownloadBody(b"other".to_vec()),
+        Response::DownloadBody(b"first plus extra".to_vec()),
+        Response::DownloadRedirect("https://cdn.example.test/other".into()),
+    ] {
+        let mut f = Fixture::new();
+        let server = Server::start(vec![response], f.dir.path().join("effects")).await;
+        f.endpoint(&server);
+        assert!(matches!(
+            f.handler
+                .handle("call", "binding", "say", &f.payload())
+                .await,
+            InvokeOutcome::Indeterminate
+        ));
+        assert_eq!(server.count(), 1);
+        assert_eq!(*server.downloads.lock().unwrap(), 1);
+        assert!(!f.posted());
+    }
+}
+
+#[tokio::test]
+async fn transformed_or_still_processing_descriptors_never_download_or_publish() {
+    let _env = crate::ENV_LOCK.lock().await;
+    for field in ["ox", "no_transform", "processing_url"] {
+        let mut f = Fixture::new();
+        let mut descriptor = no_transform_descriptor("https://cdn.example.test/file", b"first");
+        if field == "processing_url" {
+            descriptor[field] = json!("https://cdn.example.test/pending");
+        } else {
+            for tag in descriptor["nip94_event"]["tags"].as_array_mut().unwrap() {
+                if tag[0] == field {
+                    tag[1] = json!("invalid");
+                }
+            }
+        }
+        let server = Server::start(
+            vec![Response::Body(descriptor.to_string())],
+            f.dir.path().join("effects"),
+        )
+        .await;
+        f.endpoint(&server);
+        assert!(matches!(
+            f.handler
+                .handle("call", "binding", "say", &f.payload())
+                .await,
+            InvokeOutcome::Indeterminate
+        ));
+        assert_eq!(server.count(), 1);
+        assert_eq!(*server.downloads.lock().unwrap(), 0);
+        assert!(!f.posted());
+    }
+}
+
+#[tokio::test]
 async fn invalid_success_descriptors_are_indeterminate() {
     let _env = crate::ENV_LOCK.lock().await;
     for (url, hash, size) in [
@@ -379,9 +528,18 @@ async fn invalid_success_descriptors_are_indeterminate() {
     ] {
         let mut f = Fixture::new();
         let server = Server::start(
-            vec![Response::Body(
-                json!({"url":url,"sha256":hash,"size":size}).to_string(),
-            )],
+            vec![Response::Body({
+                let mut descriptor = no_transform_descriptor(url, b"first");
+                for tag in descriptor["nip94_event"]["tags"].as_array_mut().unwrap() {
+                    if tag[0] == "x" {
+                        tag[1] = json!(hash);
+                    }
+                    if tag[0] == "size" {
+                        tag[1] = json!(size.to_string());
+                    }
+                }
+                descriptor.to_string()
+            })],
             f.dir.path().join("effects"),
         )
         .await;

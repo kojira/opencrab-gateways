@@ -206,13 +206,15 @@ impl NostrInvokeHandler {
                 .map_err(|_| InvokeOutcome::Rejected)?;
             let mut urls = Vec::new();
             for (index, file) in verified.into_iter().enumerate() {
-                let auth = share_yabu::authorization(&keys, &file.sha256).map_err(|_| {
-                    if urls.is_empty() {
-                        InvokeOutcome::Rejected
-                    } else {
-                        InvokeOutcome::Indeterminate
-                    }
-                })?;
+                let hash = file.sha256.clone();
+                let prepared =
+                    share_yabu::prepare(&self.upload_policy, &keys, file).map_err(|_| {
+                        if urls.is_empty() {
+                            InvokeOutcome::Rejected
+                        } else {
+                            InvokeOutcome::Indeterminate
+                        }
+                    })?;
                 // The outer timeout interrupts active I/O; this check also fences
                 // a ready next stage when the deadline elapsed between polls.
                 if tokio::time::Instant::now() >= deadline {
@@ -222,7 +224,6 @@ impl NostrInvokeHandler {
                         InvokeOutcome::Indeterminate
                     });
                 }
-                let hash = file.sha256.clone();
                 tracing::info!(
                     call_id,
                     index,
@@ -232,7 +233,7 @@ impl NostrInvokeHandler {
                     "attachment stage"
                 );
                 transmission_possible = true;
-                let result = share_yabu::upload(&self.upload_policy, &client, file, auth).await;
+                let result = share_yabu::upload(&self.upload_policy, &client, prepared).await;
                 match result {
                     Ok(url) => {
                         tracing::info!(call_id, index, hash, url = %url.chars().take(2048).collect::<String>(), post_attempted = false, outcome = "uploaded", "attachment stage");

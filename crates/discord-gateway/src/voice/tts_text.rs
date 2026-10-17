@@ -10,7 +10,7 @@ pub fn clean_for_tts(text: &str) -> String {
     for line in text.lines() {
         if line.trim_start().starts_with("```") {
             if !in_code_block {
-                out.push_str("（コードは省略） ");
+                out.push_str("（コードは省略）\n");
             }
             in_code_block = !in_code_block;
             continue;
@@ -19,16 +19,19 @@ pub fn clean_for_tts(text: &str) -> String {
             continue;
         }
         out.push_str(line);
-        out.push(' ');
+        out.push('\n');
     }
     let mut cleaned = String::with_capacity(out.len());
-    for word in out.split(' ') {
-        if word.starts_with("http://") || word.starts_with("https://") {
-            cleaned.push_str("リンク");
-        } else {
-            cleaned.push_str(word);
+    for line in out.lines() {
+        for word in line.split(' ') {
+            if word.starts_with("http://") || word.starts_with("https://") {
+                cleaned.push_str("リンク");
+            } else {
+                cleaned.push_str(word);
+            }
+            cleaned.push(' ');
         }
-        cleaned.push(' ');
+        cleaned.push('\n');
     }
     let mut result = String::with_capacity(cleaned.len());
     let mut chars = cleaned.chars().peekable();
@@ -58,7 +61,13 @@ pub fn clean_for_tts(text: &str) -> String {
         }
         result.push(c);
     }
-    let trimmed = result.split_whitespace().collect::<Vec<_>>().join(" ");
+    // 改行は文の区切りとして残す（split_sentences が行ごとに分ける）。行内の空白は 1 つにまとめ、空行は捨てる。
+    let trimmed = result
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     if trimmed.chars().count() > MAX_TTS_CHARS {
         let cut: String = trimmed.chars().take(MAX_TTS_CHARS).collect();
         format!("{cut}、以下省略")

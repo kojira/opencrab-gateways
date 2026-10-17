@@ -296,6 +296,8 @@ impl VoiceManager {
             system_context: None,
             reply_target: None,
             live_inbound_scope: LiveInboundScope::All,
+            // Spoken turns run on the session's voice (realtime) model.
+            model_profile: opencrab_gate_client::wire::TurnModelProfile::Realtime,
         };
         let body = format!("{VOICE_TEXT_PREFIX}{text}");
         let outcome = client

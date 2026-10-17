@@ -61,9 +61,24 @@ pub(crate) fn model_command() -> CreateCommand {
         "reset",
         "Reset this session to the agent's model",
     );
+    let voice_set = CreateCommandOption::new(
+        CommandOptionType::SubCommand,
+        "voice-set",
+        "Set the model for voice turns in this session",
+    )
+    .add_sub_option(
+        CreateCommandOption::new(CommandOptionType::String, "model", "Model to use")
+            .required(true)
+            .set_autocomplete(true),
+    );
+    let voice_reset = CreateCommandOption::new(
+        CommandOptionType::SubCommand,
+        "voice-reset",
+        "Make voice turns follow this session's model",
+    );
     CreateCommand::new("model")
         .description("Inspect or change the model for this session")
-        .set_options(vec![list, set, reset])
+        .set_options(vec![list, set, reset, voice_set, voice_reset])
 }
 
 pub(crate) fn map_model_submission(
@@ -74,6 +89,12 @@ pub(crate) fn map_model_submission(
         "list" if model.is_none() => (LIST_COMMAND, json!({})),
         "set" => ("set_session_model", json!({"model": model?})),
         "reset" if model.is_none() => ("reset_session_model", json!({})),
+        // Voice turns use the session's realtime model slot.
+        "voice-set" => (
+            "set_session_model",
+            json!({"model": model?, "profile": "realtime"}),
+        ),
+        "voice-reset" if model.is_none() => ("reset_session_model", json!({"profile": "realtime"})),
         _ => return None,
     };
     Some(InteractionAction::Command {
@@ -125,10 +146,15 @@ pub(crate) struct ModelListResult {
     pub configured_model: Option<String>,
     pub current_model: String,
     pub default_model: String,
+    /// The session's voice model; `None` = voice turns follow the session's model.
+    pub realtime_configured_model: Option<String>,
+    pub realtime_current_model: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ModelMutationResult {
+    /// `Some("realtime")` when the voice-turn slot was changed.
+    profile: Option<String>,
     configured_model: Option<String>,
     current_model: String,
     default_model: String,
@@ -147,6 +173,11 @@ pub(crate) fn submission_success(name: &str, value: Value) -> Option<String> {
     if result.applies != "next_turn" {
         return None;
     }
+    match result.profile.as_deref() {
+        None => {}
+        Some("realtime") => return voice_submission_success(name, &result),
+        Some(_) => return None,
+    }
     match name {
         "set_session_model" => Some(format!(
             "Model for this session set to `{}`. It will be used from the next turn of this session.",
@@ -159,6 +190,27 @@ pub(crate) fn submission_success(name: &str, value: Value) -> Option<String> {
             Some(format!(
                 "This session now follows the agent's model `{}`. \
                  It will be used from the next turn of this session.",
+                escape_inline(&result.default_model)
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn voice_submission_success(name: &str, result: &ModelMutationResult) -> Option<String> {
+    match name {
+        "set_session_model" => Some(format!(
+            "Voice model for this session set to `{}`. \
+             Voice turns use it from the next voice turn. Typed messages keep `{}`.",
+            escape_inline(result.configured_model.as_deref()?),
+            escape_inline(&result.default_model)
+        )),
+        "reset_session_model" => {
+            if result.configured_model.is_some() || result.current_model != result.default_model {
+                return None;
+            }
+            Some(format!(
+                "Voice turns now follow this session's model `{}`.",
                 escape_inline(&result.default_model)
             ))
         }
@@ -206,10 +258,16 @@ pub(crate) fn format_model_list(result: &ModelListResult) -> String {
     } else {
         ""
     };
+    let voice_follows = if result.realtime_configured_model.is_none() {
+        " (follows this session's model)"
+    } else {
+        ""
+    };
     let status = format!(
-        "This session: `{}`{follows}\nAgent's model: `{}`",
+        "This session: `{}`{follows}\nAgent's model: `{}`\nVoice turns: `{}`{voice_follows}",
         escape_inline(&result.current_model),
-        escape_inline(&result.default_model)
+        escape_inline(&result.default_model),
+        escape_inline(&result.realtime_current_model)
     );
     let mut models = result.models.clone();
     models.sort();
@@ -277,7 +335,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slash_command_definition_has_only_the_three_model_subcommands() {
+    fn slash_command_definition_has_the_model_and_voice_model_subcommands() {
         let value = serde_json::to_value(model_command()).unwrap();
         assert_eq!(value["name"], "model");
         let options = value["options"].as_array().unwrap();
@@ -286,11 +344,122 @@ mod tests {
                 .iter()
                 .map(|option| option["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["list", "set", "reset"]
+            ["list", "set", "reset", "voice-set", "voice-reset"]
         );
-        assert_eq!(options[1]["options"][0]["name"], "model");
-        assert_eq!(options[1]["options"][0]["required"], true);
-        assert_eq!(options[1]["options"][0]["autocomplete"], true);
+        for set in [&options[1], &options[3]] {
+            assert_eq!(set["options"][0]["name"], "model");
+            assert_eq!(set["options"][0]["required"], true);
+            assert_eq!(set["options"][0]["autocomplete"], true);
+        }
+        assert_eq!(
+            options[3]["description"],
+            "Set the model for voice turns in this session"
+        );
+        assert_eq!(
+            options[4]["description"],
+            "Make voice turns follow this session's model"
+        );
+    }
+
+    #[test]
+    fn voice_results_use_voice_wording_from_the_echoed_profile() {
+        assert_eq!(
+            submission_success(
+                "set_session_model",
+                json!({
+                    "scope": "session",
+                    "profile": "realtime",
+                    "configured_model": "openai:gpt-5-mini",
+                    "current_model": "openai:gpt-5-mini",
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "applies": "next_turn"
+                })
+            )
+            .as_deref(),
+            Some(
+                "Voice model for this session set to `openai:gpt-5-mini`. \
+                 Voice turns use it from the next voice turn. \
+                 Typed messages keep `anthropic:claude-sonnet-4`."
+            )
+        );
+        assert_eq!(
+            submission_success(
+                "reset_session_model",
+                json!({
+                    "scope": "session",
+                    "profile": "realtime",
+                    "configured_model": null,
+                    "current_model": "anthropic:claude-sonnet-4",
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "applies": "next_turn"
+                })
+            )
+            .as_deref(),
+            Some("Voice turns now follow this session's model `anthropic:claude-sonnet-4`.")
+        );
+        // A reset result that does not follow the session model is not reported as success.
+        assert_eq!(
+            submission_success(
+                "reset_session_model",
+                json!({
+                    "profile": "realtime",
+                    "configured_model": "openai:gpt-5-mini",
+                    "current_model": "openai:gpt-5-mini",
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "applies": "next_turn"
+                })
+            ),
+            None
+        );
+        assert_eq!(
+            submission_success(
+                "set_session_model",
+                json!({
+                    "profile": "bogus",
+                    "configured_model": "openai:gpt-5-mini",
+                    "current_model": "openai:gpt-5-mini",
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "applies": "next_turn"
+                })
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn list_shows_the_voice_turns_line_when_set_and_when_following() {
+        let list = |realtime_configured: Value, realtime_current: &str| {
+            submission_success(
+                "list_session_models",
+                json!({
+                    "scope": "session",
+                    "models": ["openai:gpt-5"],
+                    "configured_model": "openai:gpt-5",
+                    "current_model": "openai:gpt-5",
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "realtime_configured_model": realtime_configured,
+                    "realtime_current_model": realtime_current
+                }),
+            )
+        };
+        assert_eq!(
+            list(json!("openai:gpt-5-mini"), "openai:gpt-5-mini").as_deref(),
+            Some(
+                "Available models:\n`openai:gpt-5`\n\n\
+                 This session: `openai:gpt-5`\n\
+                 Agent's model: `anthropic:claude-sonnet-4`\n\
+                 Voice turns: `openai:gpt-5-mini`"
+            )
+        );
+        assert_eq!(
+            list(Value::Null, "openai:gpt-5").as_deref(),
+            Some(
+                "Available models:\n`openai:gpt-5`\n\n\
+                 This session: `openai:gpt-5`\n\
+                 Agent's model: `anthropic:claude-sonnet-4`\n\
+                 Voice turns: `openai:gpt-5` (follows this session's model)"
+            )
+        );
     }
 
     #[test]
@@ -335,14 +504,17 @@ mod tests {
                     "models": ["openai:gpt-5"],
                     "configured_model": "openai:gpt-5",
                     "current_model": "openai:gpt-5",
-                    "default_model": "anthropic:claude-sonnet-4"
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "realtime_configured_model": null,
+                    "realtime_current_model": "openai:gpt-5"
                 })
             )
             .as_deref(),
             Some(
                 "Available models:\n`openai:gpt-5`\n\n\
                  This session: `openai:gpt-5`\n\
-                 Agent's model: `anthropic:claude-sonnet-4`"
+                 Agent's model: `anthropic:claude-sonnet-4`\n\
+                 Voice turns: `openai:gpt-5` (follows this session's model)"
             )
         );
         assert_eq!(
@@ -353,14 +525,17 @@ mod tests {
                     "models": [],
                     "configured_model": null,
                     "current_model": "anthropic:claude-sonnet-4",
-                    "default_model": "anthropic:claude-sonnet-4"
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "realtime_configured_model": null,
+                    "realtime_current_model": "anthropic:claude-sonnet-4"
                 })
             )
             .as_deref(),
             Some(
                 "No models are currently available.\n\n\
                  This session: `anthropic:claude-sonnet-4` (follows the agent's model)\n\
-                 Agent's model: `anthropic:claude-sonnet-4`"
+                 Agent's model: `anthropic:claude-sonnet-4`\n\
+                 Voice turns: `anthropic:claude-sonnet-4` (follows this session's model)"
             )
         );
         // Agent-level command names are no longer what /model sends.
@@ -425,6 +600,8 @@ mod tests {
             configured_model: None,
             current_model: "provider:current\r\n> forged".to_string(),
             default_model: "provider:default".to_string(),
+            realtime_configured_model: None,
+            realtime_current_model: "provider:current".to_string(),
         };
 
         let text = format_model_list(&result);
@@ -444,10 +621,12 @@ mod tests {
             configured_model: None,
             current_model: "provider:current".to_string(),
             default_model: "provider:default".to_string(),
+            realtime_configured_model: None,
+            realtime_current_model: "provider:current".to_string(),
         };
         let text = format_model_list(&result);
         assert!(text.chars().count() <= DISCORD_MAX_CHARS);
         assert!(text.contains("… and "));
-        assert!(text.ends_with("Agent's model: `provider:default`"));
+        assert!(text.ends_with("Voice turns: `provider:current` (follows this session's model)"));
     }
 }

@@ -304,6 +304,7 @@ async fn post_message(
         system_context: None,
         reply_target: None,
         live_inbound_scope: LiveInboundScope::All,
+        model_profile: super::wire::TurnModelProfile::Default,
     };
     match client
         .post_said_with_self_context(

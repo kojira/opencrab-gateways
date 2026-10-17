@@ -120,6 +120,8 @@ async fn speaks(s: &mut Setup, message_id: &str, author: &str, bot: bool) {
         serde_json::from_slice(&read_frame(&mut s.core.reader).await.unwrap()).unwrap();
     assert_eq!(said["m"], "said");
     assert_eq!(said["author_id"], author);
+    // Typed messages keep the session's default model.
+    assert!(said.get("model_profile").is_none(), "{said}");
     write_json(
         &mut s.core.writer,
         &json!({"id": said["id"], "m": "ok", "seq": 1}),

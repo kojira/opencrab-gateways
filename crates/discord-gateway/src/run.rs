@@ -596,6 +596,7 @@ pub(crate) async fn handle_incoming(
         system_context: None,
         reply_target: None,
         live_inbound_scope: LiveInboundScope::All,
+        model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
     };
     let outcome = client
         .post_said_with_context(

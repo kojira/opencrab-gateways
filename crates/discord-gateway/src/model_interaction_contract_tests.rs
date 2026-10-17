@@ -11,8 +11,26 @@ fn model_interaction_maps_to_command_and_never_to_said() {
     assert_eq!(
         mapped,
         Some(InteractionAction::Command {
-            name: "set_model".to_string(),
+            name: "set_session_model".to_string(),
             args: json!({"model": "openai:gpt-5"}),
+        })
+    );
+}
+
+#[test]
+fn model_list_and_reset_target_this_session() {
+    assert_eq!(
+        map_model_submission("list", None),
+        Some(InteractionAction::Command {
+            name: "list_session_models".to_string(),
+            args: json!({}),
+        })
+    );
+    assert_eq!(
+        map_model_submission("reset", None),
+        Some(InteractionAction::Command {
+            name: "reset_session_model".to_string(),
+            args: json!({}),
         })
     );
 }

@@ -26,7 +26,7 @@ use crate::map::{
 use crate::model::{
     autocomplete_choices, command_error_text, list_result, map_model_submission,
     submission_success, InteractionAction, ModelInteractionEvent, ModelListResult,
-    AUTOCOMPLETE_TIMEOUT, COMMAND_TIMEOUT, MODEL_CACHE_TTL,
+    AUTOCOMPLETE_TIMEOUT, COMMAND_TIMEOUT, LIST_COMMAND, MODEL_CACHE_TTL,
 };
 use crate::ops::{
     operation_declarations, targets_for, BindingDeliveryTargets, DiscordInvokeHandler,
@@ -396,7 +396,7 @@ async fn handle_model_interaction(
     };
     let text = match outcome {
         Ok(value) => {
-            if name == "list_models" {
+            if name == LIST_COMMAND {
                 if let (Some(binding_id), Some(result)) = (binding_id, list_result(value.clone())) {
                     cache.lock().await.insert(
                         binding_id,
@@ -432,7 +432,7 @@ async fn autocomplete_models(
         .command(
             address,
             caller,
-            "list_models",
+            LIST_COMMAND,
             &serde_json::json!({}),
             AUTOCOMPLETE_TIMEOUT,
         )

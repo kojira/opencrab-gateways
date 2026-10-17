@@ -10,6 +10,8 @@ use crate::post::DISCORD_MAX_CHARS;
 pub const MODEL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 pub const AUTOCOMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1_500);
 pub const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// `/model list` and autocomplete read the bound session's models.
+pub(crate) const LIST_COMMAND: &str = "list_session_models";
 
 #[derive(Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -47,7 +49,7 @@ pub(crate) fn model_command() -> CreateCommand {
     let set = CreateCommandOption::new(
         CommandOptionType::SubCommand,
         "set",
-        "Set the model for this agent",
+        "Set the model for this session",
     )
     .add_sub_option(
         CreateCommandOption::new(CommandOptionType::String, "model", "Model to use")
@@ -57,10 +59,10 @@ pub(crate) fn model_command() -> CreateCommand {
     let reset = CreateCommandOption::new(
         CommandOptionType::SubCommand,
         "reset",
-        "Reset to the server default",
+        "Reset this session to the agent's model",
     );
     CreateCommand::new("model")
-        .description("Inspect or change this agent's model")
+        .description("Inspect or change the model for this session")
         .set_options(vec![list, set, reset])
 }
 
@@ -69,9 +71,9 @@ pub(crate) fn map_model_submission(
     model: Option<&str>,
 ) -> Option<InteractionAction> {
     let (name, args) = match subcommand {
-        "list" if model.is_none() => ("list_models", json!({})),
-        "set" => ("set_model", json!({"model": model?})),
-        "reset" if model.is_none() => ("reset_model", json!({})),
+        "list" if model.is_none() => (LIST_COMMAND, json!({})),
+        "set" => ("set_session_model", json!({"model": model?})),
+        "reset" if model.is_none() => ("reset_session_model", json!({})),
         _ => return None,
     };
     Some(InteractionAction::Command {
@@ -138,7 +140,7 @@ pub(crate) fn list_result(value: Value) -> Option<ModelListResult> {
 }
 
 pub(crate) fn submission_success(name: &str, value: Value) -> Option<String> {
-    if name == "list_models" {
+    if name == LIST_COMMAND {
         return list_result(value).map(|result| format_model_list(&result));
     }
     let result: ModelMutationResult = serde_json::from_value(value).ok()?;
@@ -146,16 +148,17 @@ pub(crate) fn submission_success(name: &str, value: Value) -> Option<String> {
         return None;
     }
     match name {
-        "set_model" => Some(format!(
-            "Model set to `{}`. It will be used from the next turn.",
+        "set_session_model" => Some(format!(
+            "Model for this session set to `{}`. It will be used from the next turn of this session.",
             escape_inline(result.configured_model.as_deref()?)
         )),
-        "reset_model" => {
+        "reset_session_model" => {
             if result.configured_model.is_some() || result.current_model != result.default_model {
                 return None;
             }
             Some(format!(
-                "Model reset to the server default `{}`. It will be used from the next turn.",
+                "This session now follows the agent's model `{}`. \
+                 It will be used from the next turn of this session.",
                 escape_inline(&result.default_model)
             ))
         }
@@ -198,16 +201,21 @@ pub(crate) fn command_error_text(input: Option<&str>, error: &CommandError) -> S
 }
 
 pub(crate) fn format_model_list(result: &ModelListResult) -> String {
-    let _configured_model = result.configured_model.as_deref();
-    let current = escape_inline(&result.current_model);
-    let default = escape_inline(&result.default_model);
+    let follows = if result.configured_model.is_none() {
+        " (follows the agent's model)"
+    } else {
+        ""
+    };
+    let status = format!(
+        "This session: `{}`{follows}\nAgent's model: `{}`",
+        escape_inline(&result.current_model),
+        escape_inline(&result.default_model)
+    );
     let mut models = result.models.clone();
     models.sort();
     models.dedup();
     if models.is_empty() {
-        return format!(
-            "No models are currently available.\n\nCurrent: `{current}`\nDefault: `{default}`"
-        );
+        return format!("No models are currently available.\n\n{status}");
     }
 
     let escaped = models
@@ -223,8 +231,7 @@ pub(crate) fn format_model_list(result: &ModelListResult) -> String {
             }
             section.push_str(&format!("… and {remaining} more."));
         }
-        let response =
-            format!("Available models:\n{section}\n\nCurrent: `{current}`\nDefault: `{default}`");
+        let response = format!("Available models:\n{section}\n\n{status}");
         if response.chars().count() <= DISCORD_MAX_CHARS {
             return response;
         }
@@ -287,7 +294,76 @@ mod tests {
     }
 
     #[test]
-    fn success_and_stable_errors_use_exact_discord_text() {
+    fn slash_command_descriptions_say_this_session() {
+        let value = serde_json::to_value(model_command()).unwrap();
+        assert_eq!(
+            value["description"],
+            "Inspect or change the model for this session"
+        );
+        let options = value["options"].as_array().unwrap();
+        assert_eq!(options[1]["description"], "Set the model for this session");
+        assert_eq!(
+            options[2]["description"],
+            "Reset this session to the agent's model"
+        );
+    }
+
+    #[test]
+    fn session_results_say_this_session_and_reset_follows_the_agent_model() {
+        assert_eq!(
+            submission_success(
+                "reset_session_model",
+                json!({
+                    "scope": "session",
+                    "configured_model": null,
+                    "current_model": "anthropic:claude-sonnet-4",
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "applies": "next_turn"
+                })
+            )
+            .as_deref(),
+            Some(
+                "This session now follows the agent's model `anthropic:claude-sonnet-4`. \
+                 It will be used from the next turn of this session."
+            )
+        );
+        assert_eq!(
+            submission_success(
+                "list_session_models",
+                json!({
+                    "scope": "session",
+                    "models": ["openai:gpt-5"],
+                    "configured_model": "openai:gpt-5",
+                    "current_model": "openai:gpt-5",
+                    "default_model": "anthropic:claude-sonnet-4"
+                })
+            )
+            .as_deref(),
+            Some(
+                "Available models:\n`openai:gpt-5`\n\n\
+                 This session: `openai:gpt-5`\n\
+                 Agent's model: `anthropic:claude-sonnet-4`"
+            )
+        );
+        assert_eq!(
+            submission_success(
+                "list_session_models",
+                json!({
+                    "scope": "session",
+                    "models": [],
+                    "configured_model": null,
+                    "current_model": "anthropic:claude-sonnet-4",
+                    "default_model": "anthropic:claude-sonnet-4"
+                })
+            )
+            .as_deref(),
+            Some(
+                "No models are currently available.\n\n\
+                 This session: `anthropic:claude-sonnet-4` (follows the agent's model)\n\
+                 Agent's model: `anthropic:claude-sonnet-4`"
+            )
+        );
+        // Agent-level command names are no longer what /model sends.
         assert_eq!(
             submission_success(
                 "set_model",
@@ -297,9 +373,28 @@ mod tests {
                     "default_model": "anthropic:claude-sonnet-4",
                     "applies": "next_turn"
                 })
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn success_and_stable_errors_use_exact_discord_text() {
+        assert_eq!(
+            submission_success(
+                "set_session_model",
+                json!({
+                    "configured_model": "openai:gpt-5",
+                    "current_model": "openai:gpt-5",
+                    "default_model": "anthropic:claude-sonnet-4",
+                    "applies": "next_turn"
+                })
             )
             .as_deref(),
-            Some("Model set to `openai:gpt-5`. It will be used from the next turn.")
+            Some(
+                "Model for this session set to `openai:gpt-5`. \
+                 It will be used from the next turn of this session."
+            )
         );
         assert_eq!(
             command_error_text(
@@ -335,7 +430,7 @@ mod tests {
         let text = format_model_list(&result);
 
         assert!(text.contains("`provider:safe\\`\\n# [forged](https://example.invalid)`"));
-        assert!(text.contains("Current: `provider:current\\r\\n> forged`"));
+        assert!(text.contains("This session: `provider:current\\r\\n> forged`"));
         assert!(!text.contains("\n# [forged]"));
         assert!(!text.contains("\n> forged"));
     }
@@ -353,6 +448,6 @@ mod tests {
         let text = format_model_list(&result);
         assert!(text.chars().count() <= DISCORD_MAX_CHARS);
         assert!(text.contains("… and "));
-        assert!(text.ends_with("Default: `provider:default`"));
+        assert!(text.ends_with("Agent's model: `provider:default`"));
     }
 }

@@ -12,6 +12,7 @@
 | `activity.json` | activity started/ended と completed_no_reply |
 | `activity-origin.json` | activity started に additive `origin` を載せても従来どおり started/ended を配送（subset 規約＝追加 field 無視の実証・R2） |
 | `turn-failed-keeps-connection.json` | id 無し `turn_failed` 通知を送っても SUT は gate→core write 0・接続維持・後続 said を継続処理（未知/新通知を無視せよの契約・R3） |
+| `partial-ignored-keeps-connection.json` | id 無し `partial` 通知（生成途中の本文）を送っても SUT は gate→core write 0・接続維持・後続 said を継続処理（未知/新通知を無視せよの契約） |
 | `frame-too-large.json` | LF 込み 1,048,577 byte で close |
 | `frame-exact-1mib.json` | LF 込み 1,048,576 byte 丁度の成功 |
 | `frame-no-lf-overflow.json` | LF 未着のまま上限超過で close |

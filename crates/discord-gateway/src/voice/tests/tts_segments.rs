@@ -37,3 +37,34 @@ async fn long_post_is_synthesized_and_played_sentence_by_sentence() {
         "first sentence must be enqueued before the last one is synthesized"
     );
 }
+
+#[tokio::test]
+async fn multi_line_post_is_synthesized_line_by_line() {
+    let (mock, recorded) = mock_http::spawn_with_synthesis_delay(vec![(0, "unused")], 0).await;
+    let core = core().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    std::fs::write(&path, mock_http::settings_json(&mock)).unwrap();
+    let player = Arc::new(FakePlayer::default());
+    let m = manager_with(&core, path, player.clone(), Arc::new(DryRunTransport));
+    m.join(BINDING, Some("555"), None).await.unwrap();
+
+    m.speak_posted("10", "一行目\n二行目\n三行目");
+    wait_played(&player, 1).await;
+    // 1 行ずつ合成されるなら 3 件届く。届かなければ届いた分で比較して差分を示す。
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while recorded.tts_queries.lock().unwrap().len() < 3 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    let texts: Vec<String> = recorded
+        .tts_queries
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(text, _)| text.clone())
+        .collect();
+    assert_eq!(texts, vec!["一行目", "二行目", "三行目"]);
+}

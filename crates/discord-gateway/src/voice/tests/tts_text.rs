@@ -37,6 +37,11 @@ fn plain_text_passes_through() {
 }
 
 #[test]
+fn keeps_line_breaks_and_collapses_whitespace_within_lines() {
+    assert_eq!(clean_for_tts("a\n\n b  c\nd"), "a\nb c\nd");
+}
+
+#[test]
 fn only_code_or_markup_becomes_empty_or_placeholder() {
     assert_eq!(clean_for_tts("**__~~||"), "");
 }
@@ -54,6 +59,14 @@ fn split_sentences_keeps_consecutive_terminators_together() {
     assert_eq!(
         split_sentences("えっ！？まさか。。そう?!"),
         vec!["えっ！？", "まさか。。", "そう?!"]
+    );
+}
+
+#[test]
+fn split_sentences_does_not_split_at_commas() {
+    assert_eq!(
+        split_sentences("今日は、晴れです。"),
+        vec!["今日は、晴れです。"]
     );
 }
 

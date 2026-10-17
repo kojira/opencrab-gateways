@@ -663,7 +663,7 @@ pub(crate) fn spawn_say_consumer(
                     delivery_id,
                     text,
                     reply_origin,
-                    ..
+                    stream_id,
                 }) => {
                     // DI-16: say は通常発言（reply target は暗黙設定しない）。配送成功時は core の
                     // delivery_id と Discord message id の対応だけを記録する。🏁 の判断・付与は
@@ -676,7 +676,7 @@ pub(crate) fn spawn_say_consumer(
                         SayDelivery::Posted { message_id } => {
                             tracing::info!(%address, "say posted");
                             if let Some(voice) = &voice {
-                                voice.speak_posted(channel, &text);
+                                voice.speak_say(channel, &text, stream_id.as_deref());
                             }
                             if let Some(own) = &message_id {
                                 if let Some(binding_id) = client.binding_for_address(&address).await
@@ -700,7 +700,12 @@ pub(crate) fn spawn_say_consumer(
                         }
                     }
                 }
-                Some(LiveEvent::Partial { .. }) => {}
+                Some(LiveEvent::Partial { stream_id, text }) => {
+                    // D-1083: 生成途中の完成した文を VC で先に読み上げる（投稿はしない）。
+                    if let (Some(voice), Some(channel)) = (&voice, &channel) {
+                        voice.speak_partial(channel, &stream_id, &text);
+                    }
+                }
                 Some(LiveEvent::Activity { state, origin, .. }) => {
                     // #964 👀: 投稿を新しく含む LLM request の直前に届く read+origin だけで付ける。
                     // started は typing 専用で origin を持たない。1 origin 1 回。record-only/held は
@@ -776,27 +781,7 @@ pub(crate) fn spawn_say_consumer(
 mod silent_origin_tests;
 
 #[cfg(test)]
-mod caller_tests {
-    use super::*;
-
-    #[test]
-    fn gateway_classifies_authenticated_author_from_its_access_config() {
-        let access = AccessConfig {
-            owners: vec!["100".into()],
-            co_agents: [("200".into(), "agent-b".into())].into_iter().collect(),
-            trusted_users: vec!["300".into()],
-        };
-        assert_eq!(caller_for(&access, "100"), SaidCaller::Owner);
-        assert_eq!(
-            caller_for(&access, "200"),
-            SaidCaller::CoAgent {
-                agent_id: "agent-b".into()
-            }
-        );
-        assert_eq!(caller_for(&access, "300"), SaidCaller::TrustedUser);
-        assert_eq!(caller_for(&access, "400"), SaidCaller::Agent);
-    }
-}
+mod caller_tests;
 
 #[cfg(test)]
 mod model_command_route_tests;

@@ -6,6 +6,7 @@
 
 pub mod audio;
 pub mod clients;
+mod draft;
 pub mod receiver;
 pub mod session;
 pub mod settings;

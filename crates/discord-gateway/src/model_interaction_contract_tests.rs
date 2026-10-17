@@ -93,3 +93,26 @@ fn model_autocomplete_caps_at_25_and_omits_overlong_canonical_values() {
     assert!(choices.iter().all(|choice| choice.name == choice.value));
     assert!(choices.iter().all(|choice| choice.value != overlong));
 }
+
+#[test]
+fn voice_set_and_voice_reset_target_the_realtime_slot_of_this_session() {
+    assert_eq!(
+        map_model_submission("voice-set", Some("openai:gpt-5-mini")),
+        Some(InteractionAction::Command {
+            name: "set_session_model".to_string(),
+            args: json!({"model": "openai:gpt-5-mini", "profile": "realtime"}),
+        })
+    );
+    assert_eq!(
+        map_model_submission("voice-reset", None),
+        Some(InteractionAction::Command {
+            name: "reset_session_model".to_string(),
+            args: json!({"profile": "realtime"}),
+        })
+    );
+    assert_eq!(map_model_submission("voice-set", None), None);
+    assert_eq!(
+        map_model_submission("voice-reset", Some("openai:gpt-5")),
+        None
+    );
+}

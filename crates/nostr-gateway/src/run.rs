@@ -700,6 +700,7 @@ async fn send_mapped(
         system_context: None,
         reply_target: mapped.reply_target.clone(),
         live_inbound_scope: LiveInboundScope::Speaker,
+        model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
     };
     let post = client
         .post_said_with_context(

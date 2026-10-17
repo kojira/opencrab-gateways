@@ -205,6 +205,8 @@ async fn transcribed_speech_becomes_said_on_the_text_channel() {
     assert_eq!(said["text"], "（音声）こんにちは");
     assert_eq!(said["caller"]["role"], "owner");
     assert_eq!(said["start_turn"], true);
+    // Spoken turns run on the session's realtime model.
+    assert_eq!(said["model_profile"], "realtime");
     write_json(&mut core.writer, &json!({"id":said["id"],"m":"ok","seq":1}))
         .await
         .unwrap();

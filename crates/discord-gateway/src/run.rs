@@ -663,6 +663,7 @@ pub(crate) fn spawn_say_consumer(
                     delivery_id,
                     text,
                     reply_origin,
+                    ..
                 }) => {
                     // DI-16: say は通常発言（reply target は暗黙設定しない）。配送成功時は core の
                     // delivery_id と Discord message id の対応だけを記録する。🏁 の判断・付与は
@@ -699,6 +700,7 @@ pub(crate) fn spawn_say_consumer(
                         }
                     }
                 }
+                Some(LiveEvent::Partial { .. }) => {}
                 Some(LiveEvent::Activity { state, origin, .. }) => {
                     // #964 👀: 投稿を新しく含む LLM request の直前に届く read+origin だけで付ける。
                     // started は typing 専用で origin を持たない。1 origin 1 回。record-only/held は

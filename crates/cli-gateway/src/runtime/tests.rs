@@ -54,8 +54,9 @@ fn maps_all_live_contract_variants() {
             delivery_id: "d".into(),
             text: "reply".into(),
             reply_origin: None,
+            stream_id: None,
         }),
-        Event::Message { .. }
+        Some(Event::Message { .. })
     ));
     assert!(matches!(
         map_live(LiveEvent::Activity {
@@ -63,22 +64,29 @@ fn maps_all_live_contract_variants() {
             state: "read".into(),
             origin: Some("cli:x".into()),
         }),
-        Event::Activity { .. }
+        Some(Event::Activity { .. })
     ));
     assert!(matches!(
         map_live(LiveEvent::CompletedNoReply { reply_origin: None }),
-        Event::CompletedNoReply { reply_origin: None }
+        Some(Event::CompletedNoReply { reply_origin: None })
     ));
     assert!(matches!(
         map_live(LiveEvent::TurnFailed {
             reply_origin: "cli:x".into()
         }),
-        Event::TurnFailed { .. }
+        Some(Event::TurnFailed { .. })
     ));
     assert!(matches!(
         map_live(LiveEvent::Completed { target: "d".into() }),
-        Event::Completed { .. }
+        Some(Event::Completed { .. })
     ));
+    assert_eq!(
+        map_live(LiveEvent::Partial {
+            stream_id: "s".into(),
+            text: "一文目です。".into(),
+        }),
+        None
+    );
 }
 
 #[tokio::test]

@@ -13,7 +13,7 @@ use super::mock_http;
 use crate::config::{AccessConfig, SystemReactions};
 use crate::ops::{BindingDeliveryTargets, DiscordInvokeHandler};
 use crate::transport::{DiscordTransport, DryRunTransport};
-use crate::voice::session::{VoiceManager, VoiceManagerConfig, VoicePlayer};
+use crate::voice::session::{VoiceManager, VoiceManagerConfig, VoicePlayer, VOICE_SYSTEM_CONTEXT};
 
 pub(super) const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -207,6 +207,8 @@ async fn transcribed_speech_becomes_said_on_the_text_channel() {
     assert_eq!(said["start_turn"], true);
     // Spoken turns run on the session's realtime model.
     assert_eq!(said["model_profile"], "realtime");
+    // Spoken turns ask for a short spoken reply.
+    assert_eq!(said["system_context"], VOICE_SYSTEM_CONTEXT, "{said}");
     write_json(&mut core.writer, &json!({"id":said["id"],"m":"ok","seq":1}))
         .await
         .unwrap();

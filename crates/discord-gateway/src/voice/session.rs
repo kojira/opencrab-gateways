@@ -22,6 +22,8 @@ use crate::transport::{DiscordTransport, TransportOutcome};
 const MIN_SEGMENT_RMS: f64 = 250.0;
 /// said 本文の先頭に付け、音声由来の発言だと読み手（LLM・人）に分かるようにする。
 const VOICE_TEXT_PREFIX: &str = "（音声）";
+/// 音声 said の system_context。通話中は短い話し言葉で返すよう LLM へ伝える。
+pub(crate) const VOICE_SYSTEM_CONTEXT: &str = "これは音声通話での会話です。相手が詳しい説明や長い回答をはっきり求めていない限り、話し言葉で1〜2文の短い返事にしてください。箇条書き・見出し・コードブロックなどの書式は使わないでください。";
 
 /// VC への接続と再生。production は songbird、テストは記録用の偽物。
 #[async_trait::async_trait]
@@ -300,7 +302,7 @@ impl VoiceManager {
         let context = SaidContext {
             caller: crate::run::caller_for(&self.config.access, &user_id),
             start_turn: true,
-            system_context: None,
+            system_context: Some(VOICE_SYSTEM_CONTEXT.to_string()),
             reply_target: None,
             live_inbound_scope: LiveInboundScope::All,
             // Spoken turns run on the session's voice (realtime) model.

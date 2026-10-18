@@ -305,6 +305,7 @@ async fn post_message(
         reply_target: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: super::wire::TurnModelProfile::Default,
+        agent_prelude: None,
     };
     match client
         .post_said_with_self_context(

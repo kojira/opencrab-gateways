@@ -545,6 +545,7 @@ fn owner_context() -> SaidContext {
         reply_target: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
+        agent_prelude: None,
     }
 }
 

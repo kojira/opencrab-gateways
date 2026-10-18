@@ -35,11 +35,18 @@ async fn wait_synth(recorded: &Recorded, n: usize) {
     .expect("synthesis did not happen");
 }
 
-/// 先読みが終わって合成が止まったのを確かめる。
+/// 先読みの合成が止まる（200ms 増えない）まで待ち、それまでの合成数を返す。
 async fn settle(recorded: &Recorded) -> usize {
-    wait_synth(recorded, PREWARM_JOBS).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    synth_count(recorded)
+    wait_synth(recorded, 1).await;
+    let mut seen = synth_count(recorded);
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let now = synth_count(recorded);
+        if now == seen {
+            return now;
+        }
+        seen = now;
+    }
 }
 
 #[test]

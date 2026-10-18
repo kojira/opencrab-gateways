@@ -2,6 +2,7 @@ mod caller_vc;
 mod e2e;
 mod mock_http;
 mod ops;
+mod partial_speech;
 mod receiver;
 mod settings;
 mod settings_http;

@@ -386,6 +386,7 @@ async fn rust_unit_say_ok_external_rejected_close() {
             delivery_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into(),
             text: "reply".into(),
             reply_origin: None,
+            stream_id: None,
         }
     );
 

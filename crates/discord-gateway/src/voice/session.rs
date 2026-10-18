@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::audio::{downmix_48k_stereo_to_16k_mono, pcm_to_wav, rms};
+use super::draft::DraftState;
 use super::settings::load_settings;
 use super::{clients, tts_text};
 use crate::config::AccessConfig;
@@ -21,6 +22,8 @@ use crate::transport::{DiscordTransport, TransportOutcome};
 const MIN_SEGMENT_RMS: f64 = 250.0;
 /// said 本文の先頭に付け、音声由来の発言だと読み手（LLM・人）に分かるようにする。
 const VOICE_TEXT_PREFIX: &str = "（音声）";
+/// 音声 said の system_context。通話中は短い話し言葉で返すよう LLM へ伝える。
+pub(crate) const VOICE_SYSTEM_CONTEXT: &str = "これは音声通話での会話です。相手が詳しい説明や長い回答をはっきり求めていない限り、話し言葉で1〜2文の短い返事にしてください。箇条書き・見出し・コードブロックなどの書式は使わないでください。";
 
 /// VC への接続と再生。production は songbird、テストは記録用の偽物。
 #[async_trait::async_trait]
@@ -75,6 +78,8 @@ pub struct VoiceManager {
     /// binding address ごとの、直近に said が受理された人間の発言者。channel_id を省略した
     /// join_voice の呼びかけ手（core の invoke は発言者を運ばない）。メモリだけに持つ。
     speakers: Mutex<HashMap<String, String>>,
+    /// テキストチャンネルごとの、生成途中の返信の読み上げ状態（D-1083）。
+    drafts: Mutex<HashMap<String, DraftState>>,
 }
 
 impl VoiceManager {
@@ -103,6 +108,7 @@ impl VoiceManager {
             speech,
             segments: Mutex::new(HashMap::new()),
             speakers: Mutex::new(HashMap::new()),
+            drafts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -210,6 +216,9 @@ impl VoiceManager {
     pub async fn leave(&self, binding_id: &str) -> Result<Value, String> {
         let (guild, _) = self.conversation(binding_id).await?;
         let session = self.sessions.lock().unwrap().remove(&guild);
+        if let Some(session) = &session {
+            self.drafts.lock().unwrap().remove(&session.text_channel);
+        }
         self.segments
             .lock()
             .unwrap()
@@ -293,7 +302,7 @@ impl VoiceManager {
         let context = SaidContext {
             caller: crate::run::caller_for(&self.config.access, &user_id),
             start_turn: true,
-            system_context: None,
+            system_context: Some(VOICE_SYSTEM_CONTEXT.to_string()),
             reply_target: None,
             live_inbound_scope: LiveInboundScope::All,
             // Spoken turns run on the session's voice (realtime) model.
@@ -327,23 +336,80 @@ impl VoiceManager {
     /// テキストチャンネルへ投稿できた本文を、そのチャンネルに結びついた VC で読み上げる。
     /// 合成・再生は順番に行い、失敗は warn だけにする（投稿は妨げない）。
     pub fn speak_posted(&self, text_channel: &str, text: &str) {
-        let guilds: Vec<u64> = self
-            .sessions
+        let text = tts_text::clean_for_tts(text);
+        if text.is_empty() {
+            return;
+        }
+        self.enqueue_speech(text_channel, &[text]);
+    }
+
+    /// 生成途中の返信（core の partial・完成した文だけの累積本文）のうち、まだ読んでいない文を
+    /// 読み上げる。VC に結びついていないチャンネルの partial は捨て、状態も持たない。
+    pub fn speak_partial(&self, text_channel: &str, stream_id: &str, text: &str) {
+        tracing::debug!(
+            %text_channel,
+            %stream_id,
+            text_chars = text.chars().count(),
+            "voice partial received"
+        );
+        if self.session_guilds(text_channel).is_empty() {
+            return;
+        }
+        let speech = {
+            let mut drafts = self.drafts.lock().unwrap();
+            let draft = drafts
+                .entry(text_channel.to_string())
+                .or_insert_with(|| DraftState::new(stream_id));
+            if draft.stream_id != stream_id {
+                *draft = DraftState::new(stream_id);
+            }
+            draft.advance(text)
+        };
+        self.enqueue_speech(text_channel, &speech);
+    }
+
+    /// 投稿できた say を読み上げる。partial で読み始めた同じ stream の say なら、読んだ文との
+    /// 最長共通接頭辞より後ろだけを読む。それ以外は [`Self::speak_posted`] と同じく全文を読む。
+    pub fn speak_say(&self, text_channel: &str, text: &str, stream_id: Option<&str>) {
+        let draft = stream_id.and_then(|stream_id| {
+            let mut drafts = self.drafts.lock().unwrap();
+            match drafts.get(text_channel) {
+                Some(draft) if draft.stream_id == stream_id => drafts.remove(text_channel),
+                _ => None,
+            }
+        });
+        match draft {
+            Some(draft) => self.enqueue_speech(text_channel, &draft.finish(text)),
+            None => self.speak_posted(text_channel, text),
+        }
+    }
+
+    fn session_guilds(&self, text_channel: &str) -> Vec<u64> {
+        self.sessions
             .lock()
             .unwrap()
             .iter()
             .filter(|(_, session)| session.text_channel == text_channel)
             .map(|(guild, _)| *guild)
-            .collect();
-        let text = tts_text::clean_for_tts(text);
-        if text.is_empty() {
+            .collect()
+    }
+
+    fn enqueue_speech(&self, text_channel: &str, texts: &[String]) {
+        if texts.is_empty() {
             return;
         }
-        for guild in guilds {
-            let _ = self.speech.send(Speech {
-                guild,
-                text: text.clone(),
-            });
+        for guild in self.session_guilds(text_channel) {
+            for text in texts {
+                tracing::debug!(
+                    guild,
+                    text_chars = text.chars().count(),
+                    "voice speech enqueued"
+                );
+                let _ = self.speech.send(Speech {
+                    guild,
+                    text: text.clone(),
+                });
+            }
         }
     }
 
@@ -419,8 +485,19 @@ async fn speak_serially(
         // 1 文の失敗は warn にして次の文へ進む。
         for sentence in tts_text::split_sentences(&text) {
             let result = async {
+                let started = std::time::Instant::now();
+                let text_chars = sentence.chars().count();
+                tracing::debug!(guild, text_chars, "TTS synthesis started");
                 let wav = clients::synthesize(&http, &settings.tts, &sentence, voice).await?;
-                player.play(guild, wav).await
+                tracing::debug!(
+                    guild,
+                    text_chars,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "TTS synthesis finished"
+                );
+                player.play(guild, wav).await?;
+                tracing::debug!(guild, text_chars, "TTS audio enqueued to the player");
+                anyhow::Ok(())
             }
             .await;
             if let Err(error) = result {

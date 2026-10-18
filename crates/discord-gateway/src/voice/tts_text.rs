@@ -5,6 +5,21 @@
 pub const MAX_TTS_CHARS: usize = 300;
 
 pub fn clean_for_tts(text: &str) -> String {
+    let trimmed = clean_for_tts_uncapped(text);
+    if trimmed.chars().count() > MAX_TTS_CHARS {
+        let cut: String = trimmed.chars().take(MAX_TTS_CHARS).collect();
+        format!("{cut}{TTS_CAP_SUFFIX}")
+    } else {
+        trimmed
+    }
+}
+
+/// 上限で切った読み上げの末尾に付ける。
+pub const TTS_CAP_SUFFIX: &str = "、以下省略";
+
+/// [`clean_for_tts`] と同じ整形で、文字数の上限を掛けない。生成途中の本文は文ごとに読み上げ、
+/// 上限は読み上げた累計で掛ける（D-1083）。
+pub fn clean_for_tts_uncapped(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_code_block = false;
     for line in text.lines() {
@@ -62,18 +77,12 @@ pub fn clean_for_tts(text: &str) -> String {
         result.push(c);
     }
     // 改行は文の区切りとして残す（split_sentences が行ごとに分ける）。行内の空白は 1 つにまとめ、空行は捨てる。
-    let trimmed = result
+    result
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
-        .join("\n");
-    if trimmed.chars().count() > MAX_TTS_CHARS {
-        let cut: String = trimmed.chars().take(MAX_TTS_CHARS).collect();
-        format!("{cut}、以下省略")
-    } else {
-        trimmed
-    }
+        .join("\n")
 }
 
 /// 読み上げ本文を文単位に分ける。「。！？!?」と改行で区切り、終止記号は直前の文に付ける

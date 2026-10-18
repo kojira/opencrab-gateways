@@ -607,7 +607,10 @@ async fn live_loop(
             LiveEvent::TurnFailed { .. } => Some((false, String::new())),
             _ => None,
         };
-        if emitters.event(map_live(live)).await.is_err() {
+        let Some(event) = map_live(live) else {
+            continue;
+        };
+        if emitters.event(event).await.is_err() {
             break;
         }
         if let Some((is_start, activity_id)) = activity_change {
@@ -623,12 +626,13 @@ async fn live_loop(
     }
 }
 
-fn map_live(event: LiveEvent) -> Event {
-    match event {
+fn map_live(event: LiveEvent) -> Option<Event> {
+    Some(match event {
         LiveEvent::Message {
             delivery_id,
             text,
             reply_origin,
+            ..
         } => Event::Message {
             delivery_id,
             text,
@@ -647,7 +651,9 @@ fn map_live(event: LiveEvent) -> Event {
         LiveEvent::CompletedNoReply { reply_origin } => Event::CompletedNoReply { reply_origin },
         LiveEvent::TurnFailed { reply_origin } => Event::TurnFailed { reply_origin },
         LiveEvent::Error { code, .. } => error_event(None, stable_wire_code(&code)),
-    }
+        // The cli prints only the final message; partial text is not part of its output.
+        LiveEvent::Partial { .. } => return None,
+    })
 }
 
 async fn connection_loop(

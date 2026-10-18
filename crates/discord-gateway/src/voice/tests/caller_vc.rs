@@ -122,6 +122,8 @@ async fn speaks(s: &mut Setup, message_id: &str, author: &str, bot: bool) {
     assert_eq!(said["author_id"], author);
     // Typed messages keep the session's default model.
     assert!(said.get("model_profile").is_none(), "{said}");
+    // The short-spoken-reply instruction is only for voice turns.
+    assert!(said.get("system_context").is_none(), "{said}");
     write_json(
         &mut s.core.writer,
         &json!({"id": said["id"], "m": "ok", "seq": 1}),

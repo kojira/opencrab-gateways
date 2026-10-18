@@ -410,6 +410,8 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
         }
         // web には platform message id 対応表が無いため、Discord 用の完了対象は流さない。
         LiveEvent::Completed { .. } => None,
+        // web SSE は最終 message だけを流す。途中の partial text は流さない（外形は不変）。
+        LiveEvent::Partial { .. } => None,
         // R3: web SSE は失敗を通知イベントとして流す（reply_origin は Nostr 固有の e-tag 用途）。
         LiveEvent::TurnFailed { .. } => Some(Event::default().event("turn_failed").data("{}")),
         LiveEvent::Error { code, detail } => Some(
@@ -424,6 +426,15 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
 mod http_tests {
     use super::*;
     use tower::ServiceExt as _;
+
+    #[test]
+    fn partial_text_is_not_streamed_to_sse() {
+        let partial = LiveEvent::Partial {
+            stream_id: "s".into(),
+            text: "一文目です。".into(),
+        };
+        assert!(live_to_event(&partial).is_none());
+    }
 
     #[tokio::test]
     async fn web_routes_preserve_historical_credential_free_access() {

@@ -11,7 +11,7 @@ use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use super::aizuchi::{aizuchi_context_line, choose_aizuchi};
+use super::aizuchi::choose_aizuchi;
 use super::audio::{downmix_48k_stereo_to_16k_mono, pcm_to_wav, rms};
 use super::draft::DraftState;
 use super::settings::{load_settings, VoiceSettings};
@@ -90,6 +90,8 @@ pub struct VoiceManager {
     synthesizer: Arc<Synthesizer>,
     /// 読み上げキューに積んでまだ再生へ渡し終えていない文の数（相づちを打つかの判断用）。
     pending_speech: Arc<AtomicUsize>,
+    /// テキストチャンネルごとの、直前に agent_prelude として送った相づち（続けて同じものを選ばない）。
+    last_aizuchi: Mutex<HashMap<String, &'static str>>,
 }
 
 impl VoiceManager {
@@ -135,6 +137,7 @@ impl VoiceManager {
             drafts: Mutex::new(HashMap::new()),
             synthesizer,
             pending_speech,
+            last_aizuchi: Mutex::new(HashMap::new()),
         })
     }
 
@@ -326,21 +329,20 @@ impl VoiceManager {
             .unwrap_or_default();
         let origin = voice_origin_for(&session.text_channel, &guild.to_string(), &user_id, nanos);
         let label = self.label(user).await;
-        // D-1085 P4: 確定した発話の語尾で相づちを選び、LLM には「もう言った」と伝える。
-        let aizuchi = choose_aizuchi(&text);
-        let system_context = match aizuchi {
-            Some(aizuchi) => format!("{VOICE_SYSTEM_CONTEXT}\n{}", aizuchi_context_line(aizuchi)),
-            None => VOICE_SYSTEM_CONTEXT.to_string(),
-        };
+        // D-1085 §9: 流す相づちを said の前に決め、agent_prelude で core へ送る。core はそれを
+        // この発話の直後のエージェント自身の発言として会話履歴へ残す。
+        let aizuchi = self
+            .ready_aizuchi(guild, &session.text_channel, &settings, &text, nanos)
+            .await;
         let context = SaidContext {
             caller: crate::run::caller_for(&self.config.access, &user_id),
             start_turn: true,
-            system_context: Some(system_context),
+            system_context: Some(VOICE_SYSTEM_CONTEXT.to_string()),
             reply_target: None,
             live_inbound_scope: LiveInboundScope::All,
             // Spoken turns run on the session's voice (realtime) model.
             model_profile: opencrab_gate_client::wire::TurnModelProfile::Realtime,
-            agent_prelude: None,
+            agent_prelude: aizuchi.as_ref().map(|(text, _)| text.to_string()),
         };
         let body = format!("{VOICE_TEXT_PREFIX}{text}");
         let outcome = client
@@ -358,8 +360,12 @@ impl VoiceManager {
             Ok(SaidOutcome::Accepted { seq }) => {
                 self.note_speaker(&session.address, &user_id);
                 tracing::info!(address = %session.address, seq, "voice said accepted");
-                if let Some(aizuchi) = aizuchi {
-                    self.play_aizuchi(guild, &settings, aizuchi).await;
+                if let Some((aizuchi, wav)) = aizuchi {
+                    self.last_aizuchi
+                        .lock()
+                        .unwrap()
+                        .insert(session.text_channel.clone(), aizuchi);
+                    self.play_aizuchi(guild, aizuchi, wav).await;
                 }
             }
             Ok(other) => {
@@ -370,18 +376,38 @@ impl VoiceManager {
         }
     }
 
-    /// 相づちを TTS キャッシュから流す。読み上げ中・読み上げ待ちがあるとき、キャッシュに無いときは
-    /// 流さない（その場で合成すると返事の前に待ちが増えるため）。
-    async fn play_aizuchi(&self, guild: u64, settings: &VoiceSettings, aizuchi: &str) {
-        let style = settings.tts.voice_for_agent(&self.config.agent_id);
+    /// この発話の後に流す相づちと、その音声（TTS キャッシュ）を決める。2 文字未満の発話、読み上げ中・
+    /// 読み上げ待ちがあるとき、キャッシュに無いときは流さない（その場で合成すると返事の前に待ちが
+    /// 増えるため）。同じテキストチャンネルで直前に流した相づちは選ばない。
+    async fn ready_aizuchi(
+        &self,
+        guild: u64,
+        text_channel: &str,
+        settings: &VoiceSettings,
+        text: &str,
+        pick: u128,
+    ) -> Option<(&'static str, Vec<u8>)> {
+        let previous = self.last_aizuchi.lock().unwrap().get(text_channel).copied();
+        let aizuchi = choose_aizuchi(text, previous, (pick % 1_000_003) as usize)?;
         if self.pending_speech.load(Ordering::SeqCst) > 0 || !self.player.is_idle(guild).await {
             tracing::debug!(guild, "aizuchi skipped; the bot is speaking");
-            return;
+            return None;
         }
+        let style = settings.tts.voice_for_agent(&self.config.agent_id);
         let Some(wav) = self.synthesizer.cached(style, aizuchi) else {
             tracing::warn!(guild, "aizuchi skipped; not in the TTS cache");
-            return;
+            return None;
         };
+        Some((aizuchi, wav))
+    }
+
+    /// said が受理された後に相づちを流す。said を送ってからここまでの間に読み上げが始まったら
+    /// 流さない（会話履歴には残るが、重ねて話すよりよい）。
+    async fn play_aizuchi(&self, guild: u64, aizuchi: &str, wav: Vec<u8>) {
+        if self.pending_speech.load(Ordering::SeqCst) > 0 || !self.player.is_idle(guild).await {
+            tracing::debug!(guild, "aizuchi skipped; the bot started speaking");
+            return;
+        }
         match self.player.play(guild, wav).await {
             Ok(()) => tracing::debug!(guild, aizuchi, "aizuchi played"),
             Err(error) => {

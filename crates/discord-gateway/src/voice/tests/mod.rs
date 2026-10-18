@@ -5,6 +5,7 @@ mod mock_http;
 mod ops;
 mod partial_speech;
 mod receiver;
+mod segmenter;
 mod settings;
 mod settings_http;
 mod tts_cache;

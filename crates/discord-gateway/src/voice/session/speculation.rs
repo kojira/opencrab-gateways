@@ -7,7 +7,7 @@
 //!
 //! 先行生成の partial は再生せず、TTS キャッシュへ合成だけしておく（保留）。昇格の知らせ
 //! （provisional_result）が来たら相づち、保留した文の順に流し、以後の partial と最終 say は
-//! 残りだけを読む。昇格しなければ保留を捨て、通常のターンの読み上げに任せる。
+//! 残りだけを読む。昇格しなければ相づちだけ流して保留を捨て、通常のターンの読み上げに任せる。
 
 use std::sync::{Arc, Mutex};
 
@@ -25,7 +25,7 @@ pub(super) const FIRST_PROVISIONAL_CHARS: usize = 5;
 /// 前の先行生成の本文からこの文字数以上増えたら、新しい先行生成に置き換える。
 pub(super) const REPLACE_PROVISIONAL_CHARS: usize = 8;
 
-/// 1 度だけ流す相づち（said の受理と昇格の知らせの先に来た方が流す）。
+/// 1 度だけ流す相づち（先行生成付きの said では昇格の知らせだけが流す）。
 pub(super) type AizuchiSlot = Arc<Mutex<Option<(&'static str, Vec<u8>)>>>;
 
 /// core に送った先行生成。
@@ -355,8 +355,8 @@ impl VoiceManager {
         tracing::debug!(%text_channel, provisional_id, "provisional partial held");
     }
 
-    /// core の昇格の知らせ。昇格なら相づち、保留した文の順に流し、残りを読めるよう読み上げ状態を
-    /// 引き継ぐ。昇格しなければ保留を捨てる。
+    /// core の昇格の知らせ。まず相づちを流す。昇格なら続けて保留した文を流し、残りを読めるよう
+    /// 読み上げ状態を引き継ぐ。昇格しなければ保留を捨てる。
     async fn on_provisional_result(
         &self,
         text_channel: &str,
@@ -367,9 +367,7 @@ impl VoiceManager {
             return;
         };
         tracing::debug!(%text_channel, provisional_id, promoted, "provisional result");
-        if !promoted {
-            return;
-        }
+        // 相づちは said と一緒に履歴へ残っているので、昇格の有無にかかわらずここで先に流す。
         let aizuchi = hold.slot.lock().unwrap().take();
         if let Some((aizuchi, wav)) = aizuchi {
             for guild in self.session_guilds(&hold.text_channel) {
@@ -380,6 +378,9 @@ impl VoiceManager {
                     }
                 }
             }
+        }
+        if !promoted {
+            return;
         }
         let Some(stream_id) = hold.stream_id.clone() else {
             // まだ partial が無い。以後の partial を（保留せず）読むよう印を付けて残す。

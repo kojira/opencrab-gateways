@@ -428,7 +428,10 @@ impl VoiceManager {
             .await;
         if !matches!(outcome, Ok(SaidOutcome::Accepted { .. })) {
             if let Some(id) = &provisional_id {
+                // 受理されなかった said の先行生成は core で TTL まで残るので中止する（最善努力）。
                 self.holds.lock().unwrap().remove(id);
+                let result = client.provisional_cancel(&session.address, id).await;
+                tracing::debug!(guild, provisional_id = %id, ok = result.is_ok(), "provisional cancelled after an unaccepted said");
             }
         }
         match outcome {
@@ -441,10 +444,12 @@ impl VoiceManager {
                         .unwrap()
                         .insert(session.text_channel.clone(), prelude);
                 }
-                // 昇格の知らせが先に届いていれば、相づちはそちらで流してある。
-                let aizuchi = slot.lock().unwrap().take();
-                if let Some((aizuchi, wav)) = aizuchi {
-                    self.play_aizuchi(guild, aizuchi, wav).await;
+                // 先行生成付きの said では、相づちは昇格の知らせ（on_provisional_result）が流す。
+                if provisional_id.is_none() {
+                    let aizuchi = slot.lock().unwrap().take();
+                    if let Some((aizuchi, wav)) = aizuchi {
+                        self.play_aizuchi(guild, aizuchi, wav).await;
+                    }
                 }
             }
             Ok(other) => {

@@ -315,19 +315,75 @@ async fn a_changed_onset_transcript_replaces_and_an_unpromoted_hold_is_dropped()
     let said = s.ack_next().await;
     assert_eq!(said["provisional_id"], id);
     s.settle().await;
-    // said の受理で相づちだけ流れる（保留した文は流さない）。
-    assert_eq!(s.played_count(), 1);
-    let played_after_said = s.played_count();
+    // provisional_id 付きの said では、受理しても相づちを流さない（昇格の知らせで流す）。
+    assert_eq!(s.played_count(), 0, "the said ok must not play the aizuchi");
 
-    // 昇格しなければ保留を捨て、通常のターンの partial と say で読む。
+    // 昇格しなければ相づちだけ流して保留を捨て、通常のターンの partial と say で読む。
     s.send(
         json!({"m":"provisional_result","binding_id":BINDING,"provisional_id":id,
                   "promoted":false}),
     )
     .await;
     s.settle().await;
-    assert_eq!(s.played_count(), played_after_said);
+    assert_eq!(s.played_count(), 1, "the aizuchi plays on the result");
     s.say("s1", "うん、晴れだね。").await;
     s.settle().await;
-    assert_eq!(s.played_count(), played_after_said + 1);
+    assert_eq!(s.played_count(), 2);
+}
+
+#[tokio::test]
+async fn only_the_promotion_result_plays_the_aizuchi_then_the_held_speech() {
+    // said の ok（話者キュー）と昇格の知らせ（live ループ）は並行に届く。相づちを流すのは昇格の
+    // 知らせの側だけにして、読み上げ待ちで飛ばされたり保留した文と順が入れ替わったりしないようにする。
+    let mut s = setup(vec![(0, "今日はいい天気ですね")]).await;
+    s.event(snapshot(0, true));
+    let provisional = s.ack_next().await;
+    let id = provisional["provisional_id"].clone();
+    assert!(provisional["agent_prelude"].is_string(), "{provisional}");
+    s.provisional_partial(&id, "はい。").await;
+    s.settle().await;
+    s.event(end(Some(0)));
+    let said = s.ack_next().await;
+    assert_eq!(said["m"], "said", "{said}");
+    s.settle().await;
+    assert_eq!(s.played_count(), 0, "the said ok must not play the aizuchi");
+    s.send(
+        json!({"m":"provisional_result","binding_id":BINDING,"provisional_id":id,
+                  "promoted":true}),
+    )
+    .await;
+    s.settle().await;
+    assert_eq!(s.played_count(), 2, "aizuchi once, then the held sentence");
+}
+
+#[tokio::test]
+async fn a_rejected_said_cancels_its_provisional() {
+    let mut s = setup(vec![(0, "今日はいい天気ですね")]).await;
+    s.event(snapshot(0, true));
+    let provisional = s.ack_next().await;
+    let id = provisional["provisional_id"].clone();
+    s.event(end(Some(0)));
+    let said: Value = serde_json::from_slice(
+        &tokio::time::timeout(Duration::from_secs(3), read_frame(&mut s.core.reader))
+            .await
+            .expect("no said")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(said["m"], "said", "{said}");
+    s.send(json!({"id": said["id"], "m": "err", "code": "bad_request", "detail": null}))
+        .await;
+    let next = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut s.core.reader)).await;
+    assert!(
+        next.is_ok(),
+        "no provisional_cancel after the rejected said"
+    );
+    let cancel: Value = serde_json::from_slice(&next.unwrap().unwrap()).unwrap();
+    write_json(&mut s.core.writer, &json!({"id": cancel["id"], "m": "ok"}))
+        .await
+        .unwrap();
+    assert_eq!(cancel["m"], "provisional_cancel", "{cancel}");
+    assert_eq!(cancel["provisional_id"], id);
+    s.settle().await;
+    assert_eq!(s.played_count(), 0);
 }

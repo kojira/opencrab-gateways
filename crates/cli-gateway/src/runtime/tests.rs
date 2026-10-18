@@ -84,6 +84,7 @@ fn maps_all_live_contract_variants() {
         map_live(LiveEvent::Partial {
             stream_id: "s".into(),
             text: "一文目です。".into(),
+            provisional_id: None,
         }),
         None
     );

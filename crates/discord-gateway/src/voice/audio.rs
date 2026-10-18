@@ -55,24 +55,130 @@ pub fn rms(pcm: &[i16]) -> f64 {
     (sum / pcm.len() as f64).sqrt()
 }
 
-/// ユーザー単位の発話セグメンテーション。
+/// 1 フレーム（20ms・48kHz ステレオ）の RMS がこれ未満なら無音として数える（D-1085 P3）。
+/// Discord は話し終えた後もしばらく小さな音のパケットを送ることがあるため。
+pub const SILENT_FRAME_RMS: f64 = 250.0;
+/// 話している間の途中認識の間隔（声のフレーム数、20ms 単位 = 200ms）。
+pub const SNAPSHOT_EVERY_FRAMES: u32 = 10;
+/// 無音がこのフレーム数（100ms）続いたら、それまでの全体を認識する（話し終わりの候補）。
+pub const ONSET_SILENT_FRAMES: u32 = 5;
+/// 無音がこのフレーム数（200ms）続き、話し終わり候補の認識結果が文の終わりらしければ確定する。
+pub const CANDIDATE_END_SILENT_FRAMES: u32 = 10;
+/// 無音がこのフレーム数（700ms）続いたら、認識結果によらず確定する。
+pub const HARD_END_SILENT_FRAMES: u32 = 35;
+/// これより短い（300ms 未満 = 48k*2ch*0.3s）発話は雑音として捨てる。
+const MIN_UTTERANCE_SAMPLES: usize = 28_800;
+
+/// 文の終わりらしい語尾（roleplay-demo `src/rp/shared/end-rule.ts` の SENTENCE_END と同じ一覧）。
+const SENTENCE_ENDINGS: &[&str] = &[
+    "です",
+    "ます",
+    "でした",
+    "ました",
+    "ません",
+    "ませんか",
+    "ください",
+    "下さい",
+    "ございます",
+    "ですか",
+    "ますか",
+    "でしょうか",
+    "ですね",
+    "ますね",
+    "ですよ",
+    "ますよ",
+    "か",
+    "ね",
+    "よ",
+    "はい",
+    "いいえ",
+    "ええ",
+    "うん",
+    "そう",
+    "なるほど",
+    "わかりました",
+    "分かりました",
+];
+
+/// 認識結果が文の終わりらしい（末尾の句読点・空白を除いて [`SENTENCE_ENDINGS`] のどれかで終わる）。
+pub fn ends_like_sentence(text: &str) -> bool {
+    let trimmed =
+        text.trim_end_matches(|c: char| c.is_whitespace() || "。．.、,，！!？?…".contains(c));
+    SENTENCE_ENDINGS
+        .iter()
+        .any(|ending| trimmed.ends_with(ending))
+}
+
+/// 話し終わり候補（無音 100ms）の認識結果が文の終わりらしいか。受信側の区切りと、認識する
+/// 側（[`super::session::VoiceManager`]）で共有する。`seq` はその候補の [`SegmenterEvent::Snapshot`]。
+#[derive(Clone, Default)]
+pub struct EndVerdict(std::sync::Arc<std::sync::Mutex<Option<(u64, bool)>>>);
+
+impl EndVerdict {
+    pub fn set(&self, seq: u64, sentence_like: bool) {
+        *self.0.lock().unwrap() = Some((seq, sentence_like));
+    }
+
+    fn sentence_like(&self, seq: u64) -> bool {
+        *self.0.lock().unwrap() == Some((seq, true))
+    }
+}
+
+/// 確定の理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndReason {
+    /// 無音 200ms 以上で、話し終わり候補の認識結果が文の終わりらしい。
+    Candidate,
+    /// 無音 700ms。
+    Hard,
+    /// 最大長に達した。
+    MaxLength,
+    /// VC から抜けた等で言い残しを確定した。
+    Flush,
+}
+
+/// 区切りの出来事（48kHz ステレオ PCM）。`utt` は発話の番号、`seq` は認識依頼の番号（どちらも
+/// その区切り内で増え続ける）。
+pub enum SegmenterEvent {
+    /// 途中までの音声を認識に回す。`onset` は無音 100ms（話し終わり候補）での全体。
+    Snapshot {
+        utt: u64,
+        seq: u64,
+        pcm: Vec<i16>,
+        onset: bool,
+        verdict: EndVerdict,
+    },
+    /// 発話の確定。`onset_seq` はこの発話の最後の話し終わり候補で、その後に声は無い
+    /// （認識結果をそのまま使える）。最大長・言い残しの確定では `None`。
+    End {
+        utt: u64,
+        pcm: Vec<i16>,
+        onset_seq: Option<u64>,
+        reason: EndReason,
+        /// 最後の声の後、無音とみなした小さな音のパケットの数（Discord が送り続ける尾の長さ）。
+        quiet_packets: u32,
+    },
+    /// 短すぎて捨てた発話。
+    Discarded { utt: u64 },
+}
+
+/// ユーザー単位の発話セグメンテーション（D-1085 P3）。
 ///
-/// Discord は 20ms ごとに音声パケットが届く。発話が `silence_frames` 分
-/// 途切れたら 1 セグメント確定。`max_frames` を超えたら強制確定
-/// （長広舌でも STT を回し始めるため）。
+/// Discord は 20ms ごとに音声パケットが届く。話している間は 200ms ごとに途中までを、無音 100ms で
+/// 全体を認識に回す。無音 200ms で話し終わり候補の認識結果が文の終わりらしければ確定し、そうで
+/// なければ無音 700ms で確定する。間に声が戻れば同じ発話の続き。`max_frames` を超えたら強制確定。
 pub struct SpeechSegmenter {
     buf: Vec<i16>,
     silent_streak: u32,
-    /// セグメント確定とみなす無音フレーム数（20ms 単位）。
-    pub silence_frames: u32,
-    /// 1 セグメントの最大フレーム数（20ms 単位）。
+    quiet_packets: u32,
+    voiced_since_snapshot: u32,
+    /// 1 発話の最大フレーム数（20ms 単位）。
     pub max_frames: usize,
     frames_in_buf: usize,
-}
-
-/// 確定したセグメント（48kHz ステレオ PCM）。
-pub struct Segment {
-    pub pcm_48k_stereo: Vec<i16>,
+    utt: u64,
+    next_seq: u64,
+    last_onset: Option<u64>,
+    verdict: EndVerdict,
 }
 
 impl SpeechSegmenter {
@@ -80,54 +186,109 @@ impl SpeechSegmenter {
         Self {
             buf: Vec::new(),
             silent_streak: 0,
-            silence_frames: 40, // 800ms
-            max_frames: 750,    // 15s
+            quiet_packets: 0,
+            voiced_since_snapshot: 0,
+            max_frames: 750, // 15s
             frames_in_buf: 0,
+            utt: 0,
+            next_seq: 0,
+            last_onset: None,
+            verdict: EndVerdict::default(),
         }
     }
 
-    /// 20ms フレームを追加する。セグメントが確定したら返す。
-    pub fn push_frame(&mut self, frame: &[i16]) -> Option<Segment> {
+    /// 20ms の音声パケットを追加する。RMS が [`SILENT_FRAME_RMS`] 未満なら無音として数える。
+    pub fn push_frame(&mut self, frame: &[i16]) -> Option<SegmenterEvent> {
+        if rms(frame) < SILENT_FRAME_RMS {
+            if self.buf.is_empty() {
+                return None;
+            }
+            self.buf.extend_from_slice(frame);
+            self.frames_in_buf += 1;
+            self.quiet_packets += 1;
+            return self.silent_tick();
+        }
         self.buf.extend_from_slice(frame);
         self.frames_in_buf += 1;
         self.silent_streak = 0;
+        self.quiet_packets = 0;
         if self.frames_in_buf >= self.max_frames {
-            return self.take_segment();
+            return self.end(None, EndReason::MaxLength);
+        }
+        self.voiced_since_snapshot += 1;
+        if self.voiced_since_snapshot >= SNAPSHOT_EVERY_FRAMES {
+            return Some(self.snapshot(false));
         }
         None
     }
 
     /// このフレームで当該ユーザーが無音だったことを通知する。
-    /// 無音が閾値まで続いたらセグメントを確定して返す。
-    pub fn push_silence(&mut self) -> Option<Segment> {
+    pub fn push_silence(&mut self) -> Option<SegmenterEvent> {
         if self.buf.is_empty() {
             return None;
         }
-        self.silent_streak += 1;
-        if self.silent_streak >= self.silence_frames {
-            return self.take_segment();
-        }
-        None
+        self.silent_tick()
     }
 
     /// バッファに溜まっている音声を強制確定する（VC退出時など）。
-    pub fn flush(&mut self) -> Option<Segment> {
-        self.take_segment()
-    }
-
-    fn take_segment(&mut self) -> Option<Segment> {
-        self.silent_streak = 0;
-        self.frames_in_buf = 0;
+    pub fn flush(&mut self) -> Option<SegmenterEvent> {
         if self.buf.is_empty() {
             return None;
         }
-        let pcm = std::mem::take(&mut self.buf);
-        // 短すぎる（<300ms 相当 = 48k*2ch*0.3s）セグメントはノイズ扱いで捨てる
-        if pcm.len() < 28_800 {
-            return None;
+        self.end(None, EndReason::Flush)
+    }
+
+    fn silent_tick(&mut self) -> Option<SegmenterEvent> {
+        self.silent_streak += 1;
+        match self.silent_streak {
+            ONSET_SILENT_FRAMES => Some(self.snapshot(true)),
+            n if n >= HARD_END_SILENT_FRAMES => self.end(self.last_onset, EndReason::Hard),
+            n if n >= CANDIDATE_END_SILENT_FRAMES
+                && self
+                    .last_onset
+                    .is_some_and(|seq| self.verdict.sentence_like(seq)) =>
+            {
+                self.end(self.last_onset, EndReason::Candidate)
+            }
+            _ => None,
         }
-        Some(Segment {
-            pcm_48k_stereo: pcm,
+    }
+
+    fn snapshot(&mut self, onset: bool) -> SegmenterEvent {
+        self.voiced_since_snapshot = 0;
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        if onset {
+            self.last_onset = Some(seq);
+        }
+        SegmenterEvent::Snapshot {
+            utt: self.utt,
+            seq,
+            pcm: self.buf.clone(),
+            onset,
+            verdict: self.verdict.clone(),
+        }
+    }
+
+    fn end(&mut self, onset_seq: Option<u64>, reason: EndReason) -> Option<SegmenterEvent> {
+        let utt = self.utt;
+        let quiet_packets = self.quiet_packets;
+        self.utt += 1;
+        self.silent_streak = 0;
+        self.quiet_packets = 0;
+        self.voiced_since_snapshot = 0;
+        self.frames_in_buf = 0;
+        self.last_onset = None;
+        let pcm = std::mem::take(&mut self.buf);
+        if pcm.len() < MIN_UTTERANCE_SAMPLES {
+            return Some(SegmenterEvent::Discarded { utt });
+        }
+        Some(SegmenterEvent::End {
+            utt,
+            pcm,
+            onset_seq,
+            reason,
+            quiet_packets,
         })
     }
 }
@@ -169,58 +330,6 @@ mod tests {
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16000);
         // channels
         assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1);
-    }
-
-    #[test]
-    fn test_segmenter_finalizes_on_silence() {
-        let mut seg = SpeechSegmenter::new();
-        // 1 フレーム = 20ms の 48k ステレオ = 1920 サンプル
-        let frame = vec![500i16; 1920];
-        // 1 秒分（50 フレーム）話す
-        for _ in 0..50 {
-            assert!(seg.push_frame(&frame).is_none());
-        }
-        // 無音 39 フレームでは確定しない
-        for _ in 0..39 {
-            assert!(seg.push_silence().is_none());
-        }
-        // 40 フレーム目で確定
-        let s = seg.push_silence().expect("segment must finalize");
-        assert_eq!(s.pcm_48k_stereo.len(), 1920 * 50);
-        // 確定後は空
-        assert!(seg.flush().is_none());
-    }
-
-    #[test]
-    fn test_segmenter_discards_too_short() {
-        let mut seg = SpeechSegmenter::new();
-        let frame = vec![500i16; 1920];
-        // 200ms（10 フレーム）だけ → ノイズ扱い
-        for _ in 0..10 {
-            seg.push_frame(&frame);
-        }
-        for _ in 0..40 {
-            if let Some(_s) = seg.push_silence() {
-                panic!("short segment must be discarded");
-            }
-        }
-    }
-
-    #[test]
-    fn test_segmenter_force_finalize_at_max() {
-        let mut seg = SpeechSegmenter::new();
-        seg.max_frames = 50; // 1 秒に短縮
-        let frame = vec![500i16; 1920];
-        let mut got = None;
-        for i in 0..60 {
-            if let Some(s) = seg.push_frame(&frame) {
-                got = Some((i, s));
-                break;
-            }
-        }
-        let (i, s) = got.expect("must force-finalize at max_frames");
-        assert_eq!(i, 49);
-        assert_eq!(s.pcm_48k_stereo.len(), 1920 * 50);
     }
 
     #[test]

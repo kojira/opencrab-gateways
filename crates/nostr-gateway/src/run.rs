@@ -702,6 +702,7 @@ async fn send_mapped(
         live_inbound_scope: LiveInboundScope::Speaker,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
         agent_prelude: None,
+        provisional_id: None,
     };
     let post = client
         .post_said_with_context(

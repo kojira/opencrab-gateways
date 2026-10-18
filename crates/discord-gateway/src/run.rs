@@ -598,6 +598,7 @@ pub(crate) async fn handle_incoming(
         live_inbound_scope: LiveInboundScope::All,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
         agent_prelude: None,
+        provisional_id: None,
     };
     let outcome = client
         .post_said_with_context(
@@ -701,10 +702,30 @@ pub(crate) fn spawn_say_consumer(
                         }
                     }
                 }
-                Some(LiveEvent::Partial { stream_id, text }) => {
+                Some(LiveEvent::Partial {
+                    stream_id,
+                    text,
+                    provisional_id,
+                }) => {
                     // D-1083: 生成途中の完成した文を VC で先に読み上げる（投稿はしない）。
+                    // D-1085: 先行生成の partial は昇格まで保留する。
                     if let (Some(voice), Some(channel)) = (&voice, &channel) {
-                        voice.speak_partial(channel, &stream_id, &text);
+                        match provisional_id {
+                            Some(provisional_id) => {
+                                voice.hold_partial(channel, &stream_id, &text, &provisional_id)
+                            }
+                            None => voice.speak_partial(channel, &stream_id, &text),
+                        }
+                    }
+                }
+                Some(LiveEvent::ProvisionalResult {
+                    provisional_id,
+                    promoted,
+                }) => {
+                    if let (Some(voice), Some(channel)) = (&voice, &channel) {
+                        voice
+                            .on_provisional_result(channel, &provisional_id, promoted)
+                            .await;
                     }
                 }
                 Some(LiveEvent::Activity { state, origin, .. }) => {

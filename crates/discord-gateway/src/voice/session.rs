@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::aizuchi::choose_aizuchi;
-use super::audio::{downmix_48k_stereo_to_16k_mono, pcm_to_wav, rms};
+use super::audio::{downmix_48k_stereo_to_16k_mono, pcm_to_wav, rms, SegmenterEvent};
 use super::draft::DraftState;
 use super::settings::{load_settings, VoiceSettings};
 use super::synthesizer::{SynthesisPriority, Synthesizer};
@@ -21,6 +21,9 @@ use super::{clients, tts_text};
 use crate::config::AccessConfig;
 use crate::map::{parse_address, voice_origin_for};
 use crate::transport::{DiscordTransport, TransportOutcome};
+
+mod speculation;
+use speculation::{AizuchiSlot, Hold, Speculation, Started};
 
 /// これより小さい RMS（16kHz モノラル）の区間は無音・雑音として STT へ送らない。
 const MIN_SEGMENT_RMS: f64 = 250.0;
@@ -62,12 +65,22 @@ struct ActiveSession {
     address: String,
 }
 
-/// 1 話者分の発話キュー（48kHz ステレオ PCM の区間）。
-type SegmentQueue = mpsc::UnboundedSender<Vec<i16>>;
+/// 1 話者分の処理（確定した区間、または区切りの出来事）。
+enum SpeakerWork {
+    /// 確定した 48kHz ステレオ PCM の区間（STT して said にする）。
+    Segment(Vec<i16>),
+    /// 区切りの出来事（D-1085 P3/P5: 途中認識・先行生成・確定）。
+    Event(SegmenterEvent),
+}
+
+/// 1 話者分の処理キュー。
+type SegmentQueue = mpsc::UnboundedSender<SpeakerWork>;
 
 struct Speech {
     guild: u64,
     text: String,
+    /// 先行生成が昇格した返事の最初の文なら、その発話を確定した時刻（確定から再生までを記録する）。
+    committed_at: Option<std::time::Instant>,
 }
 
 pub struct VoiceManager {
@@ -92,6 +105,8 @@ pub struct VoiceManager {
     pending_speech: Arc<AtomicUsize>,
     /// テキストチャンネルごとの、直前に agent_prelude として送った相づち（続けて同じものを選ばない）。
     last_aizuchi: Mutex<HashMap<String, &'static str>>,
+    /// provisional_id ごとの、先行生成の返事の保留（合成だけして再生しない、D-1085 P5）。
+    holds: Mutex<HashMap<String, Hold>>,
 }
 
 impl VoiceManager {
@@ -138,6 +153,7 @@ impl VoiceManager {
             synthesizer,
             pending_speech,
             last_aizuchi: Mutex::new(HashMap::new()),
+            holds: Mutex::new(HashMap::new()),
         })
     }
 
@@ -248,6 +264,10 @@ impl VoiceManager {
         let session = self.sessions.lock().unwrap().remove(&guild);
         if let Some(session) = &session {
             self.drafts.lock().unwrap().remove(&session.text_channel);
+            self.holds
+                .lock()
+                .unwrap()
+                .retain(|_, hold| hold.text_channel != session.text_channel);
         }
         self.segments
             .lock()
@@ -268,14 +288,23 @@ impl VoiceManager {
     /// 受信側が確定した 1 発話を、その話者のキューへ積む。長い発話は区切られて複数区間になるため、
     /// 同じ話者の区間は 1 つずつ STT→said にして順序を保つ。別の話者は別キューなので待たせない。
     pub fn enqueue_segment(self: &Arc<Self>, guild: u64, user: u64, pcm_48k_stereo: Vec<i16>) {
+        self.enqueue_work(guild, user, SpeakerWork::Segment(pcm_48k_stereo));
+    }
+
+    /// 受信側の区切りの出来事（途中認識・確定）を、その話者のキューへ積む（D-1085 P3/P5）。
+    pub fn enqueue_speech_event(self: &Arc<Self>, guild: u64, user: u64, event: SegmenterEvent) {
+        self.enqueue_work(guild, user, SpeakerWork::Event(event));
+    }
+
+    fn enqueue_work(self: &Arc<Self>, guild: u64, user: u64, work: SpeakerWork) {
         let mut segments = self.segments.lock().unwrap();
         let queue = segments
             .entry((guild, user))
             .or_insert_with(|| self.spawn_segment_queue(guild, user));
         // 消費側が止まっていたら（panic 等）キューを作り直して取りこぼさない。
-        if let Err(mpsc::error::SendError(pcm)) = queue.send(pcm_48k_stereo) {
+        if let Err(mpsc::error::SendError(work)) = queue.send(work) {
             let queue = self.spawn_segment_queue(guild, user);
-            let _ = queue.send(pcm);
+            let _ = queue.send(work);
             segments.insert((guild, user), queue);
         }
     }
@@ -293,32 +322,52 @@ impl VoiceManager {
 
     /// 確定した 1 発話を STT にかけ、VC に結びついたテキストチャンネルの said にする。
     pub async fn process_segment(&self, guild: u64, user: u64, pcm_48k_stereo: Vec<i16>) {
-        let user_id = user.to_string();
-        if user_id == self.config.self_bot_id {
-            return;
+        if let Some(text) = self.transcribe_pcm(guild, user, &pcm_48k_stereo).await {
+            if !text.is_empty() {
+                self.commit(guild, user, &text, None).await;
+            }
         }
-        let Some(session) = self.sessions.lock().unwrap().get(&guild).cloned() else {
-            return;
-        };
-        let mono = downmix_48k_stereo_to_16k_mono(&pcm_48k_stereo);
+    }
+
+    /// 区間を STT にかける。自分の声・VC 外・認識できなかったときは `None`、無音・雑音だけ、
+    /// または認識結果が空なら空文字。
+    async fn transcribe_pcm(
+        &self,
+        guild: u64,
+        user: u64,
+        pcm_48k_stereo: &[i16],
+    ) -> Option<String> {
+        if user.to_string() == self.config.self_bot_id {
+            return None;
+        }
+        self.sessions.lock().unwrap().get(&guild)?;
+        let mono = downmix_48k_stereo_to_16k_mono(pcm_48k_stereo);
         if rms(&mono) < MIN_SEGMENT_RMS {
-            return;
+            return Some(String::new());
         }
         let settings = match load_settings(&self.config.settings_path) {
             Ok(settings) => settings,
             Err(error) => {
                 tracing::warn!(error = %format!("{error:#}"), "voice speech dropped");
-                return;
+                return None;
             }
         };
         let wav = pcm_to_wav(&mono, 16_000, 1);
-        let text = match clients::transcribe(&self.http, &settings.stt, wav).await {
-            Ok(text) if !text.is_empty() => text,
-            Ok(_) => return,
+        match clients::transcribe(&self.http, &settings.stt, wav).await {
+            Ok(text) => Some(text),
             Err(error) => {
                 tracing::warn!(user, error = %format!("{error:#}"), "STT failed");
-                return;
+                None
             }
+        }
+    }
+
+    /// 認識した 1 発話を said にする。`provisional` はこの本文で始めた先行生成で、said に同じ
+    /// provisional_id と相づち（agent_prelude）を載せて core に昇格させる（D-1085 P5）。
+    async fn commit(&self, guild: u64, user: u64, text: &str, provisional: Option<Started>) {
+        let user_id = user.to_string();
+        let Some(session) = self.sessions.lock().unwrap().get(&guild).cloned() else {
+            return;
         };
         let Some(client) = self.client.get() else {
             return;
@@ -330,10 +379,30 @@ impl VoiceManager {
         let origin = voice_origin_for(&session.text_channel, &guild.to_string(), &user_id, nanos);
         let label = self.label(user).await;
         // D-1085 §9: 流す相づちを said の前に決め、agent_prelude で core へ送る。core はそれを
-        // この発話の直後のエージェント自身の発言として会話履歴へ残す。
-        let aizuchi = self
-            .ready_aizuchi(guild, &session.text_channel, &settings, &text, nanos)
-            .await;
+        // この発話の直後のエージェント自身の発言として会話履歴へ残す。先行生成があればその相づち。
+        let (prelude, slot, provisional_id): (Option<&'static str>, AizuchiSlot, Option<String>) =
+            match provisional {
+                Some(started) => {
+                    if let Some(hold) = self.holds.lock().unwrap().get_mut(&started.id) {
+                        hold.committed_at = Some(std::time::Instant::now());
+                    }
+                    (started.prelude, started.slot, Some(started.id))
+                }
+                None => {
+                    let aizuchi = match load_settings(&self.config.settings_path) {
+                        Ok(settings) => {
+                            self.ready_aizuchi(guild, &session.text_channel, &settings, text, nanos)
+                                .await
+                        }
+                        Err(_) => None,
+                    };
+                    (
+                        aizuchi.as_ref().map(|(text, _)| *text),
+                        Arc::new(Mutex::new(aizuchi)),
+                        None,
+                    )
+                }
+            };
         let context = SaidContext {
             caller: crate::run::caller_for(&self.config.access, &user_id),
             start_turn: true,
@@ -342,7 +411,8 @@ impl VoiceManager {
             live_inbound_scope: LiveInboundScope::All,
             // Spoken turns run on the session's voice (realtime) model.
             model_profile: opencrab_gate_client::wire::TurnModelProfile::Realtime,
-            agent_prelude: aizuchi.as_ref().map(|(text, _)| text.to_string()),
+            agent_prelude: prelude.map(str::to_string),
+            provisional_id: provisional_id.clone(),
         };
         let body = format!("{VOICE_TEXT_PREFIX}{text}");
         let outcome = client
@@ -356,15 +426,24 @@ impl VoiceManager {
                 &[],
             )
             .await;
+        if !matches!(outcome, Ok(SaidOutcome::Accepted { .. })) {
+            if let Some(id) = &provisional_id {
+                self.holds.lock().unwrap().remove(id);
+            }
+        }
         match outcome {
             Ok(SaidOutcome::Accepted { seq }) => {
                 self.note_speaker(&session.address, &user_id);
                 tracing::info!(address = %session.address, seq, "voice said accepted");
-                if let Some((aizuchi, wav)) = aizuchi {
+                if let Some(prelude) = prelude {
                     self.last_aizuchi
                         .lock()
                         .unwrap()
-                        .insert(session.text_channel.clone(), aizuchi);
+                        .insert(session.text_channel.clone(), prelude);
+                }
+                // 昇格の知らせが先に届いていれば、相づちはそちらで流してある。
+                let aizuchi = slot.lock().unwrap().take();
+                if let Some((aizuchi, wav)) = aizuchi {
                     self.play_aizuchi(guild, aizuchi, wav).await;
                 }
             }
@@ -454,6 +533,7 @@ impl VoiceManager {
     /// 投稿できた say を読み上げる。partial で読み始めた同じ stream の say なら、読んだ文との
     /// 最長共通接頭辞より後ろだけを読む。それ以外は [`Self::speak_posted`] と同じく全文を読む。
     pub fn speak_say(&self, text_channel: &str, text: &str, stream_id: Option<&str>) {
+        self.clear_promoted_holds(text_channel);
         let draft = stream_id.and_then(|stream_id| {
             let mut drafts = self.drafts.lock().unwrap();
             match drafts.get(text_channel) {
@@ -478,11 +558,21 @@ impl VoiceManager {
     }
 
     fn enqueue_speech(&self, text_channel: &str, texts: &[String]) {
+        self.enqueue_speech_from(text_channel, texts, None);
+    }
+
+    /// `committed_at` は最初の文にだけ付ける（確定から再生までの記録用）。
+    fn enqueue_speech_from(
+        &self,
+        text_channel: &str,
+        texts: &[String],
+        committed_at: Option<std::time::Instant>,
+    ) {
         if texts.is_empty() {
             return;
         }
         for guild in self.session_guilds(text_channel) {
-            for text in texts {
+            for (index, text) in texts.iter().enumerate() {
                 tracing::debug!(
                     guild,
                     text_chars = text.chars().count(),
@@ -494,6 +584,7 @@ impl VoiceManager {
                     .send(Speech {
                         guild,
                         text: text.clone(),
+                        committed_at: committed_at.filter(|_| index == 0),
                     })
                     .is_err()
                 {
@@ -542,16 +633,41 @@ fn parse_id(raw: &str) -> Option<u64> {
 }
 
 async fn transcribe_serially(
-    mut pending: mpsc::UnboundedReceiver<Vec<i16>>,
+    mut pending: mpsc::UnboundedReceiver<SpeakerWork>,
     manager: Weak<VoiceManager>,
     guild: u64,
     user: u64,
 ) {
-    while let Some(pcm) = pending.recv().await {
+    let mut speculation = Speculation::default();
+    let mut queued = std::collections::VecDeque::new();
+    loop {
+        if queued.is_empty() {
+            match pending.recv().await {
+                Some(work) => queued.push_back(work),
+                None => return,
+            }
+        }
+        while let Ok(work) = pending.try_recv() {
+            queued.push_back(work);
+        }
+        let Some(work) = queued.pop_front() else {
+            continue;
+        };
+        // 認識が追いつかないときは、後ろに新しい出来事がある途中認識を飛ばす（認識は 1 本ずつ）。
+        if speculation::is_stale_snapshot(&work) && !queued.is_empty() {
+            continue;
+        }
         let Some(manager) = manager.upgrade() else {
             return;
         };
-        manager.process_segment(guild, user, pcm).await;
+        match work {
+            SpeakerWork::Segment(pcm) => manager.process_segment(guild, user, pcm).await,
+            SpeakerWork::Event(event) => {
+                manager
+                    .on_speech_event(guild, user, &mut speculation, event)
+                    .await
+            }
+        }
     }
 }
 
@@ -563,10 +679,16 @@ async fn speak_serially(
     synthesizer: Arc<Synthesizer>,
     pending_speech: Arc<AtomicUsize>,
 ) {
-    while let Some(Speech { guild, text }) = queue.recv().await {
+    while let Some(Speech {
+        guild,
+        text,
+        committed_at,
+    }) = queue.recv().await
+    {
         speak_one(
             guild,
             &text,
+            committed_at,
             &settings_path,
             &agent_id,
             player.as_ref(),
@@ -580,6 +702,7 @@ async fn speak_serially(
 async fn speak_one(
     guild: u64,
     text: &str,
+    committed_at: Option<std::time::Instant>,
     settings_path: &std::path::Path,
     agent_id: &str,
     player: &dyn VoicePlayer,
@@ -596,7 +719,9 @@ async fn speak_one(
     let voice = settings.tts.voice_for_agent(agent_id);
     // 文ごとに合成し、合成できた文から再生キューへ積む（play は songbird へ積むだけ）。
     // 1 文の失敗は warn にして次の文へ進む。
+    let mut committed_at = committed_at;
     for sentence in tts_text::split_sentences(text) {
+        let committed_at = committed_at.take();
         let result = async {
             let text_chars = sentence.chars().count();
             let wav = synthesizer
@@ -604,6 +729,13 @@ async fn speak_one(
                 .await?;
             player.play(guild, wav).await?;
             tracing::debug!(guild, text_chars, "TTS audio enqueued to the player");
+            if let Some(committed_at) = committed_at {
+                tracing::debug!(
+                    guild,
+                    commit_to_play_ms = committed_at.elapsed().as_millis() as u64,
+                    "promoted reply first played"
+                );
+            }
             anyhow::Ok(())
         }
         .await;

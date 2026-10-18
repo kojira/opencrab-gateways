@@ -10,7 +10,7 @@ use songbird::events::context_data::VoiceTick;
 use songbird::id::{ChannelId, GuildId};
 use songbird::{CoreEvent, Event, EventContext, EventHandler, Songbird};
 
-use super::receiver::{FinishedSpeech, SsrcSegments};
+use super::receiver::{SpeakerEvent, SsrcSegments};
 use super::session::{VoiceManager, VoicePlayer};
 
 /// 受信音声を 48kHz ステレオ PCM に復号させる songbird 設定。
@@ -103,7 +103,7 @@ struct Receiver {
 }
 
 impl Receiver {
-    fn on_tick(&self, tick: &VoiceTick) -> Vec<FinishedSpeech> {
+    fn on_tick(&self, tick: &VoiceTick) -> Vec<SpeakerEvent> {
         let mut segments = self.segments.lock().unwrap();
         let mut finished = Vec::new();
         for (ssrc, data) in &tick.speaking {
@@ -117,9 +117,9 @@ impl Receiver {
         finished
     }
 
-    fn dispatch(&self, finished: Vec<FinishedSpeech>) {
-        for (user, pcm) in finished {
-            self.manager.enqueue_segment(self.guild, user, pcm);
+    fn dispatch(&self, finished: Vec<SpeakerEvent>) {
+        for (user, event) in finished {
+            self.manager.enqueue_speech_event(self.guild, user, event);
         }
     }
 }

@@ -1,3 +1,4 @@
+mod aizuchi;
 mod caller_vc;
 mod e2e;
 mod mock_http;
@@ -6,5 +7,6 @@ mod partial_speech;
 mod receiver;
 mod settings;
 mod settings_http;
+mod tts_cache;
 mod tts_segments;
 mod tts_text;

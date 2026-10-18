@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use opencrab_gate_client::client::{InstanceClient, PostRefuse, SaidOutcome};
@@ -10,9 +11,12 @@ use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use super::aizuchi::{aizuchi_context_line, choose_aizuchi};
 use super::audio::{downmix_48k_stereo_to_16k_mono, pcm_to_wav, rms};
 use super::draft::DraftState;
-use super::settings::load_settings;
+use super::settings::{load_settings, VoiceSettings};
+use super::synthesizer::{SynthesisPriority, Synthesizer};
+use super::tts_cache::{TtsCache, DISK_LIMIT_BYTES, MEMORY_LIMIT_BYTES};
 use super::{clients, tts_text};
 use crate::config::AccessConfig;
 use crate::map::{parse_address, voice_origin_for};
@@ -23,7 +27,7 @@ const MIN_SEGMENT_RMS: f64 = 250.0;
 /// said 本文の先頭に付け、音声由来の発言だと読み手（LLM・人）に分かるようにする。
 const VOICE_TEXT_PREFIX: &str = "（音声）";
 /// 音声 said の system_context。通話中は短い話し言葉で返すよう LLM へ伝える。
-pub(crate) const VOICE_SYSTEM_CONTEXT: &str = "これは音声通話での会話です。相手が詳しい説明や長い回答をはっきり求めていない限り、話し言葉で1〜2文の短い返事にしてください。箇条書き・見出し・コードブロックなどの書式は使わないでください。";
+pub(crate) const VOICE_SYSTEM_CONTEXT: &str = "これは音声通話での会話です。相手が詳しい説明や長い回答をはっきり求めていない限り、話し言葉で1〜2文の短い返事にしてください。最初の1文はとても短く（数文字〜10文字）してください。箇条書き・見出し・コードブロックなどの書式は使わないでください。";
 
 /// VC への接続と再生。production は songbird、テストは記録用の偽物。
 #[async_trait::async_trait]
@@ -38,6 +42,8 @@ pub trait VoicePlayer: Send + Sync {
     async fn leave(&self, guild: u64) -> anyhow::Result<()>;
     /// WAV を再生キューの末尾へ積む（順番に流れる）。
     async fn play(&self, guild: u64, wav: Vec<u8>) -> anyhow::Result<()>;
+    /// その guild で再生中・再生待ちの音声が無い。
+    async fn is_idle(&self, guild: u64) -> bool;
 }
 
 pub struct VoiceManagerConfig {
@@ -80,6 +86,10 @@ pub struct VoiceManager {
     speakers: Mutex<HashMap<String, String>>,
     /// テキストチャンネルごとの、生成途中の返信の読み上げ状態（D-1083）。
     drafts: Mutex<HashMap<String, DraftState>>,
+    /// 合成（TTS キャッシュと 1 本の VOICEVOX 合成役、D-1085）。
+    synthesizer: Arc<Synthesizer>,
+    /// 読み上げキューに積んでまだ再生へ渡し終えていない文の数（相づちを打つかの判断用）。
+    pending_speech: Arc<AtomicUsize>,
 }
 
 impl VoiceManager {
@@ -90,12 +100,26 @@ impl VoiceManager {
     ) -> Arc<Self> {
         let (speech, queue) = mpsc::unbounded_channel();
         let http = clients::http_client();
+        let cache_dir = config
+            .settings_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("tts-cache");
+        let synthesizer = Synthesizer::new(
+            http.clone(),
+            TtsCache::open(cache_dir, MEMORY_LIMIT_BYTES, DISK_LIMIT_BYTES),
+        );
+        if let Ok(settings) = load_settings(&config.settings_path) {
+            synthesizer.refresh_if_changed(&settings.tts);
+        }
+        let pending_speech = Arc::new(AtomicUsize::new(0));
         tokio::spawn(speak_serially(
             queue,
             config.settings_path.clone(),
             config.agent_id.clone(),
             player.clone(),
-            http.clone(),
+            synthesizer.clone(),
+            pending_speech.clone(),
         ));
         Arc::new(Self {
             config,
@@ -109,6 +133,8 @@ impl VoiceManager {
             segments: Mutex::new(HashMap::new()),
             speakers: Mutex::new(HashMap::new()),
             drafts: Mutex::new(HashMap::new()),
+            synthesizer,
+            pending_speech,
         })
     }
 
@@ -123,7 +149,8 @@ impl VoiceManager {
         vc_channel_id: Option<&str>,
         text_channel_id: Option<&str>,
     ) -> Result<Value, String> {
-        load_settings(&self.config.settings_path).map_err(|e| format!("{e:#}"))?;
+        let settings = load_settings(&self.config.settings_path).map_err(|e| format!("{e:#}"))?;
+        self.synthesizer.refresh_if_changed(&settings.tts);
         let (guild, own_channel) = self.conversation(binding_id).await?;
         let text_channel = text_channel_id.unwrap_or(&own_channel).to_string();
         let address =
@@ -299,10 +326,16 @@ impl VoiceManager {
             .unwrap_or_default();
         let origin = voice_origin_for(&session.text_channel, &guild.to_string(), &user_id, nanos);
         let label = self.label(user).await;
+        // D-1085 P4: 確定した発話の語尾で相づちを選び、LLM には「もう言った」と伝える。
+        let aizuchi = choose_aizuchi(&text);
+        let system_context = match aizuchi {
+            Some(aizuchi) => format!("{VOICE_SYSTEM_CONTEXT}\n{}", aizuchi_context_line(aizuchi)),
+            None => VOICE_SYSTEM_CONTEXT.to_string(),
+        };
         let context = SaidContext {
             caller: crate::run::caller_for(&self.config.access, &user_id),
             start_turn: true,
-            system_context: Some(VOICE_SYSTEM_CONTEXT.to_string()),
+            system_context: Some(system_context),
             reply_target: None,
             live_inbound_scope: LiveInboundScope::All,
             // Spoken turns run on the session's voice (realtime) model.
@@ -323,13 +356,36 @@ impl VoiceManager {
         match outcome {
             Ok(SaidOutcome::Accepted { seq }) => {
                 self.note_speaker(&session.address, &user_id);
-                tracing::info!(address = %session.address, seq, "voice said accepted")
+                tracing::info!(address = %session.address, seq, "voice said accepted");
+                if let Some(aizuchi) = aizuchi {
+                    self.play_aizuchi(guild, &settings, aizuchi).await;
+                }
             }
             Ok(other) => {
                 tracing::info!(address = %session.address, ?other, "voice said not accepted")
             }
             Err(PostRefuse::NotReady) => tracing::info!("voice said dropped; binding not ready"),
             Err(PostRefuse::Busy) => tracing::info!("voice said refused; binding busy"),
+        }
+    }
+
+    /// 相づちを TTS キャッシュから流す。読み上げ中・読み上げ待ちがあるとき、キャッシュに無いときは
+    /// 流さない（その場で合成すると返事の前に待ちが増えるため）。
+    async fn play_aizuchi(&self, guild: u64, settings: &VoiceSettings, aizuchi: &str) {
+        let style = settings.tts.voice_for_agent(&self.config.agent_id);
+        if self.pending_speech.load(Ordering::SeqCst) > 0 || !self.player.is_idle(guild).await {
+            tracing::debug!(guild, "aizuchi skipped; the bot is speaking");
+            return;
+        }
+        let Some(wav) = self.synthesizer.cached(style, aizuchi) else {
+            tracing::warn!(guild, "aizuchi skipped; not in the TTS cache");
+            return;
+        };
+        match self.player.play(guild, wav).await {
+            Ok(()) => tracing::debug!(guild, aizuchi, "aizuchi played"),
+            Err(error) => {
+                tracing::warn!(guild, error = %format!("{error:#}"), "aizuchi playback failed")
+            }
         }
     }
 
@@ -405,10 +461,17 @@ impl VoiceManager {
                     text_chars = text.chars().count(),
                     "voice speech enqueued"
                 );
-                let _ = self.speech.send(Speech {
-                    guild,
-                    text: text.clone(),
-                });
+                self.pending_speech.fetch_add(1, Ordering::SeqCst);
+                if self
+                    .speech
+                    .send(Speech {
+                        guild,
+                        text: text.clone(),
+                    })
+                    .is_err()
+                {
+                    self.pending_speech.fetch_sub(1, Ordering::SeqCst);
+                }
             }
         }
     }
@@ -470,39 +533,55 @@ async fn speak_serially(
     settings_path: PathBuf,
     agent_id: String,
     player: Arc<dyn VoicePlayer>,
-    http: reqwest::Client,
+    synthesizer: Arc<Synthesizer>,
+    pending_speech: Arc<AtomicUsize>,
 ) {
     while let Some(Speech { guild, text }) = queue.recv().await {
-        let settings = match load_settings(&settings_path) {
-            Ok(settings) => settings,
-            Err(error) => {
-                tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
-                continue;
-            }
-        };
-        let voice = settings.tts.voice_for_agent(&agent_id);
-        // 文ごとに合成し、合成できた文から再生キューへ積む（play は songbird へ積むだけ）。
-        // 1 文の失敗は warn にして次の文へ進む。
-        for sentence in tts_text::split_sentences(&text) {
-            let result = async {
-                let started = std::time::Instant::now();
-                let text_chars = sentence.chars().count();
-                tracing::debug!(guild, text_chars, "TTS synthesis started");
-                let wav = clients::synthesize(&http, &settings.tts, &sentence, voice).await?;
-                tracing::debug!(
-                    guild,
-                    text_chars,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "TTS synthesis finished"
-                );
-                player.play(guild, wav).await?;
-                tracing::debug!(guild, text_chars, "TTS audio enqueued to the player");
-                anyhow::Ok(())
-            }
-            .await;
-            if let Err(error) = result {
-                tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
-            }
+        speak_one(
+            guild,
+            &text,
+            &settings_path,
+            &agent_id,
+            player.as_ref(),
+            &synthesizer,
+        )
+        .await;
+        pending_speech.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+async fn speak_one(
+    guild: u64,
+    text: &str,
+    settings_path: &std::path::Path,
+    agent_id: &str,
+    player: &dyn VoicePlayer,
+    synthesizer: &Arc<Synthesizer>,
+) {
+    let settings = match load_settings(settings_path) {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
+            return;
+        }
+    };
+    synthesizer.refresh_if_changed(&settings.tts);
+    let voice = settings.tts.voice_for_agent(agent_id);
+    // 文ごとに合成し、合成できた文から再生キューへ積む（play は songbird へ積むだけ）。
+    // 1 文の失敗は warn にして次の文へ進む。
+    for sentence in tts_text::split_sentences(text) {
+        let result = async {
+            let text_chars = sentence.chars().count();
+            let wav = synthesizer
+                .synthesize(&settings.tts, voice, &sentence, SynthesisPriority::Live)
+                .await?;
+            player.play(guild, wav).await?;
+            tracing::debug!(guild, text_chars, "TTS audio enqueued to the player");
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
         }
     }
 }

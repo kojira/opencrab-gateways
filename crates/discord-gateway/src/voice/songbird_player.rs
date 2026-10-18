@@ -83,6 +83,16 @@ impl VoicePlayer for SongbirdPlayer {
         call.enqueue_input(songbird::input::Input::from(wav)).await;
         Ok(())
     }
+
+    async fn is_idle(&self, guild: u64) -> bool {
+        let Ok(guild) = guild_id(guild) else {
+            return true;
+        };
+        match self.songbird.get(guild) {
+            Some(call) => call.lock().await.queue().is_empty(),
+            None => true,
+        }
+    }
 }
 
 #[derive(Clone)]

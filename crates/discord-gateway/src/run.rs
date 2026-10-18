@@ -702,30 +702,10 @@ pub(crate) fn spawn_say_consumer(
                         }
                     }
                 }
-                Some(LiveEvent::Partial {
-                    stream_id,
-                    text,
-                    provisional_id,
-                }) => {
+                Some(event @ (LiveEvent::Partial { .. } | LiveEvent::ProvisionalResult { .. })) => {
                     // D-1083: 生成途中の完成した文を VC で先に読み上げる（投稿はしない）。
-                    // D-1085: 先行生成の partial は昇格まで保留する。
                     if let (Some(voice), Some(channel)) = (&voice, &channel) {
-                        match provisional_id {
-                            Some(provisional_id) => {
-                                voice.hold_partial(channel, &stream_id, &text, &provisional_id)
-                            }
-                            None => voice.speak_partial(channel, &stream_id, &text),
-                        }
-                    }
-                }
-                Some(LiveEvent::ProvisionalResult {
-                    provisional_id,
-                    promoted,
-                }) => {
-                    if let (Some(voice), Some(channel)) = (&voice, &channel) {
-                        voice
-                            .on_provisional_result(channel, &provisional_id, promoted)
-                            .await;
+                        voice.on_live_speech(channel, event).await;
                     }
                 }
                 Some(LiveEvent::Activity { state, origin, .. }) => {

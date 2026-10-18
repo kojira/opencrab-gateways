@@ -11,6 +11,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use opencrab_gate_client::client::LiveEvent;
 use opencrab_gate_client::wire::ProvisionalRequest;
 
 use super::{SpeakerWork, VoiceManager, VOICE_SYSTEM_CONTEXT, VOICE_TEXT_PREFIX};
@@ -262,13 +263,30 @@ impl VoiceManager {
             .retain(|_, hold| !(hold.promoted && hold.text_channel == text_channel));
     }
 
-    pub fn hold_partial(
-        &self,
-        text_channel: &str,
-        stream_id: &str,
-        text: &str,
-        provisional_id: &str,
-    ) {
+    /// core の partial と昇格の知らせ。先行生成（`provisional_id` 付き）の partial は昇格まで
+    /// 保留する（D-1085）。それ以外の出来事は無視する。
+    pub async fn on_live_speech(&self, text_channel: &str, event: LiveEvent) {
+        match event {
+            LiveEvent::Partial {
+                stream_id,
+                text,
+                provisional_id: Some(provisional_id),
+            } => self.hold_partial(text_channel, &stream_id, &text, &provisional_id),
+            LiveEvent::Partial {
+                stream_id, text, ..
+            } => self.speak_partial(text_channel, &stream_id, &text),
+            LiveEvent::ProvisionalResult {
+                provisional_id,
+                promoted,
+            } => {
+                self.on_provisional_result(text_channel, &provisional_id, promoted)
+                    .await
+            }
+            _ => {}
+        }
+    }
+
+    fn hold_partial(&self, text_channel: &str, stream_id: &str, text: &str, provisional_id: &str) {
         let to_synthesize = {
             let mut holds = self.holds.lock().unwrap();
             match holds.get_mut(provisional_id) {
@@ -339,7 +357,7 @@ impl VoiceManager {
 
     /// core の昇格の知らせ。昇格なら相づち、保留した文の順に流し、残りを読めるよう読み上げ状態を
     /// 引き継ぐ。昇格しなければ保留を捨てる。
-    pub async fn on_provisional_result(
+    async fn on_provisional_result(
         &self,
         text_channel: &str,
         provisional_id: &str,

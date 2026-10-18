@@ -251,6 +251,15 @@ fn build_on_line(
         let model_cache = model_cache.clone();
         let voice = voice.clone();
         tokio::spawn(async move {
+            let gate = (
+                &*client,
+                agent_id.as_str(),
+                &access,
+                &configured_addresses[..],
+            );
+            if thinking_command::dispatch(gate, serenity_http.as_deref(), &line).await {
+                return;
+            }
             if let Ok(event) = serde_json::from_str::<ModelInteractionEvent>(&line) {
                 if event.event_kind == "model_interaction" {
                     if let Some(http) = serenity_http {
@@ -781,6 +790,7 @@ pub(crate) fn spawn_say_consumer(
 
 #[cfg(test)]
 mod silent_origin_tests;
+mod thinking_command;
 
 #[cfg(test)]
 mod caller_tests;

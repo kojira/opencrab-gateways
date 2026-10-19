@@ -545,6 +545,8 @@ fn owner_context() -> SaidContext {
         reply_target: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
+        agent_prelude: None,
+        provisional_id: None,
     }
 }
 
@@ -653,6 +655,8 @@ fn map_live(event: LiveEvent) -> Option<Event> {
         LiveEvent::Error { code, .. } => error_event(None, stable_wire_code(&code)),
         // The cli prints only the final message; partial text is not part of its output.
         LiveEvent::Partial { .. } => return None,
+        // D-1085: the cli never starts provisional runs.
+        LiveEvent::ProvisionalResult { .. } => return None,
     })
 }
 

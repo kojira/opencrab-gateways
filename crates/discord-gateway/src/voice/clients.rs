@@ -9,6 +9,14 @@ use super::settings::{SttSettings, TtsSettings};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 合成の固定値（版 [`SYNTHESIS_CONSTANTS_VERSION`]）。値を変えたら版を上げ、TTS キャッシュを捨てさせる。
+/// 話速は TTS キャッシュのキーに入る。
+pub const TTS_SPEED_SCALE: f64 = 1.0;
+/// 先頭の無音（秒）。VOICEVOX 既定の 0.1 秒を 0 にして、読み上げの出だしを早める。
+/// 末尾の無音（postPhonemeLength）は VOICEVOX 既定のまま上書きしない。
+pub const PRE_PHONEME_LENGTH: f64 = 0.0;
+pub const SYNTHESIS_CONSTANTS_VERSION: u32 = 1;
+
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -76,11 +84,18 @@ pub async fn synthesize(
             truncate(&query_body)
         );
     }
+    let mut query: serde_json::Value =
+        serde_json::from_str(&query_body).context("VOICEVOX audio_query JSON")?;
+    let Some(fields) = query.as_object_mut() else {
+        bail!("VOICEVOX audio_query is not an object");
+    };
+    fields.insert("speedScale".into(), TTS_SPEED_SCALE.into());
+    fields.insert("prePhonemeLength".into(), PRE_PHONEME_LENGTH.into());
     let synthesis = http
         .post(format!("{base}/synthesis"))
         .query(&[("speaker", voice)])
         .header("content-type", "application/json")
-        .body(query_body)
+        .body(query.to_string())
         .send()
         .await
         .context("VOICEVOX synthesis request failed")?;
@@ -90,6 +105,21 @@ pub async fn synthesize(
         bail!("VOICEVOX synthesis failed ({status}): {}", truncate(&body));
     }
     Ok(synthesis.bytes().await.context("VOICEVOX audio")?.to_vec())
+}
+
+/// VOICEVOX エンジンの版（`GET /version`、JSON 文字列）。TTS キャッシュの有効性の確認に使う。
+pub async fn engine_version(http: &reqwest::Client, tts: &TtsSettings) -> anyhow::Result<String> {
+    let url = format!("{}/version", tts.base_url.trim_end_matches('/'));
+    let response = http.get(url).send().await.context("VOICEVOX version")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("VOICEVOX version failed ({status})");
+    }
+    let version: String = response.json().await.context("VOICEVOX version JSON")?;
+    if version.trim().is_empty() {
+        bail!("VOICEVOX version is empty");
+    }
+    Ok(version)
 }
 
 /// VOICEVOX の話者一覧（設定画面のプルダウン用）。

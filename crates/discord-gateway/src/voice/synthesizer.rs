@@ -1,7 +1,7 @@
 //! VOICEVOX の合成をまとめる（D-1085）。合成は TTS キャッシュを先に引き、外れたら 1 本の合成役へ渡す。
 //!
 //! VOICEVOX は CPU で 1 本ずつしか速く合成できないため、合成役は 1 つだけにし、読み上げ（Live）を
-//! 先読み（Prewarm）より先に合成する。合成中の 1 件は途中で止めない。
+//! 先行生成の文（Held）、先読み（Prewarm）の順に合成する。合成中の 1 件は途中で止めない。
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,8 @@ use super::tts_cache::{cache_key, TtsCache};
 pub(crate) enum SynthesisPriority {
     /// いま読み上げる文。
     Live,
+    /// 先行生成（provisional）の返事の文。再生はせず、確定に備えてキャッシュへ入れる（D-1085 P5）。
+    Held,
     /// 相づち・よく使う言い回しの先読み。
     Prewarm,
 }
@@ -31,6 +33,7 @@ struct Job {
 #[derive(Default)]
 struct Jobs {
     live: VecDeque<Job>,
+    held: VecDeque<Job>,
     prewarm: VecDeque<Job>,
 }
 
@@ -158,6 +161,7 @@ impl Synthesizer {
             let mut jobs = self.jobs.lock().unwrap();
             match priority {
                 SynthesisPriority::Live => jobs.live.push_back(job),
+                SynthesisPriority::Held => jobs.held.push_back(job),
                 SynthesisPriority::Prewarm => jobs.prewarm.push_back(job),
             }
         }
@@ -166,7 +170,10 @@ impl Synthesizer {
 
     fn next_job(&self) -> Option<Job> {
         let mut jobs = self.jobs.lock().unwrap();
-        jobs.live.pop_front().or_else(|| jobs.prewarm.pop_front())
+        jobs.live
+            .pop_front()
+            .or_else(|| jobs.held.pop_front())
+            .or_else(|| jobs.prewarm.pop_front())
     }
 }
 

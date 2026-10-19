@@ -251,6 +251,15 @@ fn build_on_line(
         let model_cache = model_cache.clone();
         let voice = voice.clone();
         tokio::spawn(async move {
+            let gate = (
+                &*client,
+                agent_id.as_str(),
+                &access,
+                &configured_addresses[..],
+            );
+            if thinking_command::dispatch(gate, serenity_http.as_deref(), &line).await {
+                return;
+            }
             if let Ok(event) = serde_json::from_str::<ModelInteractionEvent>(&line) {
                 if event.event_kind == "model_interaction" {
                     if let Some(http) = serenity_http {
@@ -598,6 +607,7 @@ pub(crate) async fn handle_incoming(
         live_inbound_scope: LiveInboundScope::All,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
         agent_prelude: None,
+        provisional_id: None,
     };
     let outcome = client
         .post_said_with_context(
@@ -701,10 +711,10 @@ pub(crate) fn spawn_say_consumer(
                         }
                     }
                 }
-                Some(LiveEvent::Partial { stream_id, text }) => {
+                Some(event @ (LiveEvent::Partial { .. } | LiveEvent::ProvisionalResult { .. })) => {
                     // D-1083: 生成途中の完成した文を VC で先に読み上げる（投稿はしない）。
                     if let (Some(voice), Some(channel)) = (&voice, &channel) {
-                        voice.speak_partial(channel, &stream_id, &text);
+                        voice.on_live_speech(channel, event).await;
                     }
                 }
                 Some(LiveEvent::Activity { state, origin, .. }) => {
@@ -780,6 +790,7 @@ pub(crate) fn spawn_say_consumer(
 
 #[cfg(test)]
 mod silent_origin_tests;
+mod thinking_command;
 
 #[cfg(test)]
 mod caller_tests;

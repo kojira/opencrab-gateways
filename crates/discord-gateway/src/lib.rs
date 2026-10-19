@@ -24,6 +24,7 @@ pub mod run;
 pub mod secret;
 pub mod secret_store;
 pub mod store;
+pub mod thinking;
 pub mod transport;
 pub mod typing;
 pub mod voice;

@@ -33,6 +33,15 @@ dashmap.workspace = true
 axum.workspace = true
 reqwest.workspace = true
 opencrab-gate-client.workspace = true
+# D-1087 phase 1: 移設した webhook 実装が、まだ core 側にある宛先解決・整形
+# （`webhook_target`）と走行通知の抽象（`subtask_notify`）、中立の `ToolEventSink` を
+# 参照する。既定では無効にして gateway の成果物へ core の engine を持ち込まない。
+opencrab-actions = { workspace = true, optional = true }
+
+[features]
+# D-1087 phase 1 の移設先。phase 2 で宛先保存が gateway DB へ移り `webhook_target` を
+# この crate へ取り込んだら、この feature は外す（既定 ON に戻す）。
+webhook-activity = ["dep:opencrab-actions"]
 
 [[bin]]
 name = "discord-gateway"
@@ -41,3 +50,6 @@ path = "src/main.rs"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
+# 移設した webhook テストは、移設前と同じく core のスキーマ（agent_webhook_configs）を
+# 持つ in-memory DB を土台にする。本番経路はこの crate に依存しない。
+opencrab-db.workspace = true

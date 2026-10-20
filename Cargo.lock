@@ -2694,6 +2694,8 @@ dependencies = [
  "dashmap 6.1.0",
  "getrandom 0.2.17",
  "libc",
+ "opencrab-actions",
+ "opencrab-db",
  "opencrab-gate-client",
  "opencrab-process-supervisor",
  "reqwest",

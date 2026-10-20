@@ -6,6 +6,7 @@ mod attachments;
 pub mod config;
 pub mod daemon;
 pub mod dedup;
+pub(crate) mod follow_targets;
 pub mod follows;
 pub mod harness;
 pub mod map;

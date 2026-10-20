@@ -50,12 +50,24 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
     // 短縮参照フィールド（uN/eN/cN）。core はこの標示 field だけを実 ID へ解決する（レビュー要望）。
     let ref_prop =
         |desc: &str| json!({"type": "string", "description": desc, "format": "short-ref"});
+    // follow/unfollow の一括指定。core が短縮参照を解決するのは top-level の文字列 field だけ
+    // なので、配列側は hex か npub を渡してもらい、gateway が hex へ直す（D-1088）。
+    let follow_users_prop = || {
+        json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "まとめて、または npub で指定する対象。各要素は 64桁hex か npub（nprofile 可）。会話の u番号は user に渡す。最大100件。"
+        })
+    };
     // 配列は name の UTF-8 昇順（follow < kind0 < reaction < reply < repost < resolve < say < unfollow < upload）。
     let mut operations = json!([
         decl(
             "follow",
-            "指定ユーザーをフォローする。user に会話で見えている u番号を渡す。",
-            json!({"type": "object", "required": ["user"], "properties": {"user": ref_prop("フォロー対象の短縮参照（例 u2）")}}),
+            "指定した相手をフォローする。1人だけなら user に会話の u番号を渡す。複数まとめて、または npub で指定するときは users に配列で渡す（各要素は 64桁hex か npub／nprofile）。例: users=[\"npub1...\",\"npub1...\"]。user と users は同時に渡してよく、その場合は全部フォローする。",
+            json!({"type": "object", "properties": {
+                "user": ref_prop("1人だけ指定するときの短縮参照（例 u2）"),
+                "users": follow_users_prop(),
+            }}),
             conv("not_exposed", "agent_bound"),
         ),
         decl(
@@ -110,8 +122,11 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
         ),
         decl(
             "unfollow",
-            "指定ユーザーのフォローを解除する。user に会話で見えている u番号を渡す。",
-            json!({"type": "object", "required": ["user"], "properties": {"user": ref_prop("解除対象の短縮参照（例 u2）")}}),
+            "指定した相手のフォローを解除する。1人だけなら user に会話の u番号を渡す。複数まとめて、または npub で指定するときは users に配列で渡す（各要素は 64桁hex か npub／nprofile）。user と users は同時に渡してよく、その場合は全部解除する。",
+            json!({"type": "object", "properties": {
+                "user": ref_prop("1人だけ指定するときの短縮参照（例 u2）"),
+                "users": follow_users_prop(),
+            }}),
             conv("not_exposed", "agent_bound"),
         ),
         decl(
@@ -331,6 +346,69 @@ impl NostrInvokeHandler {
             }
         }
     }
+
+    /// `follow` / `unfollow` の invoke（D-1088）。`user`（単発・core が短縮参照を解決済み）と
+    /// `users`（一括）を合わせて 1 件ずつ実行する。全件を先に検証し、1 件でも不正なら何も投稿
+    /// しない。1 件だけなら従来と同じ単発の結果形、複数件は per-entry の結果を返す。
+    async fn follow_or_unfollow(&self, operation: &str, payload: &Value) -> InvokeOutcome {
+        let targets = match crate::follow_targets::parse_targets(payload) {
+            Ok(targets) => targets,
+            Err(error) => {
+                tracing::warn!(
+                    operation,
+                    reason = error.reason(),
+                    "follow target rejected before any nostaro invocation"
+                );
+                return InvokeOutcome::Rejected;
+            }
+        };
+        if targets.len() == 1 {
+            let argv = crate::follow_targets::invocation_argv(operation, &targets[0].hex);
+            return run_to_outcome(self.run(&argv, true).await);
+        }
+        let mut results = Vec::with_capacity(targets.len());
+        let (mut accepted, mut rejected) = (0usize, 0usize);
+        for target in &targets {
+            let argv = crate::follow_targets::invocation_argv(operation, &target.hex);
+            let (status, output) = match self.run(&argv, true).await {
+                Run::Ok(stdout) => {
+                    accepted += 1;
+                    ("ok", stdout)
+                }
+                Run::Rejected => {
+                    rejected += 1;
+                    ("rejected", String::new())
+                }
+                Run::Indeterminate => ("indeterminate", String::new()),
+            };
+            results.push(json!({
+                "input": target.input,
+                "hex": target.hex,
+                "status": status,
+                "output": output,
+            }));
+        }
+        if accepted == targets.len() {
+            return InvokeOutcome::Ok(json!({
+                "operation": operation,
+                "count": targets.len(),
+                "results": results,
+            }));
+        }
+        tracing::warn!(
+            operation,
+            count = targets.len(),
+            accepted,
+            "batch follow partially failed"
+        );
+        if rejected == targets.len() {
+            // 1 件も外部 I/O が起きていない（spawn 失敗のみ）。
+            InvokeOutcome::Rejected
+        } else {
+            // 一部は受理済み。成功とも失敗とも捏造しない。
+            InvokeOutcome::Indeterminate
+        }
+    }
 }
 
 fn str_field<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
@@ -387,6 +465,11 @@ impl InvokeHandler for NostrInvokeHandler {
             );
             return InvokeOutcome::Ok(Value::Null);
         }
+        // follow/unfollow は `users` の一括指定を受けるので、単一 argv の組み立てに入る前に分岐する
+        // （D-1088）。1 件だけなら従来どおり単発の結果形を返す。
+        if matches!(operation, "follow" | "unfollow") {
+            return self.follow_or_unfollow(operation, payload).await;
+        }
         // 入力欠落・不正は確定拒否（外部 I/O 0）。argv は "--" でオプション終端して positional を渡す。
         let dash = || "--".to_string();
         let mut argv: Vec<String> = match operation {
@@ -442,12 +525,6 @@ impl InvokeHandler for NostrInvokeHandler {
                 a.push(dash());
                 a.push(text.to_string());
                 a
-            }
-            "follow" | "unfollow" => {
-                let Some(user) = str_field(payload, "user") else {
-                    return InvokeOutcome::Rejected;
-                };
-                vec![operation.to_string(), dash(), user.to_string()]
             }
             "kind0" => {
                 let mut a = vec!["profile".to_string(), "set".to_string()];
@@ -696,3 +773,7 @@ mod tests {
 #[cfg(test)]
 #[path = "attachment_tests.rs"]
 mod attachment_tests;
+
+#[cfg(test)]
+#[path = "follow_tests.rs"]
+mod follow_tests;

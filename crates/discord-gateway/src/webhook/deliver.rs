@@ -30,12 +30,19 @@ const TOOL_EVENT_MAX_CHARS: usize = 1500;
 /// （移設前の `REJECTION_CODE_PREFIX` と同じ扱い）。
 const REJECTION_PREFIX: &str = "rejected: ";
 
-/// 1 ターンのツール活動数（per-run 上限の判定）。
+/// 1 run（= 1 ターン）あたりのツール活動数。run ごとに独立に数える。
+///
+/// 単一スロットで「直前の run」だけを持つと、2 つの binding（セッション）が交互に届いた
+/// ときに数え直しが起き、上限も抑制サマリも run 単位で成立しない。run の識別子
+/// （`activity_id`）ごとに持つ。
 #[derive(Default)]
 struct CapState {
-    activity_id: String,
-    count: usize,
+    per_run: HashMap<String, usize>,
 }
+
+/// 数え終わった run の保持数。上限に達した run は以後「抑制」を返すだけなので、古い順に
+/// 捨てても判定は変わらない（run は前へ進むだけで、同じ activity_id が再開しない）。
+const CAP_RUNS_KEPT: usize = 64;
 
 /// 活動 webhook の配送口。
 pub struct ActivityDelivery {
@@ -186,9 +193,8 @@ impl ActivityDelivery {
         let meta = LifecycleMeta {
             label: event.label.clone().unwrap_or_default(),
             run_id: event.run_id.clone(),
-            // core の frame は run id だけを運ぶ。sessionKey 行は値が無いので出さない
-            // （run id 自体が相関キーなので、情報は落ちない）。
-            session_key: String::new(),
+            // 走行自身のセッション（移設前の `sessionKey` 行）。分からないときだけ空。
+            session_key: event.sub_session_id.clone().unwrap_or_default(),
         };
         match status {
             "started" => build_started_messages(&meta, event.task.as_deref().unwrap_or_default()),
@@ -209,15 +215,18 @@ impl ActivityDelivery {
         }
     }
 
-    /// この activity（ターン）の 0 始まり連番。上限判定と抑制サマリに使う。
-    fn next_tool_index(&self, activity_id: &str) -> Option<usize> {
+    /// この run（ターン）の 0 始まり連番。上限判定と抑制サマリに使う。
+    ///
+    /// run ごとに数えるので、別の run が割り込んでも数え直しにならない。
+    pub(super) fn next_tool_index(&self, activity_id: &str) -> Option<usize> {
         let mut cap = self.cap.lock().ok()?;
-        if cap.activity_id != activity_id {
-            cap.activity_id = activity_id.to_string();
-            cap.count = 0;
+        if cap.per_run.len() >= CAP_RUNS_KEPT && !cap.per_run.contains_key(activity_id) {
+            // 上限に達した古い run は「抑制」しか返さないので、保持し続ける必要がない。
+            // 未完了の run を落とさないよう、上限到達済みのものだけを捨てる。
+            cap.per_run.retain(|_, count| *count <= TOOL_EVENT_CAP);
         }
-        let index = cap.count;
-        cap.count += 1;
+        let index = *cap.per_run.get(activity_id).unwrap_or(&0);
+        cap.per_run.insert(activity_id.to_string(), index + 1);
         Some(index)
     }
 }

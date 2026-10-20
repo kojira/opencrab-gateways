@@ -77,6 +77,8 @@ impl ActivityStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LifecycleEvent {
     pub run_id: String,
+    /// 走行自身のセッション ID（run の相関キー。宛先ではない）。core が省くことがある。
+    pub sub_session_id: Option<String>,
     pub status: String,
     pub label: Option<String>,
     /// started だけ（依頼本文）。

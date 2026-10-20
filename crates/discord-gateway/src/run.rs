@@ -671,6 +671,7 @@ pub(crate) fn spawn_say_consumer(
                 }
                 Some(LiveEvent::SubtaskLifecycle {
                     run_id,
+                    sub_session_id,
                     status,
                     label,
                     task,
@@ -687,6 +688,7 @@ pub(crate) fn spawn_say_consumer(
                         channel.as_deref(),
                         crate::webhook::ActivityItem::Lifecycle(crate::webhook::LifecycleEvent {
                             run_id,
+                            sub_session_id,
                             status,
                             label,
                             task,

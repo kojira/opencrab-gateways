@@ -304,6 +304,7 @@ fn lifecycle_terminal_line_is_unchanged() {
 fn lifecycle(status: &str) -> LifecycleEvent {
     LifecycleEvent {
         run_id: "run-1".into(),
+        sub_session_id: Some("subtask-run-1".into()),
         status: status.into(),
         label: Some("task".into()),
         task: Some("do the thing".into()),
@@ -399,6 +400,55 @@ async fn the_per_run_cap_sends_one_suppression_note_and_drops_the_rest() {
         .await;
     let bodies = mock.bodies();
     assert!(bodies[super::deliver::TOOL_EVENT_CAP + 1].contains("tool_call_started"));
+}
+
+/// D-1087 review P2: 上限は run ごとに数える。2 つの binding（セッション）が交互に届いても、
+/// それぞれの run の連番は巻き戻らない（単一スロットだと届くたびに 0 に戻り、上限が効かない）。
+///
+/// 上限判定そのもの（`next_tool_index` が返す連番）を直接確かめる。HTTP を挟まないので、
+/// 200 件を 2 本ぶん送る必要がない。
+#[test]
+fn the_per_run_cap_counts_each_run_separately() {
+    let store = RouteStore::in_memory().unwrap();
+    let delivery = delivery(store);
+    let cap = super::deliver::TOOL_EVENT_CAP;
+
+    // 交互に届けても、run ごとの連番は 0,1,2,... と進む。
+    for expected in 0..3 {
+        assert_eq!(delivery.next_tool_index("activity-a"), Some(expected));
+        assert_eq!(delivery.next_tool_index("activity-b"), Some(expected));
+    }
+
+    // run a を上限まで進める。途中で run b が何度割り込んでも a の連番は戻らない。
+    for expected in 3..cap {
+        assert_eq!(delivery.next_tool_index("activity-b"), Some(expected));
+        assert_eq!(delivery.next_tool_index("activity-a"), Some(expected));
+    }
+    // 上限ちょうどの 1 件が抑制サマリ、それ以降は捨てる（`tool_messages` の判定と同じ番号）。
+    assert_eq!(delivery.next_tool_index("activity-a"), Some(cap));
+    assert_eq!(delivery.next_tool_index("activity-a"), Some(cap + 1));
+
+    // 新しい run は 0 から数え直す。
+    assert_eq!(delivery.next_tool_index("activity-c"), Some(0));
+}
+
+/// D-1087 review P2: 移設前の `sessionKey` 行は走行自身のセッションを出す（空にしない）。
+#[tokio::test]
+async fn lifecycle_lines_carry_the_run_session_key() {
+    let mock = MockWebhook::start().await;
+    let store = RouteStore::in_memory().unwrap();
+    store.set(&route(&mock.url), 1).unwrap();
+    let delivery = delivery(store);
+
+    delivery.event(
+        BINDING,
+        AGENT,
+        CHANNEL,
+        ActivityItem::Lifecycle(lifecycle("progress")),
+    );
+    mock.wait_for(1, Duration::from_secs(5)).await;
+    let body = mock.bodies().remove(0);
+    assert!(body.contains("sessionKey: `subtask-run-1`"), "{body}");
 }
 
 /// D-1087 P1: execute_shell の引数表示は移設前とバイト一致（cmd / args / stdin バイト数）。

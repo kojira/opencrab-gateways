@@ -63,6 +63,7 @@ async fn setup(stt: Vec<(u64, &'static str)>) -> Setup {
         SystemReactions::default(),
         targets,
         Some(manager.clone()),
+        None,
     );
     Setup {
         core,

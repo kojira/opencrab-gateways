@@ -70,6 +70,8 @@ async fn run() -> anyhow::Result<()> {
     let socket = PathBuf::from(&place.core_socket);
     let attachment_spool_root = place.attachment_spool_root.as_deref().map(PathBuf::from);
     let attachment_outbox_root = place.attachment_outbox_root.as_deref().map(PathBuf::from);
+    // D-1087: この gateway の DB（宛先の保存先）。daemon が書く配置から受け取る。
+    let activity_store_path = place.database_path.as_deref().map(PathBuf::from);
     // QC ハーネス差し替えは env からのみ（既定 OFF＝production 挙動）。
     let overrides = HarnessOverrides::from_env();
 
@@ -92,6 +94,7 @@ async fn run() -> anyhow::Result<()> {
         overrides,
         (attachment_spool_root, attachment_outbox_root),
         Some(voice_settings),
+        activity_store_path,
     )?;
     if let (Some(control), Some(nonce)) = (control, start_nonce) {
         let addresses = inst.addresses.clone();

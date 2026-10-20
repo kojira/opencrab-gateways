@@ -1,4 +1,5 @@
-use super::*;
+use super::model_command::model_command_address;
+use crate::map::address_for;
 
 #[test]
 fn model_command_is_answered_only_in_a_configured_channel() {

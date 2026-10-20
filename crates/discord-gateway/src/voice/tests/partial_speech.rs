@@ -53,6 +53,7 @@ async fn setup(join: bool) -> Setup {
         SystemReactions::default(),
         targets,
         Some(manager.clone()),
+        None,
     );
     Setup {
         core,

@@ -649,6 +649,7 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
             placement_dir,
             attachment_spool_root: None,
             attachment_outbox_root: None,
+            database_path: temp.path().join("owner.db"),
         }),
     )
     .unwrap();
@@ -706,6 +707,7 @@ fn d1079_production_placement_carries_attachment_outbox_root() {
         placement_dir: placement_dir.clone(),
         attachment_spool_root: Some(temp.path().join("inbox")),
         attachment_outbox_root: Some(temp.path().join("outbox")),
+        database_path: temp.path().join("owner.db"),
     };
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";

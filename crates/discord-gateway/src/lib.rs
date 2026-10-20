@@ -28,10 +28,10 @@ pub mod thinking;
 pub mod transport;
 pub mod typing;
 pub mod voice;
-// D-1087 phase 1: core から移した webhook（活動/走行通知）実装。既定 OFF の理由は
-// `webhook` module の doc と Cargo.toml の `webhook-activity` feature を参照。
-#[cfg(feature = "webhook-activity")]
+// D-1087: 活動 webhook（宛先はセッション単位で gateway DB に持つ）。core は webhook を
+// 知らない。供給口は `webhook::source` の 1 module に閉じる。
 pub mod webhook;
+pub mod webhook_command;
 
 #[cfg(test)]
 mod model_interaction_contract_tests;

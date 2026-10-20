@@ -156,6 +156,35 @@ fn thinking_interaction_to_line(interaction: &CommandInteraction) -> Option<Stri
     serde_json::to_string(&event).ok()
 }
 
+fn webhook_interaction_to_line(interaction: &CommandInteraction) -> Option<String> {
+    if interaction.data.name != "webhook" {
+        return None;
+    }
+    let option = interaction.data.options.first()?;
+    let CommandDataOptionValue::SubCommand(options) = &option.value else {
+        return None;
+    };
+    let destination_channel_id = options
+        .iter()
+        .find(|option| option.name == "channel")
+        .and_then(|option| match &option.value {
+            CommandDataOptionValue::Channel(channel_id) => Some(channel_id.get().to_string()),
+            _ => None,
+        });
+    let event = crate::webhook_command::WebhookInteractionEvent {
+        event_kind: crate::webhook_command::WEBHOOK_EVENT_KIND.to_string(),
+        interaction_id: interaction.id.get().to_string(),
+        application_id: interaction.application_id.get().to_string(),
+        token: interaction.token.clone(),
+        guild_id: interaction.guild_id.map(|id| id.get().to_string()),
+        channel_id: interaction.channel_id.get().to_string(),
+        user_id: interaction.user.id.get().to_string(),
+        subcommand: option.name.clone(),
+        destination_channel_id,
+    };
+    serde_json::to_string(&event).ok()
+}
+
 struct Forwarder {
     on_line: OnLine,
 }
@@ -173,12 +202,19 @@ impl EventHandler for Forwarder {
         {
             tracing::warn!(error = %crate::secret::redact_token(&error.to_string()), "failed to register /thinking");
         }
+        if let Err(error) =
+            Command::create_global_command(&ctx.http, crate::webhook_command::webhook_command())
+                .await
+        {
+            tracing::warn!(error = %crate::secret::redact_token(&error.to_string()), "failed to register /webhook");
+        }
     }
 
     async fn interaction_create(&self, _ctx: Context, interaction: Interaction) {
         let line = match interaction {
             Interaction::Command(command) => model_interaction_to_line(&command, false)
-                .or_else(|| thinking_interaction_to_line(&command)),
+                .or_else(|| thinking_interaction_to_line(&command))
+                .or_else(|| webhook_interaction_to_line(&command)),
             Interaction::Autocomplete(command) => model_interaction_to_line(&command, true),
             _ => None,
         };

@@ -258,6 +258,7 @@ async fn posted_say_and_reply_are_spoken_in_order() {
         SystemReactions::default(),
         targets.clone(),
         Some(m.clone()),
+        None,
     );
     write_json(
         &mut core.writer,

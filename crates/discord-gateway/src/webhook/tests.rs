@@ -269,7 +269,7 @@ fn test_build_tool_event_message_attachment_carries_upstream_masking() {
 /// サイズ上限を超える全文は**送信前に**切り詰め、省略した旨を本文と添付の両方に残す。
 #[test]
 fn test_build_tool_event_message_truncates_oversized_attachment() {
-    let stdout = "q".repeat(opencrab_actions::ATTACHMENT_MAX_BYTES + 4096);
+    let stdout = "q".repeat(crate::webhook::ATTACHMENT_MAX_BYTES + 4096);
     let view = ToolEventView {
         event: "tool_call_completed".to_string(),
         tool_name: "execute_shell".to_string(),
@@ -283,7 +283,7 @@ fn test_build_tool_event_message_truncates_oversized_attachment() {
     let att = msgs[0].attachment.as_ref().expect("attachment");
     assert!(att.truncated);
     assert!(
-        att.data.len() <= opencrab_actions::ATTACHMENT_MAX_BYTES,
+        att.data.len() <= crate::webhook::ATTACHMENT_MAX_BYTES,
         "attachment exceeds cap: {}",
         att.data.len()
     );
@@ -466,7 +466,7 @@ async fn long_message_is_one_multipart_request_not_many() {
     assert!(msg.content.contains("full text attached"));
     assert_eq!(
         msg.content.chars().take_while(|c| *c == 'L').count(),
-        opencrab_actions::ATTACHMENT_PREVIEW_CHARS
+        crate::webhook::ATTACHMENT_PREVIEW_CHARS
     );
 }
 
@@ -559,109 +559,4 @@ async fn delivery_never_blocks_the_caller() {
     );
     // それでも配送自体はちゃんと出る。
     mock.wait_for(1, Duration::from_secs(5)).await;
-}
-
-// ---- live E2E (env-gated, #[ignore] by default) ----
-//
-// 実 DB の agent 既定 webhook を使って、空 explicit url がフォールバックして実際の
-// Discord webhook へ配送されることを確認する。raw url はコードに置かず、実行時に DB
-// から解決して使う（secret はログにも出さない）。
-//
-// 実行例:
-//   OPENCRAB_E2E_DB=data/opencrab.db \
-//   OPENCRAB_E2E_AGENT_ID=c56f19e0-... \
-//   cargo test -p opencrab-discord -- --ignored --nocapture e2e_empty_url_fallback_delivers
-#[tokio::test]
-#[ignore = "live: posts to a real Discord webhook; env-gated"]
-async fn e2e_empty_url_fallback_delivers() {
-    let db_path = std::env::var("OPENCRAB_E2E_DB")
-        .expect("set OPENCRAB_E2E_DB to an absolute path to the live opencrab.db");
-    let agent_id = std::env::var("OPENCRAB_E2E_AGENT_ID")
-        .expect("set OPENCRAB_E2E_AGENT_ID to the agent with a configured default webhook");
-
-    // resolve_subtask_webhook は SELECT のみ（書き込まない）。WAL の live DB に対して
-    // read-only open は CannotOpen になり得るため通常 open する。
-    let conn = rusqlite::Connection::open(&db_path).expect("open real DB");
-
-    // (1) 空 explicit url → デフォルトへフォールバックして Use になる。
-    let empty_args = json!({ "webhook": { "url": "" } });
-    let resolved = resolve_subtask_webhook(&conn, &agent_id, "spawn_subtask", &empty_args, None);
-    let (url, source) = match resolved {
-        WebhookResolution::Use { config, source } => (config.url, source),
-        other => panic!(
-            "empty url must fall back to a default Use; got {:?}",
-            match other {
-                WebhookResolution::None => "None",
-                WebhookResolution::Disabled { .. } => "Disabled",
-                WebhookResolution::Error { .. } => "Error",
-                WebhookResolution::Use { .. } => unreachable!(),
-            }
-        ),
-    };
-    assert!(
-        matches!(
-            source,
-            WebhookSource::AgentDefault
-                | WebhookSource::ToolDefault
-                | WebhookSource::GlobalDefault
-                | WebhookSource::EnvConfig
-        ),
-        "fallback source should be a default, got {}",
-        source.as_str()
-    );
-    // raw url は出さない。redacted のみ。
-    eprintln!(
-        "[e2e] empty url -> fallback source={} url={}",
-        source.as_str(),
-        redact_webhook_url(&url)
-    );
-
-    // 実 Discord webhook へ started lifecycle を 1 通配送する（実 HTTP）。
-    let meta = LifecycleMeta {
-        label: "E2E empty-url fallback".to_string(),
-        run_id: "e2e-empty-url".to_string(),
-        session_key: "e2e".to_string(),
-    };
-    let messages = build_started_messages(
-        &meta,
-        "E2E: empty explicit webhook url fell back to default (this is a test message).",
-    );
-    let client = reqwest::Client::new();
-    for msg in &messages {
-        let resp = client
-            .post(&url)
-            .json(&build_webhook_body(&msg.content, false))
-            .send()
-            .await
-            .expect("discord webhook POST should complete");
-        assert!(
-            resp.status().is_success(),
-            "discord webhook should accept message: http {}",
-            resp.status().as_u16()
-        );
-    }
-    eprintln!(
-        "[e2e] delivered {} message(s) to the default webhook",
-        messages.len()
-    );
-
-    // (2) 非空の不正 url はフォールバックせず Error（strict 維持）。
-    let bad_args = json!({ "webhook": { "url": "http://evil.example.com/api/webhooks/1/tok" } });
-    let bad = resolve_subtask_webhook(&conn, &agent_id, "spawn_subtask", &bad_args, None);
-    match bad {
-        WebhookResolution::Error {
-            code,
-            message,
-            source,
-        } => {
-            assert_eq!(code, "invalid_webhook_url");
-            assert_eq!(source, WebhookSource::Explicit);
-            assert!(
-                !message.contains("evil.example.com"),
-                "raw url leaked: {message}"
-            );
-            eprintln!("[e2e] invalid explicit url -> Error (no fallback): {code}: {message}");
-        }
-        _ => panic!("non-empty invalid explicit url must Error, not fall back"),
-    }
 }

@@ -596,6 +596,9 @@ struct ProductionFactory {
     placement_dir: PathBuf,
     attachment_spool_root: Option<PathBuf>,
     attachment_outbox_root: Option<PathBuf>,
+    /// Gateway store DB. The instance opens it for the per-session activity webhook routes
+    /// (D-1087); the daemon owns the schema and the master key.
+    database_path: PathBuf,
 }
 
 impl SpawnerFactory for ProductionFactory {
@@ -702,6 +705,7 @@ impl SpawnerFactory for ProductionFactory {
             "core_socket": self.core_socket,
             "attachment_spool_root": self.attachment_spool_root,
             "attachment_outbox_root": self.attachment_outbox_root,
+            "database_path": self.database_path,
             "control_socket": control_socket,
             "start_nonce": start_nonce,
             "instances": [{"instance_id":row.instance_id,"revision":revision,
@@ -748,6 +752,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             placement_dir: config.placement_dir.clone(),
             attachment_spool_root: config.attachment_spool_root.clone(),
             attachment_outbox_root: config.attachment_outbox_root.clone(),
+            database_path: config.database_path.clone(),
         }),
     )?;
     let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());

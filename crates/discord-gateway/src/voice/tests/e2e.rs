@@ -23,6 +23,8 @@ pub(super) struct FakePlayer {
     left: Mutex<Vec<u64>>,
     pub(super) played: Mutex<Vec<(u64, Vec<u8>)>>,
     pub(super) played_at: Mutex<Vec<std::time::Instant>>,
+    /// true のあいだ「再生中」と答える。
+    pub(super) busy: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -42,6 +44,9 @@ impl VoicePlayer for FakePlayer {
             .unwrap()
             .push(std::time::Instant::now());
         Ok(())
+    }
+    async fn is_idle(&self, _: u64) -> bool {
+        !self.busy.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -208,7 +213,8 @@ async fn transcribed_speech_becomes_said_on_the_text_channel() {
     // Spoken turns run on the session's realtime model.
     assert_eq!(said["model_profile"], "realtime");
     // Spoken turns ask for a short spoken reply.
-    assert_eq!(said["system_context"], VOICE_SYSTEM_CONTEXT, "{said}");
+    let system_context = said["system_context"].as_str().unwrap();
+    assert!(system_context.starts_with(VOICE_SYSTEM_CONTEXT), "{said}");
     write_json(&mut core.writer, &json!({"id":said["id"],"m":"ok","seq":1}))
         .await
         .unwrap();
@@ -252,6 +258,7 @@ async fn posted_say_and_reply_are_spoken_in_order() {
         SystemReactions::default(),
         targets.clone(),
         Some(m.clone()),
+        None,
     );
     write_json(
         &mut core.writer,

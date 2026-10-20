@@ -14,7 +14,27 @@ pub struct Placement {
     /// declare `files`.
     #[serde(default)]
     pub attachment_outbox_root: Option<String>,
+    /// Gateway store DB (D-1087). The instance process opens it to read/write the per-session
+    /// activity webhook routes; the daemon owns the schema. Absent = activity webhook commands
+    /// answer "not configured" instead of guessing a path.
+    #[serde(default)]
+    pub database_path: Option<String>,
+    /// D-1091: the environment this operator declares for the instance's turns (name → value).
+    /// Core passes it verbatim to `execute_shell` children of that instance, so a CLI the agent
+    /// runs acts as the same account the gateway acts as. Absent = nothing is declared and the
+    /// hello frame is unchanged. A placement that declares secrets here is credential material:
+    /// keep the file mode 0600. The bot token itself is still env-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_env: Option<std::collections::BTreeMap<String, String>>,
     pub instances: Vec<InstancePlacement>,
+}
+
+impl Placement {
+    /// D-1091: the declaration to put on this instance's hello. Absent placement entry = empty
+    /// map = the previous frame (no `run_env` key at all).
+    pub fn declared_run_env(&self) -> std::collections::BTreeMap<String, String> {
+        self.run_env.clone().unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -129,6 +149,21 @@ impl Placement {
         if let Some(root) = &self.attachment_outbox_root {
             if !std::path::Path::new(root).is_absolute() {
                 anyhow::bail!("attachment_outbox_root must be an absolute path");
+            }
+        }
+        if let Some(run_env) = &self.run_env {
+            for (name, value) in run_env {
+                if name.trim().is_empty() {
+                    anyhow::bail!("run_env names must not be empty");
+                }
+                if value.is_empty() {
+                    anyhow::bail!("run_env value for {name} must not be empty");
+                }
+            }
+        }
+        if let Some(path) = &self.database_path {
+            if !std::path::Path::new(path).is_absolute() {
+                anyhow::bail!("database_path must be an absolute path");
             }
         }
         if self.instances.len() != 1 {
@@ -291,6 +326,8 @@ mod tests {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             attachment_outbox_root: None,
+            database_path: None,
+            run_env: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -312,6 +349,8 @@ mod tests {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             attachment_outbox_root: Some(root.into()),
+            database_path: None,
+            run_env: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -329,6 +368,8 @@ mod tests {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             attachment_outbox_root: None,
+            database_path: None,
+            run_env: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -370,6 +411,8 @@ mod tests {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             attachment_outbox_root: None,
+            database_path: None,
+            run_env: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -441,6 +484,8 @@ mod tests {
             core_socket: "/tmp/g.sock".into(),
             attachment_spool_root: None,
             attachment_outbox_root: None,
+            database_path: None,
+            run_env: None,
             instances: vec![
                 instance("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
                 instance("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
@@ -451,5 +496,55 @@ mod tests {
             p.validate().unwrap_err().to_string(),
             "discord-gateway requires exactly one instance per process"
         );
+    }
+
+    fn placement_without_run_env(core_socket: &str) -> serde_json::Value {
+        serde_json::json!({
+            "core_socket": core_socket,
+            "instances": [{
+                "instance_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "revision": 1,
+                "addresses": ["discord-agent-x-100-200"],
+                "config_b64": encode(&sample_config()),
+            }],
+        })
+    }
+
+    /// D-1091: 配置に宣言が無ければ何も宣言しない（hello は従来と同じ frame）。
+    #[test]
+    fn a_placement_without_a_declaration_declares_nothing() {
+        let place: Placement =
+            serde_json::from_value(placement_without_run_env("/tmp/g.sock")).unwrap();
+        place.validate().unwrap();
+        assert!(place.declared_run_env().is_empty());
+        assert!(place.run_env.is_none());
+    }
+
+    /// D-1091: 配置が宣言を持てば、そのまま（名前→値）をこの instance の宣言として使う。
+    #[test]
+    fn a_placement_declaration_is_passed_through_verbatim() {
+        let mut value = placement_without_run_env("/tmp/g.sock");
+        value["run_env"] = serde_json::json!({"BINDING_ACCOUNT": "alpha"});
+        let place: Placement = serde_json::from_value(value).unwrap();
+        place.validate().unwrap();
+        let declared = place.declared_run_env();
+        assert_eq!(
+            declared.get("BINDING_ACCOUNT").map(String::as_str),
+            Some("alpha")
+        );
+    }
+
+    /// D-1091: 空の名前・空の値は起動前に落とす（黙って宣言したつもりにさせない）。
+    #[test]
+    fn an_empty_declaration_name_or_value_fails_loud() {
+        for run_env in [
+            serde_json::json!({"  ": "value"}),
+            serde_json::json!({"NAME": ""}),
+        ] {
+            let mut value = placement_without_run_env("/tmp/g.sock");
+            value["run_env"] = run_env;
+            let place: Placement = serde_json::from_value(value).unwrap();
+            assert!(place.validate().is_err(), "{place:?}");
+        }
     }
 }

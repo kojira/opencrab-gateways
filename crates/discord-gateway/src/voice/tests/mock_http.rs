@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
+use axum::response::IntoResponse as _;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -12,6 +13,10 @@ pub struct Recorded {
     pub tts_queries: Mutex<Vec<(String, String)>>,
     /// `/synthesis` 要求を受けた時刻（受けた順）。
     pub synthesis_started: Mutex<Vec<std::time::Instant>>,
+    /// `/synthesis` が受けた audio_query 本文（受けた順）。
+    pub synthesis_bodies: Mutex<Vec<String>>,
+    /// `GET /version` の答え。None なら 404（版が読めない）。
+    pub engine_version: Mutex<Option<String>>,
 }
 
 pub const WAV_FROM_TTS: &[u8] = b"RIFF-fake-wav-from-voicevox";
@@ -63,13 +68,25 @@ pub async fn spawn_with_synthesis_delay(
         )
         .route(
             "/synthesis",
-            post(move |State(r): State<Arc<Recorded>>| async move {
-                r.synthesis_started
-                    .lock()
-                    .unwrap()
-                    .push(std::time::Instant::now());
-                tokio::time::sleep(std::time::Duration::from_millis(synthesis_delay_ms)).await;
-                WAV_FROM_TTS.to_vec()
+            post(
+                move |State(r): State<Arc<Recorded>>, body: String| async move {
+                    r.synthesis_started
+                        .lock()
+                        .unwrap()
+                        .push(std::time::Instant::now());
+                    r.synthesis_bodies.lock().unwrap().push(body);
+                    tokio::time::sleep(std::time::Duration::from_millis(synthesis_delay_ms)).await;
+                    WAV_FROM_TTS.to_vec()
+                },
+            ),
+        )
+        .route(
+            "/version",
+            get(|State(r): State<Arc<Recorded>>| async move {
+                match r.engine_version.lock().unwrap().clone() {
+                    Some(version) => axum::Json(version).into_response(),
+                    None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                }
             }),
         )
         .route(

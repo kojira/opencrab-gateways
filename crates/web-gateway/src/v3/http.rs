@@ -305,6 +305,8 @@ async fn post_message(
         reply_target: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: super::wire::TurnModelProfile::Default,
+        agent_prelude: None,
+        provisional_id: None,
     };
     match client
         .post_said_with_self_context(
@@ -412,8 +414,12 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
         LiveEvent::Completed { .. } => None,
         // web SSE は最終 message だけを流す。途中の partial text は流さない（外形は不変）。
         LiveEvent::Partial { .. } => None,
+        // D-1085: provisional runs are a voice speculation; web SSE never starts them.
+        LiveEvent::ProvisionalResult { .. } => None,
         // R3: web SSE は失敗を通知イベントとして流す（reply_origin は Nostr 固有の e-tag 用途）。
         LiveEvent::TurnFailed { .. } => Some(Event::default().event("turn_failed").data("{}")),
+        // D-1087: 活動の詳細（ツール実行・サブタスク lifecycle）は web SSE の外形に載せない。
+        LiveEvent::ToolActivity { .. } | LiveEvent::SubtaskLifecycle { .. } => None,
         LiveEvent::Error { code, detail } => Some(
             Event::default()
                 .event("gate_error")
@@ -432,6 +438,7 @@ mod http_tests {
         let partial = LiveEvent::Partial {
             stream_id: "s".into(),
             text: "一文目です。".into(),
+            provisional_id: None,
         };
         assert!(live_to_event(&partial).is_none());
     }

@@ -6,17 +6,14 @@
 //! event_id を導いて nostaro を叩く（層分離・§9.3）。秘密鍵は env(`NOSTARO_SECRET_KEY`) のみ。
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::process::Command;
 
 use opencrab_gate_client::{InvokeHandler, InvokeOutcome};
 
 use crate::post::event_id_from_origin;
-use crate::secret::SECRET_ENV;
 
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -50,12 +47,29 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
     // 短縮参照フィールド（uN/eN/cN）。core はこの標示 field だけを実 ID へ解決する（レビュー要望）。
     let ref_prop =
         |desc: &str| json!({"type": "string", "description": desc, "format": "short-ref"});
+    // follow/unfollow の一括指定。core が短縮参照を解決するのは top-level の文字列 field だけ
+    // なので、配列側は hex か npub を渡してもらい、gateway が hex へ直す（D-1088）。
+    let follow_users_prop = || {
+        json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "まとめて、または npub で指定する対象。各要素は 64桁hex か npub（nprofile 可）。会話の u番号は user に渡す。最大100件。"
+        })
+    };
     // 配列は name の UTF-8 昇順（follow < kind0 < reaction < reply < repost < resolve < say < unfollow < upload）。
     let mut operations = json!([
         decl(
             "follow",
-            "指定ユーザーをフォローする。user に会話で見えている u番号を渡す。",
-            json!({"type": "object", "required": ["user"], "properties": {"user": ref_prop("フォロー対象の短縮参照（例 u2）")}}),
+            "指定した相手をフォローする。1人だけなら user に会話の u番号を渡す。複数まとめて、または npub で指定するときは users に配列で渡す（各要素は 64桁hex か npub／nprofile）。例: users=[\"npub1...\",\"npub1...\"]。user と users は同時に渡してよく、その場合は全部フォローする。人数に関係なく follow リスト(kind:3)の公開は1回だけなので、一度にまとめて渡してよい。mode=\"replace\" にすると、今のフォローを全部その集合に置き換える（既定は追加）。",
+            json!({"type": "object", "properties": {
+                "user": ref_prop("1人だけ指定するときの短縮参照（例 u2）"),
+                "users": follow_users_prop(),
+                "mode": {
+                    "type": "string",
+                    "enum": ["add", "replace"],
+                    "description": "add（既定）は今のフォローに追加。replace は指定した集合に置き換える。"
+                },
+            }}),
             conv("not_exposed", "agent_bound"),
         ),
         decl(
@@ -110,8 +124,11 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
         ),
         decl(
             "unfollow",
-            "指定ユーザーのフォローを解除する。user に会話で見えている u番号を渡す。",
-            json!({"type": "object", "required": ["user"], "properties": {"user": ref_prop("解除対象の短縮参照（例 u2）")}}),
+            "指定した相手のフォローを解除する。1人だけなら user に会話の u番号を渡す。複数まとめて、または npub で指定するときは users に配列で渡す（各要素は 64桁hex か npub／nprofile）。user と users は同時に渡してよく、その場合は全部解除する。人数に関係なく follow リスト(kind:3)の公開は1回だけ。",
+            json!({"type": "object", "properties": {
+                "user": ref_prop("1人だけ指定するときの短縮参照（例 u2）"),
+                "users": follow_users_prop(),
+            }}),
             conv("not_exposed", "agent_bound"),
         ),
         decl(
@@ -136,6 +153,8 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
     }
     operations
 }
+
+mod follow_run;
 
 /// nostaro 実行結果（三結果へ写す前段）。
 enum Run {
@@ -288,49 +307,6 @@ impl NostrInvokeHandler {
             }
         }
     }
-
-    /// `publishes=true` は relay/外部へ書く op（reply/reaction/repost/follow/unfollow/kind0/upload）。
-    /// nostaro の publish は「1 relay でも受理で Ok（exit 0）／全 relay 未受理で非ゼロ」（実確認:
-    /// client.rs check_publish_output は success 空でだけ bail）。よって非ゼロ=確定 publish なしだが、
-    /// 「どの relay も応答しなかった」場合は実際には保存された可能性が残る＝受理成否不明。二重投稿
-    /// 防止を優先し、write op の非ゼロは Indeterminate にする（§5.3・捏造しない）。read（resolve）は
-    /// 副作用が無いので非ゼロ=Rejected。spawn 失敗は外部 I/O 0 なので双方 Rejected。
-    async fn run(&self, argv: &[String], publishes: bool) -> Run {
-        let mut cmd = Command::new(&self.nostaro_bin);
-        cmd.arg("--config")
-            .arg(&self.config_path)
-            .args(argv)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(s) = &self.secret {
-            cmd.env(SECRET_ENV, s);
-        }
-        match tokio::time::timeout(OP_TIMEOUT, cmd.output()).await {
-            Ok(Ok(out)) if out.status.success() => {
-                Run::Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-            }
-            Ok(Ok(out)) => {
-                tracing::warn!(code = ?out.status.code(), publishes, "nostaro op non-zero exit");
-                if publishes {
-                    Run::Indeterminate
-                } else {
-                    Run::Rejected
-                }
-            }
-            // spawn 失敗 = 外部 I/O 0（nostaro が起動していない=何も投稿していない）。
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "nostaro spawn failed");
-                Run::Rejected
-            }
-            // timeout = 受理成否不明（kill 前に投稿済みかもしれない）。捏造しない。
-            Err(_) => {
-                tracing::warn!("nostaro op timeout");
-                Run::Indeterminate
-            }
-        }
-    }
 }
 
 fn str_field<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
@@ -387,6 +363,11 @@ impl InvokeHandler for NostrInvokeHandler {
             );
             return InvokeOutcome::Ok(Value::Null);
         }
+        // follow/unfollow は `users` の一括指定を受けるので、単一 argv の組み立てに入る前に分岐する
+        // （D-1088）。1 件だけなら従来どおり単発の結果形を返す。
+        if matches!(operation, "follow" | "unfollow") {
+            return self.follow_or_unfollow(operation, payload).await;
+        }
         // 入力欠落・不正は確定拒否（外部 I/O 0）。argv は "--" でオプション終端して positional を渡す。
         let dash = || "--".to_string();
         let mut argv: Vec<String> = match operation {
@@ -442,12 +423,6 @@ impl InvokeHandler for NostrInvokeHandler {
                 a.push(dash());
                 a.push(text.to_string());
                 a
-            }
-            "follow" | "unfollow" => {
-                let Some(user) = str_field(payload, "user") else {
-                    return InvokeOutcome::Rejected;
-                };
-                vec![operation.to_string(), dash(), user.to_string()]
             }
             "kind0" => {
                 let mut a = vec!["profile".to_string(), "set".to_string()];
@@ -696,3 +671,7 @@ mod tests {
 #[cfg(test)]
 #[path = "attachment_tests.rs"]
 mod attachment_tests;
+
+#[cfg(test)]
+#[path = "follow_tests.rs"]
+mod follow_tests;

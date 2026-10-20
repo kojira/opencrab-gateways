@@ -517,7 +517,9 @@ async fn run_gate(
         let per = Duration::from_secs(5).min(hard_deadline - now);
         match tokio::time::timeout(per, client.next_live(&address)).await {
             Ok(Some(LiveEvent::Message { text, .. })) => says.push(text),
-            Ok(Some(LiveEvent::Partial { .. })) => {}
+            Ok(Some(LiveEvent::Partial { .. } | LiveEvent::ProvisionalResult { .. })) => {}
+            // D-1087: 活動の詳細はこの smoke の観測対象ではない。
+            Ok(Some(LiveEvent::ToolActivity { .. } | LiveEvent::SubtaskLifecycle { .. })) => {}
             Ok(Some(LiveEvent::Activity { state, .. })) => {
                 activities.push(state.clone());
                 if state == "ended" {

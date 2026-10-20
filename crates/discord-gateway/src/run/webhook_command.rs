@@ -7,8 +7,9 @@
 use super::*;
 use crate::webhook::route::RouteStore;
 use crate::webhook_command::{
-    clear_text, error_text, parse_subcommand, set_text, show_text, WebhookInteractionEvent,
-    WebhookSubcommand, WEBHOOK_EVENT_KIND, WEBHOOK_NAME,
+    clear_text, error_text, log_destination_set, parse_subcommand, set_text, show_text,
+    Destination, RouteView, WebhookInteractionEvent, WebhookSubcommand, WEBHOOK_EVENT_KIND,
+    WEBHOOK_NAME,
 };
 use secrecy::ExposeSecret as _;
 
@@ -55,9 +56,7 @@ async fn handle(
     let Some(_address) = model_command_address(&requested_address, configured_addresses) else {
         return;
     };
-    let deferred = serenity::all::CreateInteractionResponse::Defer(
-        serenity::all::CreateInteractionResponseMessage::new().ephemeral(true),
-    );
+    let deferred = deferred_ephemeral_response();
     if let Err(error) = http
         .create_interaction_response(interaction_id, &event.token, &deferred, Vec::new())
         .await
@@ -89,19 +88,26 @@ async fn run_subcommand(
     };
     match subcommand {
         WebhookSubcommand::Show => match store.get(agent_id, &event.channel_id) {
-            Ok(Some(route)) => show_text(Some((
-                &crate::webhook::redact_webhook_url(&route.url),
-                route.enabled,
-            ))),
+            Ok(Some(route)) => {
+                let destination = match route.destination_channel_id.as_deref() {
+                    Some(id) => Some(channel_destination(http, id).await),
+                    None => None,
+                };
+                show_text(Some(RouteView {
+                    url: &route.url,
+                    destination: destination.as_ref(),
+                    enabled: route.enabled,
+                }))
+            }
             Ok(None) => show_text(None),
             Err(error) => error_text(&error.to_string()),
         },
         WebhookSubcommand::Set => {
-            let destination = event
+            let destination_id = event
                 .destination_channel_id
                 .as_deref()
                 .unwrap_or(&event.channel_id);
-            let Ok(channel) = destination.parse::<u64>() else {
+            let Ok(channel) = destination_id.parse::<u64>() else {
                 return error_text("the destination channel is not a valid id");
             };
             match ensure_webhook_url(http, channel).await {
@@ -112,10 +118,18 @@ async fn run_subcommand(
                         url,
                         events: None,
                         enabled: true,
+                        destination_channel_id: Some(destination_id.to_string()),
                     };
                     match store.set(&route, now_ms()) {
                         Ok(()) => {
-                            set_text(&crate::webhook::redact_webhook_url(&route.url), destination)
+                            // 設定変更は監査できるように残すが、URL はログに生値を出さない。
+                            log_destination_set(agent_id, destination_id, &route.url);
+                            let destination = channel_destination(http, destination_id).await;
+                            set_text(&RouteView {
+                                url: &route.url,
+                                destination: Some(&destination),
+                                enabled: route.enabled,
+                            })
                         }
                         Err(error) => error_text(&error.to_string()),
                     }
@@ -187,6 +201,33 @@ async fn ensure_webhook_url(
     // 保存前に必ず検証する（https + host + path）。
     crate::webhook::validate_webhook_url(&url)?;
     Ok(url)
+}
+
+/// 保存済みのチャンネル id から応答用の表示を作る。名前が引けなければ id だけ
+/// （チャンネルが消えた・権限が無い場合も同じ形で返す。生 URL は扱わない）。
+async fn channel_destination(http: &serenity::http::Http, channel_id: &str) -> Destination {
+    let name = match channel_id.parse::<u64>() {
+        Ok(id) => match http
+            .get_channel(serenity::all::ChannelId::new(id))
+            .await
+            .map(|channel| channel.guild())
+        {
+            Ok(Some(channel)) => Some(channel.name),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    Destination {
+        id: channel_id.to_string(),
+        name,
+    }
+}
+
+/// `/webhook` の応答は実行者だけが見える ephemeral（生 URL を出してよい理由）。
+pub(super) fn deferred_ephemeral_response() -> serenity::all::CreateInteractionResponse {
+    serenity::all::CreateInteractionResponse::Defer(
+        serenity::all::CreateInteractionResponseMessage::new().ephemeral(true),
+    )
 }
 
 /// 宛先を変更してよいか。オーナーだけ。

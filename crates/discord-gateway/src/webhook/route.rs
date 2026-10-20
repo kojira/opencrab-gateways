@@ -15,11 +15,14 @@ use std::time::Duration;
 pub struct SessionRoute {
     pub agent_id: String,
     pub channel_id: String,
-    /// 配送先 URL。応答・ログには生値を出さない（[`super::redact_webhook_url`]）。
+    /// 配送先 URL。ログには生値を出さない（[`super::redact_webhook_url`]）。
     pub url: String,
     /// 送信対象イベント名（None = 全部）。
     pub events: Option<Vec<String>>,
     pub enabled: bool,
+    /// 配送先チャンネルの id。`/webhook show` が名前を引くために持つ（名前は応答時に解決）。
+    /// 列を足す前に設定された行では None（名前を出せない）。
+    pub destination_channel_id: Option<String>,
 }
 
 impl SessionRoute {
@@ -52,10 +55,12 @@ impl RouteStore {
                url TEXT NOT NULL, \
                events_json TEXT, \
                enabled INTEGER NOT NULL, \
+               destination_channel_id TEXT, \
                created_at_ms INTEGER NOT NULL, \
                updated_at_ms INTEGER NOT NULL, \
                PRIMARY KEY(agent_id, channel_id));",
         )?;
+        add_destination_column(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -88,7 +93,7 @@ impl RouteStore {
         self.with_conn(|conn| {
             let row = conn
                 .query_row(
-                    "SELECT agent_id, channel_id, url, events_json, enabled \
+                    "SELECT agent_id, channel_id, url, events_json, enabled, destination_channel_id \
                      FROM session_activity_routes WHERE agent_id=?1 AND channel_id=?2",
                     params![agent_id, channel_id],
                     |row| {
@@ -99,6 +104,7 @@ impl RouteStore {
                             url: row.get(2)?,
                             events: events_json.map(|raw| parse_events(&raw)),
                             enabled: row.get::<_, i64>(4)? != 0,
+                            destination_channel_id: row.get(5)?,
                         })
                     },
                 )
@@ -117,17 +123,21 @@ impl RouteStore {
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO session_activity_routes \
-                   (agent_id, channel_id, url, events_json, enabled, created_at_ms, updated_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
+                   (agent_id, channel_id, url, events_json, enabled, destination_channel_id, \
+                    created_at_ms, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7) \
                  ON CONFLICT(agent_id, channel_id) DO UPDATE SET \
                    url = excluded.url, events_json = excluded.events_json, \
-                   enabled = excluded.enabled, updated_at_ms = excluded.updated_at_ms",
+                   enabled = excluded.enabled, \
+                   destination_channel_id = excluded.destination_channel_id, \
+                   updated_at_ms = excluded.updated_at_ms",
                 params![
                     route.agent_id,
                     route.channel_id,
                     route.url,
                     events,
                     i64::from(route.enabled),
+                    route.destination_channel_id,
                     now_ms
                 ],
             )?;
@@ -145,6 +155,24 @@ impl RouteStore {
             Ok(removed > 0)
         })
     }
+}
+
+/// 既存 DB（列を足す前の `session_activity_routes`）に宛先チャンネル列を後付けする。
+///
+/// 何度呼んでも同じ結果になる（列があれば何もしない）。再起動のたびに走る。
+fn add_destination_column(conn: &Connection) -> Result<()> {
+    let exists = conn
+        .prepare("PRAGMA table_info(session_activity_routes)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<String>>>()?
+        .iter()
+        .any(|name| name == "destination_channel_id");
+    if !exists {
+        conn.execute_batch(
+            "ALTER TABLE session_activity_routes ADD COLUMN destination_channel_id TEXT;",
+        )?;
+    }
+    Ok(())
 }
 
 fn parse_events(raw: &str) -> Vec<String> {
@@ -196,6 +224,7 @@ mod tests {
             url: "https://discord.com/api/webhooks/1/token".into(),
             events: None,
             enabled: true,
+            destination_channel_id: Some("channel-9".into()),
         }
     }
 
@@ -208,6 +237,40 @@ mod tests {
         assert_eq!(got.url, route().url);
         assert!(got.enabled);
         assert_eq!(got.events, None);
+        assert_eq!(got.destination_channel_id.as_deref(), Some("channel-9"));
+    }
+
+    /// 列を足す前の DB（QC で作られた表）を開いても壊れず、その行は宛先チャンネル無しで読める。
+    #[test]
+    fn a_table_created_before_the_destination_column_is_upgraded() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_activity_routes ( \
+               agent_id TEXT NOT NULL, channel_id TEXT NOT NULL, url TEXT NOT NULL, \
+               events_json TEXT, enabled INTEGER NOT NULL, \
+               created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, \
+               PRIMARY KEY(agent_id, channel_id)); \
+             INSERT INTO session_activity_routes \
+               (agent_id, channel_id, url, events_json, enabled, created_at_ms, updated_at_ms) \
+               VALUES ('agent-1', 'channel-9', 'https://discord.com/api/webhooks/1/token', \
+                       NULL, 1, 1, 1);",
+        )
+        .unwrap();
+        let store = RouteStore::from_connection(conn).unwrap();
+        let got = store.get("agent-1", "channel-9").unwrap().unwrap();
+        assert!(got.enabled);
+        assert_eq!(got.destination_channel_id, None);
+        // 後から設定し直せば列に載る。
+        store.set(&route(), 2).unwrap();
+        assert_eq!(
+            store
+                .get("agent-1", "channel-9")
+                .unwrap()
+                .unwrap()
+                .destination_channel_id
+                .as_deref(),
+            Some("channel-9")
+        );
     }
 
     #[test]

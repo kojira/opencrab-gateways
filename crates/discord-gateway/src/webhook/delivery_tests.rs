@@ -21,6 +21,7 @@ fn route(url: &str) -> SessionRoute {
         url: url.into(),
         events: None,
         enabled: true,
+        destination_channel_id: Some(CHANNEL.into()),
     }
 }
 

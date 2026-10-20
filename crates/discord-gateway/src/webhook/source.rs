@@ -20,6 +20,9 @@ pub struct ActivityEvent {
     pub tool: String,
     pub status: ActivityStatus,
     pub depth: u32,
+    /// 入れ子の走行（サブタスク / 自動 dispatch）で起きたツール実行だけが持つ run の
+    /// 相関キー。ライフサイクル通知の `sub_session_id` と同じ値。
+    pub sub_session_id: Option<String>,
     pub started_at: String,
     pub duration_ms: Option<u64>,
     /// core が持っている値そのまま（整形は配送側）。

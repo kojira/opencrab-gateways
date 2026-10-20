@@ -238,6 +238,7 @@ pub(super) fn tool_event_view(event: &ActivityEvent) -> ToolEventView {
         tool_name: event.tool.clone(),
         tool_call_id: event.call_id.clone(),
         depth: event.depth,
+        sub_session_id: event.sub_session_id.clone(),
         status: event.status.as_str().to_string(),
         duration_ms: event.duration_ms,
         max_chars: TOOL_EVENT_MAX_CHARS,

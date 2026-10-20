@@ -31,6 +31,7 @@ fn started_event() -> ActivityEvent {
         tool: "execute_shell".into(),
         status: ActivityStatus::Started,
         depth: 0,
+        sub_session_id: None,
         started_at: "2026-10-20T00:00:00Z".into(),
         duration_ms: None,
         args: serde_json::json!({"command": "ls"}),
@@ -244,6 +245,7 @@ fn tool_event_message_matches_the_pre_split_format() {
         tool_name: "execute_shell".into(),
         tool_call_id: "call-1".into(),
         depth: 0,
+        sub_session_id: None,
         status: "completed".into(),
         duration_ms: Some(12),
         args_summary: Some("command=ls".into()),
@@ -449,6 +451,30 @@ async fn lifecycle_lines_carry_the_run_session_key() {
     mock.wait_for(1, Duration::from_secs(5)).await;
     let body = mock.bodies().remove(0);
     assert!(body.contains("sessionKey: `subtask-run-1`"), "{body}");
+}
+
+/// D-1087: 入れ子の走行で起きたツール実行は、どの走行のものかを行に出す（run の相関キー）。
+/// 親ターンの実行は従来どおり run 行を出さない。
+#[test]
+fn nested_tool_events_render_the_run_key() {
+    let nested = ActivityEvent {
+        depth: 1,
+        sub_session_id: Some("subtask-run-9".into()),
+        ..started_event()
+    };
+    let view = super::deliver::tool_event_view(&nested);
+    let message = super::build_tool_event_message(&view);
+    let body = String::from_utf8_lossy(message[0].content.as_bytes());
+    assert!(body.contains("depth: 1"), "{body}");
+    assert!(body.contains("run: `subtask-run-9`"), "{body}");
+
+    let parent = super::deliver::tool_event_view(&started_event());
+    let message = super::build_tool_event_message(&parent);
+    let body = String::from_utf8_lossy(message[0].content.as_bytes());
+    assert!(
+        !body.contains("run: "),
+        "parent turn has no run key: {body}"
+    );
 }
 
 /// D-1087 P1: execute_shell の引数表示は移設前とバイト一致（cmd / args / stdin バイト数）。

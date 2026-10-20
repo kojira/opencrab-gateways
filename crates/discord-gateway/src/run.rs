@@ -636,6 +636,7 @@ pub(crate) fn spawn_say_consumer(
                 Some(LiveEvent::ToolActivity {
                     activity_id,
                     call_id,
+                    sub_session_id,
                     tool,
                     status,
                     depth,
@@ -659,6 +660,7 @@ pub(crate) fn spawn_say_consumer(
                                 tool,
                                 status,
                                 depth,
+                                sub_session_id,
                                 started_at,
                                 duration_ms,
                                 args,

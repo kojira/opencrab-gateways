@@ -226,6 +226,8 @@ pub struct ToolEventView {
     pub tool_name: String,
     pub tool_call_id: String,
     pub depth: u32,
+    /// 入れ子の走行の相関キー（親ターンでは `None`）。どの走行で起きたかを行に出す。
+    pub sub_session_id: Option<String>,
     pub status: String, // started/completed/failed/rejected
     pub duration_ms: Option<u64>,
     pub args_summary: Option<String>,
@@ -256,6 +258,9 @@ pub fn build_tool_event_message(view: &ToolEventView) -> Vec<WebhookMessage> {
         "{emoji} **{}**\ntool: `{}`\ncallId: `{}`\ndepth: {}",
         view.event, view.tool_name, view.tool_call_id, view.depth
     );
+    if let Some(run) = &view.sub_session_id {
+        s.push_str(&format!("\nrun: `{run}`"));
+    }
     if let Some(d) = view.duration_ms {
         s.push_str(&format!("\nduration: {d}ms"));
     }

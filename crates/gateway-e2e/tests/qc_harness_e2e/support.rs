@@ -686,6 +686,8 @@ async fn wire_instance(
         &place,
         &config_bytes,
         None,
+        // Harness: one instance per process, but no credential to declare.
+        opencrab_nostr_gateway::run_env::SecretOwner::ThisInstance,
         PathBuf::from("/nonexistent/nostaro"),
         overrides,
         None,

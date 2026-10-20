@@ -95,6 +95,8 @@ async fn run() -> anyhow::Result<()> {
         (attachment_spool_root, attachment_outbox_root),
         Some(voice_settings),
         activity_store_path,
+        // D-1091: only what the placement declares; absent means the frame is unchanged.
+        place.declared_run_env(),
     )?;
     if let (Some(control), Some(nonce)) = (control, start_nonce) {
         let addresses = inst.addresses.clone();

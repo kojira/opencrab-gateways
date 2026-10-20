@@ -55,6 +55,8 @@ pub fn spawn_instance(
         (attachment_spool_root, None),
         None,
         None,
+        // D-1091: callers that have no placement-wide declaration send none.
+        std::collections::BTreeMap::new(),
     )
 }
 
@@ -71,6 +73,7 @@ pub fn spawn_instance_with_voice(
     (attachment_spool_root, attachment_outbox_root): (Option<PathBuf>, Option<PathBuf>),
     voice_settings: Option<PathBuf>,
     activity_store_path: Option<PathBuf>,
+    run_env: std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<Arc<InstanceClient>> {
     if overrides.is_active() {
         tracing::warn!(
@@ -123,7 +126,16 @@ pub fn spawn_instance_with_voice(
     )
     .with_outbox_root(attachment_outbox_root.clone());
 
-    let client = InstanceClient::spawn_with_operations(
+    // D-1091: the environment the operator declared for this instance (empty = the previous
+    // frame). Names only in the log; the values never reach a log line.
+    if !run_env.is_empty() {
+        tracing::debug!(
+            instance = %place.instance_id,
+            declared = ?run_env.keys().collect::<Vec<_>>(),
+            "binding env declared"
+        );
+    }
+    let client = InstanceClient::spawn_with_operations_and_env(
         socket,
         place.instance_id.clone(),
         place.revision,
@@ -135,6 +147,7 @@ pub fn spawn_instance_with_voice(
             final_delivery: opencrab_gate_client::FinalDelivery::OperationDriven,
         },
         Arc::new(invoke_handler) as Arc<dyn InvokeHandler>,
+        run_env,
     );
     if let Some(voice) = &voice {
         voice.attach_client(client.clone());

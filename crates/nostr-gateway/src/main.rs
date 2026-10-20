@@ -8,6 +8,7 @@ use opencrab_nostr_gateway::config::{decode_config_b64, Placement};
 use opencrab_nostr_gateway::daemon::DaemonConfig;
 use opencrab_nostr_gateway::harness::HarnessOverrides;
 use opencrab_nostr_gateway::run::spawn_instance;
+use opencrab_nostr_gateway::run_env::SecretOwner;
 use opencrab_nostr_gateway::secret::take_watch_secret;
 
 fn main() -> anyhow::Result<()> {
@@ -64,6 +65,11 @@ async fn run() -> anyhow::Result<()> {
     // QC ハーネス差し替えは env からのみ（既定 OFF＝production 挙動）。
     let overrides = HarnessOverrides::from_env();
 
+    // D-1091: プロセスの鍵がどの instance の物かを決める。daemon は instance あたり 1 プロセスを
+    // 起動するので、配置の instance が 1 つならその instance の鍵と言い切れる。複数載っている
+    // 配置では区別できないので、どの instance にも鍵を宣言しない（
+    // [`opencrab_nostr_gateway::run_env::SecretOwner`]）。
+    let secret_owner = SecretOwner::for_instance_count(place.instances.len());
     let mut readiness = Vec::new();
     for inst in &place.instances {
         let bytes = decode_config_b64(&inst.config_b64)?;
@@ -72,6 +78,7 @@ async fn run() -> anyhow::Result<()> {
             inst,
             &bytes,
             secret.clone(),
+            secret_owner,
             nostaro_bin.clone(),
             overrides.clone(),
             place.attachment_outbox_root.clone(),

@@ -25,6 +25,7 @@ use crate::map::{
     LaneKind, Route, WatchEvent,
 };
 use crate::post::{self, SayDelivery};
+use crate::run_env::{self, SecretOwner};
 use crate::watch::{run_fake_watch_once, run_watch_loop, RESUBSCRIBE};
 
 const BIND_POLL: Duration = Duration::from_millis(50);
@@ -62,11 +63,13 @@ struct SaidMetrics {
     say_posted_standalone: AtomicU64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_instance(
     socket: PathBuf,
     place: &InstancePlacement,
     config_bytes: &[u8],
     secret: Option<Arc<String>>,
+    secret_owner: SecretOwner,
     nostaro_bin: PathBuf,
     overrides: HarnessOverrides,
     attachment_outbox_root: Option<PathBuf>,
@@ -109,7 +112,27 @@ pub fn spawn_instance(
         )
         .with_attachments(attachment_outbox_root, cfg.self_pubkey.clone()),
     );
-    let client = InstanceClient::spawn_with_operations(
+    // D-1091: この binding のターンで `execute_shell` が起動する子へ渡す環境を宣言する。
+    // relays-only config は instance ごとのパス。鍵は「このプロセスがこの instance だけを持つ」
+    // と分かるときだけ載せる（複数 instance の配置では誰にも載せない）。ログには名前だけを出す。
+    let run_env = run_env::for_instance(
+        &post_config,
+        secret_owner,
+        secret.as_ref().map(|s| s.as_str()),
+    );
+    if !secret_owner.declares_secret() && secret.is_some() {
+        tracing::warn!(
+            instance = %place.instance_id,
+            declared = ?run_env::declared_env_names(&run_env),
+            "placement holds several instances; the process credential is not declared to any of them"
+        );
+    }
+    tracing::debug!(
+        instance = %place.instance_id,
+        declared = ?run_env::declared_env_names(&run_env),
+        "binding env declared"
+    );
+    let client = InstanceClient::spawn_with_operations_and_env(
         socket,
         place.instance_id.clone(),
         place.revision,
@@ -119,6 +142,7 @@ pub fn spawn_instance(
         operations,
         runtime_capabilities,
         invoke_handler,
+        run_env,
     );
     let metrics = Arc::new(SaidMetrics::default());
     // 車線をまたぐ said dedup は instance 単位で共有する（全 default/watch 車線が同じセット）。

@@ -30,7 +30,12 @@ printf '\n' >> '{argv}'
 previous=""
 for argument in "$@"; do
   if [ "$previous" = "--from-file" ]; then
-    printf 'mode=%s\n' "$(stat -f %Lp "$argument" 2>/dev/null || stat -c %a "$argument")" >> '{files}'
+    # GNU (-c) first, BSD (-f %Lp) second. Probe by shape: on Linux `stat -f %Lp`
+    # is `--file-system` and succeeds with filesystem data, so an `||` fallback
+    # never reaches the BSD form.
+    mode=$(stat -c %a "$argument" 2>/dev/null)
+    case "$mode" in ''|*[!0-9]*) mode=$(stat -f %Lp "$argument" 2>/dev/null) ;; esac
+    printf 'mode=%s\n' "$mode" >> '{files}'
     printf 'present=%s\n' "$( [ -f "$argument" ] && echo yes || echo no )" >> '{files}'
     cat "$argument" >> '{files}'
     printf 'end\n' >> '{files}'

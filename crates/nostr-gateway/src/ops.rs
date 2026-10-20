@@ -6,17 +6,14 @@
 //! event_id を導いて nostaro を叩く（層分離・§9.3）。秘密鍵は env(`NOSTARO_SECRET_KEY`) のみ。
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::process::Command;
 
 use opencrab_gate_client::{InvokeHandler, InvokeOutcome};
 
 use crate::post::event_id_from_origin;
-use crate::secret::SECRET_ENV;
 
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -63,10 +60,15 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
     let mut operations = json!([
         decl(
             "follow",
-            "指定した相手をフォローする。1人だけなら user に会話の u番号を渡す。複数まとめて、または npub で指定するときは users に配列で渡す（各要素は 64桁hex か npub／nprofile）。例: users=[\"npub1...\",\"npub1...\"]。user と users は同時に渡してよく、その場合は全部フォローする。",
+            "指定した相手をフォローする。1人だけなら user に会話の u番号を渡す。複数まとめて、または npub で指定するときは users に配列で渡す（各要素は 64桁hex か npub／nprofile）。例: users=[\"npub1...\",\"npub1...\"]。user と users は同時に渡してよく、その場合は全部フォローする。人数に関係なく follow リスト(kind:3)の公開は1回だけなので、一度にまとめて渡してよい。mode=\"replace\" にすると、今のフォローを全部その集合に置き換える（既定は追加）。",
             json!({"type": "object", "properties": {
                 "user": ref_prop("1人だけ指定するときの短縮参照（例 u2）"),
                 "users": follow_users_prop(),
+                "mode": {
+                    "type": "string",
+                    "enum": ["add", "replace"],
+                    "description": "add（既定）は今のフォローに追加。replace は指定した集合に置き換える。"
+                },
             }}),
             conv("not_exposed", "agent_bound"),
         ),
@@ -122,7 +124,7 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
         ),
         decl(
             "unfollow",
-            "指定した相手のフォローを解除する。1人だけなら user に会話の u番号を渡す。複数まとめて、または npub で指定するときは users に配列で渡す（各要素は 64桁hex か npub／nprofile）。user と users は同時に渡してよく、その場合は全部解除する。",
+            "指定した相手のフォローを解除する。1人だけなら user に会話の u番号を渡す。複数まとめて、または npub で指定するときは users に配列で渡す（各要素は 64桁hex か npub／nprofile）。user と users は同時に渡してよく、その場合は全部解除する。人数に関係なく follow リスト(kind:3)の公開は1回だけ。",
             json!({"type": "object", "properties": {
                 "user": ref_prop("1人だけ指定するときの短縮参照（例 u2）"),
                 "users": follow_users_prop(),
@@ -151,6 +153,8 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
     }
     operations
 }
+
+mod follow_run;
 
 /// nostaro 実行結果（三結果へ写す前段）。
 enum Run {
@@ -301,112 +305,6 @@ impl NostrInvokeHandler {
                     InvokeOutcome::Rejected
                 })
             }
-        }
-    }
-
-    /// `publishes=true` は relay/外部へ書く op（reply/reaction/repost/follow/unfollow/kind0/upload）。
-    /// nostaro の publish は「1 relay でも受理で Ok（exit 0）／全 relay 未受理で非ゼロ」（実確認:
-    /// client.rs check_publish_output は success 空でだけ bail）。よって非ゼロ=確定 publish なしだが、
-    /// 「どの relay も応答しなかった」場合は実際には保存された可能性が残る＝受理成否不明。二重投稿
-    /// 防止を優先し、write op の非ゼロは Indeterminate にする（§5.3・捏造しない）。read（resolve）は
-    /// 副作用が無いので非ゼロ=Rejected。spawn 失敗は外部 I/O 0 なので双方 Rejected。
-    async fn run(&self, argv: &[String], publishes: bool) -> Run {
-        let mut cmd = Command::new(&self.nostaro_bin);
-        cmd.arg("--config")
-            .arg(&self.config_path)
-            .args(argv)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(s) = &self.secret {
-            cmd.env(SECRET_ENV, s);
-        }
-        match tokio::time::timeout(OP_TIMEOUT, cmd.output()).await {
-            Ok(Ok(out)) if out.status.success() => {
-                Run::Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-            }
-            Ok(Ok(out)) => {
-                tracing::warn!(code = ?out.status.code(), publishes, "nostaro op non-zero exit");
-                if publishes {
-                    Run::Indeterminate
-                } else {
-                    Run::Rejected
-                }
-            }
-            // spawn 失敗 = 外部 I/O 0（nostaro が起動していない=何も投稿していない）。
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "nostaro spawn failed");
-                Run::Rejected
-            }
-            // timeout = 受理成否不明（kill 前に投稿済みかもしれない）。捏造しない。
-            Err(_) => {
-                tracing::warn!("nostaro op timeout");
-                Run::Indeterminate
-            }
-        }
-    }
-
-    /// `follow` / `unfollow` の invoke（D-1088）。`user`（単発・core が短縮参照を解決済み）と
-    /// `users`（一括）を合わせて 1 件ずつ実行する。全件を先に検証し、1 件でも不正なら何も投稿
-    /// しない。1 件だけなら従来と同じ単発の結果形、複数件は per-entry の結果を返す。
-    async fn follow_or_unfollow(&self, operation: &str, payload: &Value) -> InvokeOutcome {
-        let targets = match crate::follow_targets::parse_targets(payload) {
-            Ok(targets) => targets,
-            Err(error) => {
-                tracing::warn!(
-                    operation,
-                    reason = error.reason(),
-                    "follow target rejected before any nostaro invocation"
-                );
-                return InvokeOutcome::Rejected;
-            }
-        };
-        if targets.len() == 1 {
-            let argv = crate::follow_targets::invocation_argv(operation, &targets[0].hex);
-            return run_to_outcome(self.run(&argv, true).await);
-        }
-        let mut results = Vec::with_capacity(targets.len());
-        let (mut accepted, mut rejected) = (0usize, 0usize);
-        for target in &targets {
-            let argv = crate::follow_targets::invocation_argv(operation, &target.hex);
-            let (status, output) = match self.run(&argv, true).await {
-                Run::Ok(stdout) => {
-                    accepted += 1;
-                    ("ok", stdout)
-                }
-                Run::Rejected => {
-                    rejected += 1;
-                    ("rejected", String::new())
-                }
-                Run::Indeterminate => ("indeterminate", String::new()),
-            };
-            results.push(json!({
-                "input": target.input,
-                "hex": target.hex,
-                "status": status,
-                "output": output,
-            }));
-        }
-        if accepted == targets.len() {
-            return InvokeOutcome::Ok(json!({
-                "operation": operation,
-                "count": targets.len(),
-                "results": results,
-            }));
-        }
-        tracing::warn!(
-            operation,
-            count = targets.len(),
-            accepted,
-            "batch follow partially failed"
-        );
-        if rejected == targets.len() {
-            // 1 件も外部 I/O が起きていない（spawn 失敗のみ）。
-            InvokeOutcome::Rejected
-        } else {
-            // 一部は受理済み。成功とも失敗とも捏造しない。
-            InvokeOutcome::Indeterminate
         }
     }
 }

@@ -7,14 +7,24 @@
 //!   なので、ここには hex / npub / nprofile を渡す（gateway が hex へ直す）。
 //!
 //! いずれも外部 I/O の前に全件を検証する（1 件でも不正なら 1 通も投稿しない）。
+//!
+//! 実行は 2 経路:
+//! - `user` だけ（1 件）: `nostaro follow <hex>`。従来どおり。
+//! - `users`（一括）: 解決した hex を 0600 の一時ファイルへ書き、`nostaro follow --from-file <file>`
+//!   を 1 回だけ呼ぶ。nostaro は 1 回の呼び出しで kind:3 を 1 つだけ公開するので、人数分の
+//!   連投（relay からの ban 対象）にならない。
+
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 use nostr::nips::nip19::Nip19Profile;
 use nostr::{FromBech32, PublicKey};
 
-/// 1 回の invoke で受け付ける対象の上限。1 件ごとに nostaro を起こす（relay 往復あり）ので、
-/// 無制限にはしない。超過は何も投稿せず確定拒否。
+/// 1 回の invoke で受け付ける対象の上限。公開は 1 回だが、一時ファイルと検証の大きさを
+/// 有界に保つ。超過は何も投稿せず確定拒否。
 pub(crate) const MAX_TARGETS: usize = 100;
 
 /// 解決済みの対象 1 件。
@@ -35,6 +45,43 @@ pub(crate) enum TargetError {
     TooMany(usize),
     /// 解決できない要素。
     Invalid { input: String, reason: &'static str },
+}
+
+/// `follow` の意図。既定は追加（`add`）。`replace` はファイルの集合そのものに置き換える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FollowMode {
+    Add,
+    Replace,
+}
+
+impl FollowMode {
+    /// payload の `mode` を読む。未指定は `Add`。それ以外の値は外部 I/O 前に拒否する。
+    pub(crate) fn parse(payload: &Value) -> Result<Self, TargetError> {
+        match payload.get("mode") {
+            None | Some(Value::Null) => Ok(Self::Add),
+            Some(Value::String(value)) if value == "add" => Ok(Self::Add),
+            Some(Value::String(value)) if value == "replace" => Ok(Self::Replace),
+            Some(other) => Err(TargetError::Invalid {
+                input: other.to_string(),
+                reason: "mode は add か replace です",
+            }),
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Replace => "replace",
+        }
+    }
+
+    /// nostaro に渡すフラグ（`add` は既定なので付けない）。
+    fn flag(self) -> Option<&'static str> {
+        match self {
+            Self::Add => None,
+            Self::Replace => Some("--replace"),
+        }
+    }
 }
 
 impl TargetError {
@@ -127,9 +174,68 @@ pub(crate) fn parse_targets(payload: &Value) -> Result<Vec<FollowTarget>, Target
     Ok(targets)
 }
 
+/// `users`（一括指定）が payload にあるか。空配列は `parse_targets` が `Missing` にする。
+pub(crate) fn has_users_array(payload: &Value) -> bool {
+    matches!(payload.get("users"), Some(Value::Array(users)) if !users.is_empty())
+}
+
 /// 1 件分の nostaro argv（`--` でオプション終端）。
 pub(crate) fn invocation_argv(operation: &str, hex: &str) -> Vec<String> {
     vec![operation.to_string(), "--".to_string(), hex.to_string()]
+}
+
+/// 一括分の nostaro argv。1 回の呼び出しで `--from-file` の集合を適用する。
+pub(crate) fn bulk_argv(operation: &str, file: &Path, mode: FollowMode) -> Vec<String> {
+    let mut argv = vec![
+        operation.to_string(),
+        "--from-file".to_string(),
+        file.display().to_string(),
+    ];
+    if let Some(flag) = mode.flag() {
+        argv.push(flag.to_string());
+    }
+    argv
+}
+
+/// 一括指定を適用するための一時ファイル。0600 で作り、drop で消す。
+///
+/// 中身は 1 行 1 公開鍵（hex）。`nostaro --from-file` はこの形をそのまま読む。
+pub(crate) struct TargetFile {
+    path: PathBuf,
+}
+
+impl TargetFile {
+    /// 対象の hex を書き出す。作成は `create_new`（既存パス・symlink を踏まない）。
+    pub(crate) fn write(targets: &[FollowTarget]) -> std::io::Result<Self> {
+        let mut body = String::with_capacity(targets.len() * 65);
+        for target in targets {
+            body.push_str(&target.hex);
+            body.push('\n');
+        }
+        let path = unique_path();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
+        Ok(Self { path })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TargetFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn unique_path() -> PathBuf {
+    std::env::temp_dir().join(format!("opencrab-follow-{}.txt", uuid::Uuid::new_v4()))
 }
 
 #[cfg(test)]

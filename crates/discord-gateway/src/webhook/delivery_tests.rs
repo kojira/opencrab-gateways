@@ -1,10 +1,11 @@
 //! D-1087 配送経路のテスト（宛先あり/なし・clear・再起動・本文の不変）。
 //!
-//! production seam は [`ActivityDelivery::deliver_for_turn`]。ローカルの HTTP モックで
-//! 「実際に届いたか」を確かめる（実 Discord へは出さない）。
+//! production seam は [`ActivityDelivery::event`]（1 件ごと）と [`ActivityDelivery::flush`]
+//! （ターン終端の積み残し）。ローカルの HTTP モックで「実際に届いたか」を確かめる
+//! （実 Discord へは出さない）。
 
 use super::route::{RouteStore, SessionRoute};
-use super::source::{ActivityEvent, ActivitySource, ActivityStatus, QueueActivitySource};
+use super::source::{ActivityEvent, ActivityItem, ActivityStatus, LifecycleEvent};
 use super::{ActivityDelivery, LifecycleMeta};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,8 +48,8 @@ fn completed_event() -> ActivityEvent {
     }
 }
 
-fn delivery(store: RouteStore, source: Arc<QueueActivitySource>) -> ActivityDelivery {
-    ActivityDelivery::new(store, source as Arc<dyn ActivitySource>)
+fn delivery(store: RouteStore) -> ActivityDelivery {
+    ActivityDelivery::new(store)
 }
 
 /// 最小の HTTP モック（1 リクエスト = 1 接続）。受け取った body を記録する。
@@ -141,11 +142,8 @@ async fn set_then_a_turn_event_is_delivered() {
     let mock = MockWebhook::start().await;
     let store = RouteStore::in_memory().unwrap();
     store.set(&route(&mock.url), 1).unwrap();
-    let source = Arc::new(QueueActivitySource::default());
-    source.push(BINDING, started_event());
-    let delivery = delivery(store, source);
-
-    delivery.deliver_for_turn(BINDING, AGENT, CHANNEL, None);
+    let delivery = delivery(store);
+    delivery.event(BINDING, AGENT, CHANNEL, ActivityItem::Tool(started_event()));
     mock.wait_for(1, Duration::from_secs(5)).await;
     let body = mock.bodies().remove(0);
     assert!(body.contains("tool_call_started"), "{body}");
@@ -156,11 +154,8 @@ async fn set_then_a_turn_event_is_delivered() {
 async fn without_a_destination_nothing_is_sent() {
     let mock = MockWebhook::start().await;
     let store = RouteStore::in_memory().unwrap();
-    let source = Arc::new(QueueActivitySource::default());
-    source.push(BINDING, started_event());
-    let delivery = delivery(store, source);
-
-    delivery.deliver_for_turn(BINDING, AGENT, CHANNEL, None);
+    let delivery = delivery(store);
+    delivery.event(BINDING, AGENT, CHANNEL, ActivityItem::Tool(started_event()));
     // 送らない。モックに何も届かないことを、少し待って確かめる。
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(mock.count(), 0);
@@ -172,11 +167,8 @@ async fn clearing_the_route_stops_delivery() {
     let store = RouteStore::in_memory().unwrap();
     store.set(&route(&mock.url), 1).unwrap();
     assert!(store.clear(AGENT, CHANNEL).unwrap());
-    let source = Arc::new(QueueActivitySource::default());
-    source.push(BINDING, started_event());
-    let delivery = delivery(store, source);
-
-    delivery.deliver_for_turn(BINDING, AGENT, CHANNEL, None);
+    let delivery = delivery(store);
+    delivery.event(BINDING, AGENT, CHANNEL, ActivityItem::Tool(started_event()));
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(mock.count(), 0, "a cleared session must not deliver");
 }
@@ -186,11 +178,13 @@ async fn a_different_session_does_not_receive() {
     let mock = MockWebhook::start().await;
     let store = RouteStore::in_memory().unwrap();
     store.set(&route(&mock.url), 1).unwrap();
-    let source = Arc::new(QueueActivitySource::default());
-    source.push(BINDING, started_event());
-    let delivery = delivery(store, source);
-
-    delivery.deliver_for_turn(BINDING, AGENT, "another-channel", None);
+    let delivery = delivery(store);
+    delivery.event(
+        BINDING,
+        AGENT,
+        "another-channel",
+        ActivityItem::Tool(started_event()),
+    );
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(mock.count(), 0);
 }
@@ -206,11 +200,13 @@ async fn the_route_survives_a_restart_and_still_delivers() {
     }
     // 再起動 = 同じ DB を開き直すだけ。設定は残る。
     let reopened = RouteStore::open(&path).unwrap();
-    let source = Arc::new(QueueActivitySource::default());
-    source.push(BINDING, completed_event());
-    let delivery = delivery(reopened, source);
-
-    delivery.deliver_for_turn(BINDING, AGENT, CHANNEL, None);
+    let delivery = delivery(reopened);
+    delivery.event(
+        BINDING,
+        AGENT,
+        CHANNEL,
+        ActivityItem::Tool(completed_event()),
+    );
     mock.wait_for(1, Duration::from_secs(5)).await;
     let body = mock.bodies().remove(0);
     assert!(body.contains("tool_call_completed"), "{body}");
@@ -223,11 +219,8 @@ async fn a_disabled_route_delivers_nothing() {
     let mut disabled = route(&mock.url);
     disabled.enabled = false;
     store.set(&disabled, 1).unwrap();
-    let source = Arc::new(QueueActivitySource::default());
-    source.push(BINDING, started_event());
-    let delivery = delivery(store, source);
-
-    delivery.deliver_for_turn(BINDING, AGENT, CHANNEL, None);
+    let delivery = delivery(store);
+    delivery.event(BINDING, AGENT, CHANNEL, ActivityItem::Tool(started_event()));
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(mock.count(), 0);
 }
@@ -274,14 +267,20 @@ fn tool_event_message_matches_the_pre_split_format() {
 /// 供給元のイベントが整形入力へ写るとき、status とイベント名の対応が崩れていないこと。
 #[test]
 fn queued_events_map_to_the_legacy_event_names() {
-    let source = Arc::new(QueueActivitySource::default());
-    source.push(BINDING, started_event());
-    source.push(BINDING, completed_event());
-    let drained = source.drain(BINDING);
+    let queue = super::source::ActivityQueue::default();
+    queue.push(BINDING, ActivityItem::Tool(started_event()));
+    queue.push(BINDING, ActivityItem::Tool(completed_event()));
+    let drained = queue.drain(BINDING);
     assert_eq!(drained.len(), 2);
-    assert_eq!(drained[0].status.event_name(), "tool_call_started");
-    assert_eq!(drained[1].status.event_name(), "tool_call_completed");
-    let view = super::deliver::tool_event_view(&drained[1]);
+    let ActivityItem::Tool(first) = &drained[0] else {
+        panic!("tool event expected");
+    };
+    let ActivityItem::Tool(second) = &drained[1] else {
+        panic!("tool event expected");
+    };
+    assert_eq!(first.status.event_name(), "tool_call_started");
+    assert_eq!(second.status.event_name(), "tool_call_completed");
+    let view = super::deliver::tool_event_view(second);
     assert_eq!(view.status, "completed");
     assert_eq!(view.exit_code, Some(0));
     assert_eq!(view.stdout_summary.as_deref(), Some("a.txt\n"));
@@ -300,4 +299,177 @@ fn lifecycle_terminal_line_is_unchanged() {
         line,
         "✅ **subtask completed**\nrunId: `run-1`\nsessionKey: `key`\nduration: 5ms\nresult: ok"
     );
+}
+
+fn lifecycle(status: &str) -> LifecycleEvent {
+    LifecycleEvent {
+        run_id: "run-1".into(),
+        status: status.into(),
+        label: Some("task".into()),
+        task: Some("do the thing".into()),
+        detail: Some("halfway".into()),
+        duration_ms: Some(7),
+        result_text: Some("done".into()),
+    }
+}
+
+/// D-1087 P0: サブタスクの開始・進捗・終端が実際に届く（移設前と同じ本文）。
+#[tokio::test]
+async fn subtask_lifecycle_started_progress_and_terminal_are_delivered() {
+    let mock = MockWebhook::start().await;
+    let store = RouteStore::in_memory().unwrap();
+    store.set(&route(&mock.url), 1).unwrap();
+    let delivery = delivery(store);
+
+    for status in ["started", "progress", "completed"] {
+        delivery.event(
+            BINDING,
+            AGENT,
+            CHANNEL,
+            ActivityItem::Lifecycle(lifecycle(status)),
+        );
+    }
+    mock.wait_for(3, Duration::from_secs(5)).await;
+    let bodies = mock.bodies();
+    assert!(
+        bodies[0].contains("🟢 **subtask started**") && bodies[0].contains("task: do the thing"),
+        "{}",
+        bodies[0]
+    );
+    assert!(
+        bodies[1].contains("🔄 **subtask progress**") && bodies[1].contains("message: halfway"),
+        "{}",
+        bodies[1]
+    );
+    assert!(
+        bodies[2].contains("✅ **subtask completed**")
+            && bodies[2].contains("duration: 7ms")
+            && bodies[2].contains("result: done"),
+        "{}",
+        bodies[2]
+    );
+}
+
+/// 終端の状態は core の status をそのまま写す（failed / timed_out / aborted）。
+#[tokio::test]
+async fn subtask_terminal_status_keeps_the_failure_kind() {
+    let mock = MockWebhook::start().await;
+    let store = RouteStore::in_memory().unwrap();
+    store.set(&route(&mock.url), 1).unwrap();
+    let delivery = delivery(store);
+
+    delivery.event(
+        BINDING,
+        AGENT,
+        CHANNEL,
+        ActivityItem::Lifecycle(lifecycle("timed_out")),
+    );
+    mock.wait_for(1, Duration::from_secs(5)).await;
+    let body = mock.bodies().remove(0);
+    assert!(body.contains("⏱️ **subtask timed_out**"), "{body}");
+}
+
+/// D-1087 P1: 1 run のツール活動は 200 件まで。201 件目は抑制サマリ 1 通、以降は捨てる。
+#[tokio::test]
+async fn the_per_run_cap_sends_one_suppression_note_and_drops_the_rest() {
+    let mock = MockWebhook::start().await;
+    let store = RouteStore::in_memory().unwrap();
+    store.set(&route(&mock.url), 1).unwrap();
+    let delivery = delivery(store);
+
+    for _ in 0..(super::deliver::TOOL_EVENT_CAP + 2) {
+        delivery.event(BINDING, AGENT, CHANNEL, ActivityItem::Tool(started_event()));
+    }
+    mock.wait_for(super::deliver::TOOL_EVENT_CAP + 1, Duration::from_secs(15))
+        .await;
+    let bodies = mock.bodies();
+    assert_eq!(bodies.len(), super::deliver::TOOL_EVENT_CAP + 1);
+    assert!(
+        bodies[super::deliver::TOOL_EVENT_CAP]
+            .contains("(+ further tool events suppressed after 200 this run)"),
+        "{}",
+        bodies[super::deliver::TOOL_EVENT_CAP]
+    );
+
+    // 次のターン（activity_id が変わる）は上限が戻る。
+    let mut next = started_event();
+    next.activity_id = "activity-2".into();
+    delivery.event(BINDING, AGENT, CHANNEL, ActivityItem::Tool(next));
+    mock.wait_for(super::deliver::TOOL_EVENT_CAP + 2, Duration::from_secs(5))
+        .await;
+    let bodies = mock.bodies();
+    assert!(bodies[super::deliver::TOOL_EVENT_CAP + 1].contains("tool_call_started"));
+}
+
+/// D-1087 P1: execute_shell の引数表示は移設前とバイト一致（cmd / args / stdin バイト数）。
+#[test]
+fn shell_arguments_render_exactly_like_the_pre_split_implementation() {
+    use serde_json::json;
+    let event = ActivityEvent {
+        tool: "execute_shell".into(),
+        args: json!({
+            "command": "bun",
+            "args": ["script.ts", "--flag"],
+            "stdin": "secret payload",
+        }),
+        ..started_event()
+    };
+    let view = super::deliver::tool_event_view(&event);
+    assert_eq!(
+        view.args_summary.as_deref(),
+        Some(r#"cmd: `bun` args: ["script.ts","--flag"] stdin: 14 bytes"#)
+    );
+    // 非 shell は JSON をそのまま（"null"/"{}" は出さない）。
+    let plain = ActivityEvent {
+        tool: "search_memory_index".into(),
+        args: json!({"query": "x"}),
+        ..started_event()
+    };
+    assert_eq!(
+        super::deliver::tool_event_view(&plain)
+            .args_summary
+            .as_deref(),
+        Some(r#"{"query":"x"}"#)
+    );
+    let empty = ActivityEvent {
+        args: json!({}),
+        ..started_event()
+    };
+    assert_eq!(super::deliver::tool_event_view(&empty).args_summary, None);
+}
+
+/// 拒否理由は core の構造マーカーを落として人間可読分だけ出す（移設前と同じ）。
+#[test]
+fn rejection_reason_drops_the_structured_prefix() {
+    let event = ActivityEvent {
+        status: ActivityStatus::Rejected,
+        error: Some("rejected: action not allowed".into()),
+        ..started_event()
+    };
+    let view = super::deliver::tool_event_view(&event);
+    assert_eq!(view.rejection_reason.as_deref(), Some("action not allowed"));
+}
+
+/// `/webhook clear` は設定を消すだけ。webhook 自体（宛先 URL）もチャンネルも触らない。
+///
+/// kojira 2026-10-20: 「webhook clearでチャンネルを消すような処理は不要です。設定を消すだけで十分です」。
+#[tokio::test]
+async fn clear_removes_only_the_setting_and_keeps_the_webhook() {
+    let mock = MockWebhook::start().await;
+    let store = RouteStore::in_memory().unwrap();
+    store.set(&route(&mock.url), 1).unwrap();
+    let stored = store.get(AGENT, CHANNEL).unwrap().expect("route");
+    assert_eq!(stored.url, mock.url);
+
+    assert!(store.clear(AGENT, CHANNEL).unwrap());
+    // 設定だけが消える。webhook の URL は消していないので、同じ宛先を再設定できる。
+    assert!(store.get(AGENT, CHANNEL).unwrap().is_none());
+    store.set(&route(&mock.url), 2).unwrap();
+    // clear は Discord へ何も送らない（webhook 削除リクエストを出さない）。
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(mock.count(), 0, "clear must not touch the webhook");
+
+    let delivery = delivery(store);
+    delivery.event(BINDING, AGENT, CHANNEL, ActivityItem::Tool(started_event()));
+    mock.wait_for(1, Duration::from_secs(5)).await;
 }

@@ -1,44 +1,20 @@
-//! 活動イベントの供給口（D-1087 の差し込み点）。
+//! 活動イベントの供給口（D-1087）。
 //!
-//! この module だけが「活動をどこから得るか」を知る。整形・宛先・配送はここを見ない。
-//! core 側に活動イベントが載った時点で [`ActivitySource`] の実装を差し替えるだけで、
-//! 配送経路は 1 行も変えない。
+//! core は活動を**中立のイベント**として流すだけ（`tool_activity` / `subtask_lifecycle`）。
+//! この module はその中立形と、受信ループが積んで配送が取り出すキューだけを持つ。
+//! 宛先・整形・配送はここを見ない（[`super::ActivityDelivery`] の責務）。
 //!
-//! # 期待する core 側の契約（option A、別タスクで実装）
+//! core 側の対応:
+//! - `tool_activity`: ツール実行 1 件（`started` / `completed` / `failed` / `rejected`）。
+//! - `subtask_lifecycle`: サブタスク走行 1 件のライフサイクル。
 //!
-//! **フレーム名** `tool_activity`（core→gateway、id を持たない fire-and-forget 通知。
-//! 同型の既存フレームは `activity` / `turn_failed` / `partial`。準拠 gateway は未知フレームを
-//! 無視して keep するので、旧 gateway は書き込み 0 で素通しする）。
-//!
-//! ```text
-//! {
-//!   "m": "tool_activity",
-//!   "binding_id": "<the binding of the turn that ran the tool>",
-//!   "activity_id": "<turn activity id, same as activity frame>",
-//!   "call_id": "<tool_call id>",
-//!   "tool": "<tool name>",
-//!   "status": "started" | "completed" | "failed" | "rejected",
-//!   "depth": <u32>,
-//!   "started_at": "<rfc3339>",
-//!   "duration_ms": <u64>,            // terminal status only
-//!   "args": <json>,                  // opaque; the gateway renders a summary
-//!   "result": <json>,                // terminal only, opaque
-//!   "error": "<string>"              // failed/rejected only
-//! }
-//! ```
-//!
-//! 制約（決定済み）:
-//! - core は webhook / gateway の語彙を持たない（上の名前は「ツール活動」だけを指す）。
-//! - 並びはターン内で発生順。フレームは同一 binding の stream に 1 本で流す。
-//! - 購読者がいない（旧 gateway）ときも core の挙動と記録は変わらない。
-//! - `args` / `result` は core が既に作っている値をそのまま載せる（要約は gateway 側）。
+//! どちらも id を持たない fire-and-forget 通知で、core は宛先を知らない。購読しない
+//! gateway では core の挙動も記録も変わらない。
 
-use std::sync::Arc;
-
-/// 活動イベント 1 件（core のフレームを写した、webhook を持たない中立形）。
+/// ツール実行 1 件（core の `tool_activity` を写した、宛先を持たない中立形）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActivityEvent {
-    /// ターンの activity id（同じターンのイベントは同じ値）。
+    /// ターンの activity id（同じターンのイベントは同じ値）。per-turn 上限の単位。
     pub activity_id: String,
     pub call_id: String,
     pub tool: String,
@@ -46,6 +22,7 @@ pub struct ActivityEvent {
     pub depth: u32,
     pub started_at: String,
     pub duration_ms: Option<u64>,
+    /// core が持っている値そのまま（整形は配送側）。
     pub args: serde_json::Value,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
@@ -61,6 +38,17 @@ pub enum ActivityStatus {
 }
 
 impl ActivityStatus {
+    /// core の `status` 文字列から写す。未知の値は `None`（配送しない）。
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw {
+            "started" => Some(ActivityStatus::Started),
+            "completed" => Some(ActivityStatus::Completed),
+            "failed" => Some(ActivityStatus::Failed),
+            "rejected" => Some(ActivityStatus::Rejected),
+            _ => None,
+        }
+    }
+
     /// 従来の webhook イベント名（`tool_call_<status>`）。
     pub fn event_name(self) -> &'static str {
         match self {
@@ -82,58 +70,58 @@ impl ActivityStatus {
     }
 }
 
-/// 活動イベントの供給元。
-pub trait ActivitySource: Send + Sync {
-    /// 未配送のイベントを発生順に取り出す。無ければ空。
-    fn drain(&self, binding_id: &str) -> Vec<ActivityEvent>;
-}
-
-/// 今日の状態: core がまだ活動イベントを載せていない。
+/// サブタスク走行 1 件のライフサイクル（core の `subtask_lifecycle`）。
 ///
-/// 何も返さない。**配送経路は動くが入力が空**というだけで、黙って壊れてはいない。
-/// 起動時に 1 回だけその旨を記録し、core 側の対応が入ったら
-/// [`ActivitySource`] の実装を差し替える。
-pub struct UnavailableActivitySource;
-
-impl ActivitySource for UnavailableActivitySource {
-    fn drain(&self, _binding_id: &str) -> Vec<ActivityEvent> {
-        Vec::new()
-    }
+/// `status` は `started` / `progress` / `completed` / `failed` / `timed_out` / `aborted`。
+/// core はその時点で分かっている項目だけを載せるので、他は `None`。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleEvent {
+    pub run_id: String,
+    pub status: String,
+    pub label: Option<String>,
+    /// started だけ（依頼本文）。
+    pub task: Option<String>,
+    /// progress だけ。
+    pub detail: Option<String>,
+    /// 終端だけ。
+    pub duration_ms: Option<u64>,
+    /// 終端だけ（結果本文）。
+    pub result_text: Option<String>,
 }
 
-/// テストと差し替えのための、外から積める供給元。
+/// 配送待ちの活動 1 件。
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActivityItem {
+    Tool(ActivityEvent),
+    Lifecycle(LifecycleEvent),
+}
+
+/// binding ごとの活動キュー。受信ループが積み、配送が binding 単位で全部取り出す。
+///
+/// 取り出しは「その binding の分だけ」なので、複数 binding を 1 gateway で扱っても
+/// 混ざらない。溢れないよう上限は持たない: 配送はターン内で都度走るので、通常は
+/// 数件で空になる（積み残しは「宛先が無い間に来た分」だけで、それも配送時に捨てる）。
 #[derive(Default)]
-pub struct QueueActivitySource {
-    events: std::sync::Mutex<Vec<(String, ActivityEvent)>>,
+pub struct ActivityQueue {
+    items: std::sync::Mutex<Vec<(String, ActivityItem)>>,
 }
 
-impl QueueActivitySource {
-    pub fn push(&self, binding_id: &str, event: ActivityEvent) {
-        if let Ok(mut events) = self.events.lock() {
-            events.push((binding_id.to_string(), event));
+impl ActivityQueue {
+    pub fn push(&self, binding_id: &str, item: ActivityItem) {
+        if let Ok(mut items) = self.items.lock() {
+            items.push((binding_id.to_string(), item));
         }
     }
-}
 
-impl ActivitySource for QueueActivitySource {
-    fn drain(&self, binding_id: &str) -> Vec<ActivityEvent> {
-        let Ok(mut events) = self.events.lock() else {
+    /// その binding の未配送分を発生順に取り出す。
+    pub fn drain(&self, binding_id: &str) -> Vec<ActivityItem> {
+        let Ok(mut items) = self.items.lock() else {
             return Vec::new();
         };
-        let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *events)
+        let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut *items)
             .into_iter()
             .partition(|(bound, _)| bound == binding_id);
-        *events = kept;
-        taken.into_iter().map(|(_, event)| event).collect()
+        *items = kept;
+        taken.into_iter().map(|(_, item)| item).collect()
     }
-}
-
-/// 供給元を共有ハンドルにする。
-pub fn shared(source: impl ActivitySource + 'static) -> Arc<dyn ActivitySource> {
-    Arc::new(source)
-}
-
-/// この gateway が今使う供給元。core 側の活動イベントが入ったら、ここだけを差し替える。
-pub fn shared_shipped_source() -> Arc<dyn ActivitySource> {
-    shared(UnavailableActivitySource)
 }

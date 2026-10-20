@@ -657,6 +657,8 @@ fn map_live(event: LiveEvent) -> Option<Event> {
         LiveEvent::Partial { .. } => return None,
         // D-1085: the cli never starts provisional runs.
         LiveEvent::ProvisionalResult { .. } => return None,
+        // D-1087: the cli prints only the final message; activity detail is not part of it.
+        LiveEvent::ToolActivity { .. } | LiveEvent::SubtaskLifecycle { .. } => return None,
     })
 }
 

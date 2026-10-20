@@ -7,7 +7,8 @@
 //!
 //! 構成:
 //! - `route`: セッション（agent + channel）ごとの宛先。保存先は gateway DB だけ。
-//! - `source`: 活動イベントの供給口。core 側のイベントが入る唯一の差し込み点。
+//! - `source`: core の `tool_activity` / `subtask_lifecycle` を写した中立形と、
+//!   binding ごとの待ち行列。
 //! - `deliver`: 宛先があるときだけ送る配送経路（無いときはレート制限付きの debug 1 行）。
 //! - `message`: 本文の整形（移設前と同一の閾値・文面。簡略化しない）。
 //!
@@ -36,9 +37,7 @@ pub use message::{
     DISCORD_MESSAGE_LIMIT,
 };
 pub use route::{AbsenceLog, RouteStore, SessionRoute};
-pub use source::{
-    shared_shipped_source, ActivityEvent, ActivitySource, ActivityStatus, QueueActivitySource,
-};
+pub use source::{ActivityEvent, ActivityItem, ActivityQueue, ActivityStatus, LifecycleEvent};
 
 /// 送信を最終的にあきらめたとき、短いエラー説明文字列で呼ばれる give-up sink。
 pub type GiveupSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;

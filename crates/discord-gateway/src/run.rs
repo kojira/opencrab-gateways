@@ -232,13 +232,10 @@ fn supervise(supervision: Supervision) {
         }
     });
 
-    // D-1087: 活動の配送口。供給元は今は空（core 側の活動イベントを待つ差し込み点）。
-    let activity = activity_store.map(|store| {
-        Arc::new(crate::webhook::ActivityDelivery::new(
-            store,
-            crate::webhook::source::shared_shipped_source(),
-        ))
-    });
+    // D-1087: 活動の配送口。core の `tool_activity` / `subtask_lifecycle` を受信ループが
+    // ここへ渡し、宛先があるときだけ送る（宛先は gateway の DB、core は知らない）。
+    let activity =
+        activity_store.map(|store| Arc::new(crate::webhook::ActivityDelivery::new(store)));
     // say consumer（address ごと）: core の say を channel の通常投稿として配送する。
     for address in addresses {
         spawn_say_consumer(
@@ -497,10 +494,10 @@ pub(crate) async fn handle_incoming(
     }
 }
 
-/// ターン終端で、そのターンの活動をセッション宛先へ配送する（D-1087）。
+/// ターン終端で、そのターンの積み残しをセッション宛先へ配送する（D-1087）。
 ///
-/// 宛先が無ければ何も送らない（記録は core に残る）。供給元が空の今は配送も 0 件で、
-/// core 側の活動イベントが入った時点でこの経路がそのまま使われる。
+/// 通常は活動イベントごとに配送済み（[`deliver_activity_event`]）なので、ここで送るのは
+/// 配送時に宛先が無かった等で残った分だけ。宛先が無ければ何も送らない（記録は core に残る）。
 async fn deliver_activity_turn(
     activity: &Option<Arc<crate::webhook::ActivityDelivery>>,
     client: &Arc<InstanceClient>,
@@ -514,7 +511,28 @@ async fn deliver_activity_turn(
     let Some(binding_id) = client.binding_for_address(address).await else {
         return;
     };
-    activity.deliver_for_turn(&binding_id, agent_id, channel, None);
+    activity.flush(&binding_id, agent_id, channel);
+}
+
+/// 活動イベント 1 件を、その場でセッション宛先へ配送する（D-1087）。
+///
+/// core は活動を発生順に流すので、受け取った時点で送ることで順序が保たれる。宛先が
+/// 無ければ何も送らない（記録は core に残る）。
+async fn deliver_activity_event(
+    activity: &Option<Arc<crate::webhook::ActivityDelivery>>,
+    client: &Arc<InstanceClient>,
+    address: &str,
+    agent_id: &str,
+    channel: Option<&str>,
+    item: crate::webhook::ActivityItem,
+) {
+    let (Some(activity), Some(channel)) = (activity, channel) else {
+        return;
+    };
+    let Some(binding_id) = client.binding_for_address(address).await else {
+        return;
+    };
+    activity.event(&binding_id, agent_id, channel, item);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -614,6 +632,70 @@ pub(crate) fn spawn_say_consumer(
                             );
                         }
                     }
+                }
+                Some(LiveEvent::ToolActivity {
+                    activity_id,
+                    call_id,
+                    tool,
+                    status,
+                    depth,
+                    started_at,
+                    duration_ms,
+                    args,
+                    result,
+                    error,
+                }) => {
+                    // D-1087: ツール活動。core は宛先を知らないので、gateway がセッション宛先へ送る。
+                    if let Some(status) = crate::webhook::ActivityStatus::from_wire(&status) {
+                        deliver_activity_event(
+                            &activity,
+                            &client,
+                            &address,
+                            &agent_id,
+                            channel.as_deref(),
+                            crate::webhook::ActivityItem::Tool(crate::webhook::ActivityEvent {
+                                activity_id,
+                                call_id,
+                                tool,
+                                status,
+                                depth,
+                                started_at,
+                                duration_ms,
+                                args,
+                                result,
+                                error,
+                            }),
+                        )
+                        .await;
+                    }
+                }
+                Some(LiveEvent::SubtaskLifecycle {
+                    run_id,
+                    status,
+                    label,
+                    task,
+                    detail,
+                    duration_ms,
+                    result_text,
+                }) => {
+                    // D-1087: サブタスク走行のライフサイクル（started / progress / 終端）。
+                    deliver_activity_event(
+                        &activity,
+                        &client,
+                        &address,
+                        &agent_id,
+                        channel.as_deref(),
+                        crate::webhook::ActivityItem::Lifecycle(crate::webhook::LifecycleEvent {
+                            run_id,
+                            status,
+                            label,
+                            task,
+                            detail,
+                            duration_ms,
+                            result_text,
+                        }),
+                    )
+                    .await;
                 }
                 Some(LiveEvent::Completed { target }) => {
                     deliver_activity_turn(

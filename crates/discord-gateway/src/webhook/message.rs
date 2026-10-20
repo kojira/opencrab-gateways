@@ -262,6 +262,15 @@ pub struct LifecycleMeta {
 /// Discord の 1 メッセージ上限（terminal/progress の丸めに使う）。
 pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
 
+/// `sessionKey` 行。値が無ければ空（行ごと出さない）。
+fn session_key_line(session_key: &str) -> String {
+    if session_key.is_empty() {
+        String::new()
+    } else {
+        format!("\nsessionKey: `{session_key}`")
+    }
+}
+
 /// started 用のメッセージ列を組み立てる。
 ///
 /// 開始通知を **1 通・ヘッダ付き**で組む（`🟢 **subtask started**` + メタ + `task:` 本体）。
@@ -269,9 +278,12 @@ pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
 /// 返り値は互換のため `Vec` だが常に 1 要素。
 pub fn build_started_messages(meta: &LifecycleMeta, raw_task_text: &str) -> Vec<WebhookMessage> {
     let mut s = format!(
-        "🟢 **subtask started**\nlabel: `{}`\nrunId: `{}`\nsessionKey: `{}`\nstatus: `started`",
-        meta.label, meta.run_id, meta.session_key
+        "🟢 **subtask started**\nlabel: `{}`\nrunId: `{}`{}",
+        meta.label,
+        meta.run_id,
+        session_key_line(&meta.session_key)
     );
+    s.push_str("\nstatus: `started`");
     if !raw_task_text.is_empty() {
         s.push_str("\ntask: ");
         s.push_str(raw_task_text);
@@ -301,8 +313,12 @@ pub fn build_terminal_message(
         .map(|d| format!("{}ms", d))
         .unwrap_or_else(|| "-".to_string());
     let mut s = format!(
-        "{} **subtask {}**\nrunId: `{}`\nsessionKey: `{}`\nduration: {}",
-        emoji, status, run_id, session_key, dur
+        "{} **subtask {}**\nrunId: `{}`{}\nduration: {}",
+        emoji,
+        status,
+        run_id,
+        session_key_line(session_key),
+        dur
     );
     if !detail.trim().is_empty() {
         // 1 通に収まるよう丸める（chunk 化はしない: terminal は概要のみ）。
@@ -324,8 +340,9 @@ pub fn build_terminal_message(
 /// progress 用の短いステータスメッセージ。
 pub fn build_progress_message(run_id: &str, session_key: &str, message: &str) -> String {
     let mut s = format!(
-        "🔄 **subtask progress**\nrunId: `{}`\nsessionKey: `{}`",
-        run_id, session_key
+        "🔄 **subtask progress**\nrunId: `{}`{}",
+        run_id,
+        session_key_line(session_key)
     );
     if !message.trim().is_empty() {
         let prefix = "\nmessage: ";

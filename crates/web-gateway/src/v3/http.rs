@@ -418,6 +418,8 @@ fn live_to_event(ev: &LiveEvent) -> Option<Event> {
         LiveEvent::ProvisionalResult { .. } => None,
         // R3: web SSE は失敗を通知イベントとして流す（reply_origin は Nostr 固有の e-tag 用途）。
         LiveEvent::TurnFailed { .. } => Some(Event::default().event("turn_failed").data("{}")),
+        // D-1087: 活動の詳細（ツール実行・サブタスク lifecycle）は web SSE の外形に載せない。
+        LiveEvent::ToolActivity { .. } | LiveEvent::SubtaskLifecycle { .. } => None,
         LiveEvent::Error { code, detail } => Some(
             Event::default()
                 .event("gate_error")

@@ -19,6 +19,11 @@ pub mod secret_store;
 mod share_yabu;
 pub mod store;
 pub mod watch;
+pub mod watch_settings;
+pub mod watch_store;
+
+#[cfg(test)]
+mod watch_tests;
 
 /// テスト専用: プロセス env を触るテストと、子プロセスを spawn するテストを直列化する。
 ///

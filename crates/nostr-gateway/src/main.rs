@@ -32,7 +32,16 @@ async fn run() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let first = args
         .next()
-        .context("usage: nostr-gateway daemon <config.json> | instance <placement.json>")?;
+        .context(
+            "usage: nostr-gateway daemon <config.json> | instance <placement.json> | watch-settings <placement.json> <port>",
+        )?;
+    // D-1092: watch 設定画面。127.0.0.1 だけに bind する別プロセス（instance は HTTP を listen しない）。
+    if first == "watch-settings" {
+        let usage = "usage: nostr-gateway watch-settings <placement.json> <port>";
+        let path = args.next().map(PathBuf::from).context(usage)?;
+        let port = args.next().context(usage)?.parse::<u16>().context(usage)?;
+        return opencrab_nostr_gateway::watch_settings::run(path, port).await;
+    }
     if first == "daemon" {
         let path = args
             .next()

@@ -9,7 +9,7 @@ nostr-gateway daemon /path/to/daemon.json
 nostr-gateway instance /path/to/placement.json
 ```
 
-`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。`instance` はplacementに従ってcore UDSへ接続し、watch childを起動する。HTTP listenとserver proxyは作らない。
+`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。`instance` はplacementに従ってcore UDSへ接続し、watch childを起動する。`daemon` と `instance` は HTTP listen と server proxy を作らない（watch 設定画面は別プロセスの `watch-settings` だけが loopback で listen する）。
 
 ```json
 {
@@ -37,6 +37,15 @@ watch child は bind ack の後にだけ起動する。切断で child を止め
 `SaidOutcome` は Accepted / NotAdmitted / Disconnected / WireErr を記録し、`store_error` / `bad_request` はカウンタに残す。turn 実行中の said は core の session queue 32 に積む。`PostRefuse::Busy`（`said refused; binding busy`）はキュー満杯の応答にだけ使う。
 watch の有効フィルタは `filter_json`。アンカー `beyond_self` は watch 設定値（`!p_self` の代用はしない）。
 タイムライン車線の Bundle は `interval_secs` ごとに flush する。`max_items` は 1 周期の上限件数（省略時 50）。超過分は新しい方から `max_items` 件を残し、古い分は捨てる。捨てた件数は warn と `bundle_discarded` カウンタに残す（会話本文には出さない）。manifest / `bundle_id` / `count` / `[NOSTRBUNDLE/V1 …]` は残した分だけ。
+
+### watch の正本と設定（D-1092）
+
+- watch の正本は instance ごとの保存ファイル `nostaro-watches-<instance_id>.json`（core socket と同じディレクトリ・mode 0600）。core の DB には持たない。
+- 保存ファイルが無い初回起動だけ、配置 `config_b64` の `watches` を種にして書き出す（1 度だけの移行。以後は配置の `watches` を読まない）。
+- エージェントは宣言能力 `watch_list` / `watch_set` / `watch_delete` で読み書きする（owner のみ。`watch_list` は read_only、ほかは state_change）。範囲（interval 60〜86400 秒・authors 最大 2000・keywords 最大 32・kinds は 1/6/7）を外れた値は状態を変えずに拒否する。
+- 変更は保存と同時に watch 車線だけを作り直して即時に効く（say consumer とフォロー反映は止めない）。ファイルが外から書き換えられた場合（設定画面・手編集）は 2 秒ごとの再読込で反映する。
+- 設定画面: `nostr-gateway watch-settings <placement.json> <port>` を別プロセスで起動する。127.0.0.1 だけに bind し、一覧・追加・編集・削除ができる。検証は能力と同じ。鍵・トークンは画面にもログにも出さない。
+- 間隔は実行中に変わりうるので、車線をまたぐ dedup の TTL は許される最大間隔（86400 秒）の 2 倍＋余裕で取る。
 
 ## 写像
 

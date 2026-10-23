@@ -55,7 +55,10 @@ fn reply_declares_event_as_a_short_ref() {
         .iter()
         .find(|d| d["name"] == "reply")
         .expect("reply declared");
-    assert_eq!(reply["input_schema"]["properties"]["event"]["format"], "short-ref");
+    assert_eq!(
+        reply["input_schema"]["properties"]["event"]["format"],
+        "short-ref"
+    );
     let required = reply["input_schema"]["required"].as_array().unwrap();
     assert!(required.iter().any(|v| v == "event"));
 }
@@ -76,10 +79,19 @@ async fn explicit_reply_targets_exactly_the_chosen_note() {
         format!("nostr:event:v1:watch:4:{chosen}"),
     ] {
         let out = handler
-            .handle("c1", "b1", "reply", &json!({"event": origin, "text": "返信です"}))
+            .handle(
+                "c1",
+                "b1",
+                "reply",
+                &json!({"event": origin, "text": "返信です"}),
+            )
             .await;
         assert!(matches!(out, InvokeOutcome::Ok(_)), "{origin}");
         let argv = argv(&args);
-        assert_eq!(&argv[2..], ["reply", "--", chosen.as_str(), "返信です"], "{origin}");
+        assert_eq!(
+            &argv[2..],
+            ["reply", "--", chosen.as_str(), "返信です"],
+            "{origin}"
+        );
     }
 }

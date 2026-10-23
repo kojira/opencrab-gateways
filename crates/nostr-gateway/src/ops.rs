@@ -675,3 +675,7 @@ mod attachment_tests;
 #[cfg(test)]
 #[path = "follow_tests.rs"]
 mod follow_tests;
+
+#[cfg(test)]
+#[path = "reply_target_tests.rs"]
+mod reply_target_tests;

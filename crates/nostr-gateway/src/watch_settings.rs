@@ -116,6 +116,8 @@ async fn list(State(state): Shared, Query(target): Query<Target>) -> Response {
     let Some(registry) = state.pick(target.instance.as_deref()) else {
         return fail(StatusCode::NOT_FOUND, "unknown instance");
     };
+    // instance 側（エージェントの watch_set / watch_delete）が保存ファイルを変えていたら読み直す。
+    registry.reload_if_changed();
     Json(json!({
         "watches": registry.list().iter().map(view).collect::<Vec<_>>(),
     }))
@@ -274,6 +276,58 @@ mod tests {
         let on_disk: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
         assert_eq!(on_disk["watches"], json!([]));
+    }
+
+    /// エージェント（instance 側の `watch_set` / `watch_delete`）が保存ファイルを書き換えたら、
+    /// 画面の `GET /api/watches` はその変更を返す（画面プロセスの古い一覧を見せない）。
+    #[tokio::test]
+    async fn http_list_shows_changes_written_by_the_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("nostaro-watches-inst.json");
+        let page_registry = WatchRegistry::load(store.clone(), &[]).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve(listener, vec![("nostr-a".into(), page_registry)]));
+        let http = reqwest::Client::new();
+        let list_url = format!("http://{addr}/api/watches");
+        let list = || async {
+            http.get(&list_url)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        };
+        assert_eq!(list().await["watches"], json!([]));
+
+        // instance 側の registry（別プロセス相当）が同じ保存ファイルへ書く。mtime の粒度で
+        // 取りこぼさないよう、画面が最初に読んだ時刻から間をあける。
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let instance_registry = WatchRegistry::load(store.clone(), &[]).unwrap();
+        let created = instance_registry
+            .set(
+                parse_set_request(&json!({
+                    "interval_secs": 1800,
+                    "authors": ["a"],
+                    "kinds": [1]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+        let after_set = list().await;
+        assert_eq!(
+            after_set["watches"].as_array().unwrap().len(),
+            1,
+            "{after_set}"
+        );
+        assert_eq!(after_set["watches"][0]["id"], json!(created.id));
+        assert_eq!(after_set["watches"][0]["interval_secs"], json!(1800));
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert!(instance_registry.delete(created.id).unwrap());
+        assert_eq!(list().await["watches"], json!([]));
     }
 
     /// 画面が先に起動しても、instance と同じ `config_b64` の watches を種にする（旧来分を落とさない）。

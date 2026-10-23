@@ -28,6 +28,7 @@ async-trait.workspace = true
 reqwest.workspace = true
 nostr = { version = "0.41", default-features = false, features = ["std"] }
 mime = "0.3"
+axum.workspace = true
 opencrab-gate-client.workspace = true
 opencrab-process-supervisor.workspace = true
 

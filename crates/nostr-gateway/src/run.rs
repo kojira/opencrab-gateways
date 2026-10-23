@@ -11,12 +11,8 @@ use std::time::Duration;
 use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
 use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
 use opencrab_gate_client::{FinalDelivery, RuntimeCapabilities, SayPolicy};
-use tokio::sync::Notify;
 
-use crate::config::{
-    config_digest, mention_lane_filter, parse_instance_config, watches_beyond_self, AccessConfig,
-    InstanceConfig, InstancePlacement, WatchFilter, WatchPlacement,
-};
+use crate::config::{config_digest, parse_instance_config, AccessConfig, InstancePlacement};
 use crate::dedup::SeenEvents;
 use crate::follows::SharedAccess;
 use crate::harness::HarnessOverrides;
@@ -26,7 +22,6 @@ use crate::map::{
 };
 use crate::post::{self, SayDelivery};
 use crate::run_env::{self, SecretOwner};
-use crate::watch::{run_fake_watch_once, run_watch_loop, RESUBSCRIBE};
 
 const BIND_POLL: Duration = Duration::from_millis(50);
 
@@ -35,19 +30,14 @@ const BIND_POLL: Duration = Duration::from_millis(50);
 const DEDUP_TTL_FLOOR: Duration = Duration::from_secs(600);
 
 /// 最大 watch interval の 2 倍と下限の大きい方＋余裕。bundle flush 窓を確実に跨ぐ。
-fn dedup_ttl(cfg: &InstanceConfig) -> Duration {
-    let max_interval = cfg
-        .watches
-        .iter()
-        .map(|w| w.interval_secs as u64)
-        .max()
-        .unwrap_or(0);
+fn dedup_ttl(max_interval_secs: i64) -> Duration {
+    let max_interval = max_interval_secs.max(0) as u64;
     let by_interval = Duration::from_secs(max_interval.saturating_mul(2).saturating_add(60));
     by_interval.max(DEDUP_TTL_FLOOR)
 }
 
 #[derive(Default)]
-struct SaidMetrics {
+pub(crate) struct SaidMetrics {
     store_error: AtomicU64,
     bad_request: AtomicU64,
     queue_full: AtomicU64,
@@ -103,6 +93,12 @@ pub fn spawn_instance(
             .as_ref()
             .is_some_and(|p| p.is_absolute()),
     );
+    // D-1092: watch（タイムライン定期取得）はゲートウェイの状態。保存ファイルはこの instance
+    // 専用のパスに置き、無ければ配置の `watches` を種にして 1 度だけ書き出す。
+    let watches = crate::watch_store::WatchRegistry::load(
+        crate::watch_store::store_path(&post_config, &place.instance_id),
+        &cfg.watches,
+    )?;
     let invoke_handler: Arc<dyn opencrab_gate_client::InvokeHandler> = Arc::new(
         crate::ops::NostrInvokeHandler::new(
             nostaro_bin.clone(),
@@ -110,7 +106,8 @@ pub fn spawn_instance(
             secret.as_ref().map(|s| s.as_str().to_string()),
             overrides.dry_run,
         )
-        .with_attachments(attachment_outbox_root, cfg.self_pubkey.clone()),
+        .with_attachments(attachment_outbox_root, cfg.self_pubkey.clone())
+        .with_watches(watches.clone()),
     );
     // D-1091: この binding のターンで `execute_shell` が起動する子へ渡す環境を宣言する。
     // relays-only config は instance ごとのパス。鍵は「このプロセスがこの instance だけを持つ」
@@ -146,11 +143,19 @@ pub fn spawn_instance(
     );
     let metrics = Arc::new(SaidMetrics::default());
     // 車線をまたぐ said dedup は instance 単位で共有する（全 default/watch 車線が同じセット）。
-    let seen = Arc::new(SeenEvents::new(dedup_ttl(&cfg)));
+    // D-1092: watch の正本は保存ファイル。間隔はエージェントや設定画面が変えうるので、
+    // 許される最大間隔で dedup 窓を取る（間隔を延ばした後に重複送出しない）。
+    let seen = Arc::new(SeenEvents::new(dedup_ttl(
+        watches
+            .max_interval_secs()
+            .max(crate::watch_store::MAX_INTERVAL_SECS),
+    )));
+    watches.spawn_reload_poller(crate::watch_store::RELOAD_POLL);
     supervise_lanes(
         client.clone(),
         place.address.clone(),
         cfg,
+        watches,
         secret,
         nostaro_bin,
         post_config.clone(),
@@ -169,70 +174,6 @@ fn runtime_contract(files_enabled: bool) -> (Option<serde_json::Value>, RuntimeC
             final_delivery: FinalDelivery::OperationDriven,
         },
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn supervise_lanes(
-    client: Arc<InstanceClient>,
-    address: String,
-    cfg: InstanceConfig,
-    secret: Option<Arc<String>>,
-    nostaro_bin: PathBuf,
-    post_config: PathBuf,
-    following_out: PathBuf,
-    metrics: Arc<SaidMetrics>,
-    seen: Arc<SeenEvents>,
-    overrides: HarnessOverrides,
-) {
-    // admission が読む access。store 由来の固定分にフォローリスト（kind:3）を定期反映する。
-    let base_access = cfg.access.clone();
-    let access: SharedAccess = Arc::new(std::sync::RwLock::new(base_access.clone()));
-    tokio::spawn(async move {
-        loop {
-            wait_until_bound(&client, &address).await;
-            tracing::info!(address = %address, "bind ack; starting watch");
-            let cancel = Arc::new(Notify::new());
-            let mut handles = start_lanes(
-                client.clone(),
-                address.clone(),
-                cfg.clone(),
-                secret.clone(),
-                nostaro_bin.clone(),
-                metrics.clone(),
-                seen.clone(),
-                cancel.clone(),
-                overrides.fake_watch.clone(),
-                access.clone(),
-            );
-            if overrides.fake_watch.is_none() {
-                handles.push(crate::follows::spawn_refresher(
-                    access.clone(),
-                    base_access.clone(),
-                    nostaro_bin.clone(),
-                    post_config.clone(),
-                    secret.clone(),
-                    cfg.self_pubkey.clone(),
-                    following_out.clone(),
-                ));
-            }
-            // core からの say（返信本文）を消費して nostaro post で publish する consumer。
-            handles.push(spawn_say_consumer(
-                client.clone(),
-                address.clone(),
-                nostaro_bin.clone(),
-                post_config.clone(),
-                secret.clone(),
-                metrics.clone(),
-                overrides.dry_run,
-            ));
-            wait_until_unbound(&client, &address).await;
-            tracing::info!(address = %address, "binding lost; stopping watch");
-            cancel.notify_waiters();
-            for handle in handles {
-                handle.abort();
-            }
-        }
-    });
 }
 
 /// core からの say を live queue から取り出し、発端イベントへの e-tag reply として nostaro で
@@ -316,176 +257,6 @@ async fn wait_until_unbound(client: &InstanceClient, address: &str) {
 
 fn snapshot(access: &SharedAccess) -> AccessConfig {
     access.read().unwrap_or_else(|e| e.into_inner()).clone()
-}
-
-/// default(メンション)車線は常設。watch は追加車線。
-struct LaneSpawn {
-    lane: Lane,
-    filter: WatchFilter,
-    watch: Option<WatchPlacement>,
-}
-
-fn plan_lane_spawns(cfg: &InstanceConfig) -> Vec<LaneSpawn> {
-    let mut planned = Vec::with_capacity(1 + cfg.watches.len());
-    planned.push(LaneSpawn {
-        lane: Lane::default_lane(),
-        filter: mention_lane_filter(cfg),
-        watch: None,
-    });
-    for watch in &cfg.watches {
-        planned.push(LaneSpawn {
-            lane: Lane::watch(watch.id),
-            filter: watch.effective_filter().clone(),
-            watch: Some(watch.clone()),
-        });
-    }
-    planned
-}
-
-#[allow(clippy::too_many_arguments)]
-fn start_lanes(
-    client: Arc<InstanceClient>,
-    address: String,
-    cfg: InstanceConfig,
-    secret: Option<Arc<String>>,
-    nostaro_bin: PathBuf,
-    metrics: Arc<SaidMetrics>,
-    seen: Arc<SeenEvents>,
-    cancel: Arc<Notify>,
-    fake_watch: Option<PathBuf>,
-    access: SharedAccess,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    plan_lane_spawns(&cfg)
-        .into_iter()
-        .map(|planned| {
-            spawn_lane(
-                client.clone(),
-                address.clone(),
-                planned.lane,
-                cfg.relays.clone(),
-                planned.filter,
-                cfg.self_pubkey.clone(),
-                access.clone(),
-                planned.watch,
-                secret.clone(),
-                nostaro_bin.clone(),
-                metrics.clone(),
-                seen.clone(),
-                cancel.clone(),
-                fake_watch.clone(),
-            )
-        })
-        .collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_lane(
-    client: Arc<InstanceClient>,
-    address: String,
-    lane: Lane,
-    relays: Vec<String>,
-    filter: WatchFilter,
-    self_pubkey: String,
-    access: SharedAccess,
-    watch: Option<WatchPlacement>,
-    secret: Option<Arc<String>>,
-    nostaro_bin: PathBuf,
-    metrics: Arc<SaidMetrics>,
-    seen: Arc<SeenEvents>,
-    cancel: Arc<Notify>,
-    fake_watch: Option<PathBuf>,
-) -> tokio::task::JoinHandle<()> {
-    let beyond = match lane.kind {
-        LaneKind::Default => false,
-        LaneKind::Watch { .. } => watches_beyond_self(&filter),
-    };
-    let flush = watch.as_ref().map(|w| {
-        (
-            Duration::from_secs(w.interval_secs as u64),
-            w.max_items as usize,
-        )
-    });
-    tokio::spawn(async move {
-        let pending = Arc::new(tokio::sync::Mutex::new(Vec::<WatchEvent>::new()));
-        // 1 行受信ごとに handle_line を回すコールバック（実 watch・偽 watch 共通）。
-        let on_line = {
-            let pending = pending.clone();
-            let client = client.clone();
-            let address = address.clone();
-            let lane = lane.clone();
-            let self_pubkey = self_pubkey.clone();
-            let metrics = metrics.clone();
-            let seen = seen.clone();
-            let access = access.clone();
-            move |line: String| {
-                let pending = pending.clone();
-                let client = client.clone();
-                let address = address.clone();
-                let lane = lane.clone();
-                let self_pubkey = self_pubkey.clone();
-                let metrics = metrics.clone();
-                let seen = seen.clone();
-                let access = snapshot(&access);
-                tokio::spawn(async move {
-                    handle_line(
-                        &client,
-                        &address,
-                        &lane,
-                        &self_pubkey,
-                        &access,
-                        beyond,
-                        &pending,
-                        &metrics,
-                        &seen,
-                        line,
-                    )
-                    .await;
-                });
-            }
-        };
-        let watch_fut = async {
-            // QC ハーネス: fake_watch が指定されていれば nostaro を spawn せず fixture を流す。
-            // 指定が無ければ（production）従来どおり実 nostaro watch を回す。
-            if let Some(fixture) = fake_watch {
-                if let Err(e) = run_fake_watch_once(&fixture, on_line).await {
-                    tracing::error!(error = %e, "fake watch failed");
-                }
-            } else {
-                run_watch_loop(nostaro_bin, relays, filter, secret, RESUBSCRIBE, on_line).await;
-            }
-        };
-        let flush_fut = async {
-            let Some((interval, max_items)) = flush else {
-                std::future::pending::<()>().await;
-                return;
-            };
-            let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                flush_bundle(
-                    &client,
-                    &address,
-                    &lane,
-                    &self_pubkey,
-                    &snapshot(&access),
-                    beyond,
-                    &pending,
-                    &metrics,
-                    &seen,
-                    max_items,
-                )
-                .await;
-            }
-        };
-        tokio::select! {
-            _ = watch_fut => {}
-            _ = flush_fut => {}
-            _ = cancel.notified() => {
-                pending.lock().await.clear();
-            }
-        }
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -780,6 +551,12 @@ fn record_said_outcome(metrics: &SaidMetrics, origin: &str, outcome: &SaidOutcom
         }
     }
 }
+
+mod lanes;
+
+#[cfg(test)]
+pub(crate) use lanes::plan_lane_spawns;
+pub(crate) use lanes::supervise_lanes;
 
 #[cfg(test)]
 #[path = "run/tests.rs"]

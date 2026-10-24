@@ -2597,7 +2597,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "opencrab-actions"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2637,7 +2637,7 @@ dependencies = [
 [[package]]
 name = "opencrab-core"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2665,7 +2665,7 @@ dependencies = [
 [[package]]
 name = "opencrab-db"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "base64",
@@ -2716,7 +2716,7 @@ dependencies = [
 [[package]]
 name = "opencrab-extgate"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2743,7 +2743,7 @@ dependencies = [
 [[package]]
 name = "opencrab-gate-client"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2760,7 +2760,7 @@ dependencies = [
 [[package]]
 name = "opencrab-gateway"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2811,7 +2811,7 @@ dependencies = [
 [[package]]
 name = "opencrab-llm"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2833,7 +2833,7 @@ dependencies = [
 [[package]]
 name = "opencrab-llm-types"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2842,7 +2842,7 @@ dependencies = [
 [[package]]
 name = "opencrab-mcp"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2863,6 +2863,7 @@ version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "base64",
  "chacha20poly1305",
  "chrono",
@@ -2902,7 +2903,7 @@ dependencies = [
 [[package]]
 name = "opencrab-server"
 version = "0.2.17"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2944,7 +2945,7 @@ dependencies = [
 [[package]]
 name = "opencrab-voice"
 version = "0.1.0"
-source = "git+https://github.com/kojira/opencrab?rev=c323eb4f94c7aa1a229b9097f57594a236864f1e#c323eb4f94c7aa1a229b9097f57594a236864f1e"
+source = "git+https://github.com/kojira/opencrab?rev=b0a3412ed625498e47a55de9f6dd499a2df13ac4#b0a3412ed625498e47a55de9f6dd499a2df13ac4"
 dependencies = [
  "anyhow",
  "async-trait",

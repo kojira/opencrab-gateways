@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nostr watch 設定</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; max-width: 820px; margin: 2em auto; padding: 0 1em; line-height: 1.6; }
+  h1 { font-size: 1.3em; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.95em; }
+  th, td { border: 1px solid #8884; padding: 0.4em 0.6em; text-align: left; vertical-align: top; }
+  input[type=number], input[type=text] { width: 100%; box-sizing: border-box; padding: 0.3em; }
+  button { padding: 0.35em 0.9em; margin-right: 0.4em; }
+  .row { display: grid; grid-template-columns: 1fr 2fr 2fr 1fr; gap: 0.6em; margin: 0.6em 0; }
+  .muted { color: #888; font-size: 0.9em; }
+  #msg { margin: 0.6em 0; min-height: 1.4em; }
+  #msg.err { color: #c00; }
+</style>
+</head>
+<body>
+<h1>Nostr watch 設定</h1>
+<p class="muted">このページは 127.0.0.1 だけで待ち受けています。設定はこのゲートウェイの保存先に残り、
+保存すると実行中の取得にすぐ反映されます。鍵などの秘密は表示しません。</p>
+
+<table>
+  <thead>
+    <tr><th>id</th><th>interval_secs</th><th>authors</th><th>keywords</th><th>kinds</th><th></th></tr>
+  </thead>
+  <tbody id="list"></tbody>
+</table>
+
+<h2 style="font-size:1.05em">追加・更新</h2>
+<p class="muted">id を空にすると新規追加、id を入れるとその設定を更新します。authors / keywords はカンマ区切り。
+kinds は 1,6,7 のみ（カンマ区切り・空なら 1）。</p>
+<div class="row">
+  <label>id<input id="id" type="number" min="1" placeholder="(新規)"></label>
+  <label>interval_secs<input id="interval_secs" type="number" min="60" max="86400" value="1800"></label>
+  <label>authors<input id="authors" type="text" placeholder="hex か npub（カンマ区切り）"></label>
+  <label>keywords<input id="keywords" type="text" placeholder="語（カンマ区切り）"></label>
+</div>
+<div class="row">
+  <label>kinds<input id="kinds" type="text" placeholder="1,6,7"></label>
+</div>
+<p>
+  <button id="save">保存</button>
+  <button id="reset">クリア</button>
+</p>
+<div id="msg"></div>
+
+<script>
+const msg = document.getElementById('msg');
+function say(text, isError) {
+  msg.textContent = text;
+  msg.className = isError ? 'err' : '';
+}
+function splitList(value) {
+  return value.split(',').map(s => s.trim()).filter(s => s.length > 0);
+}
+function splitKinds(value) {
+  return splitList(value).map(n => Number(n)).filter(n => Number.isInteger(n));
+}
+async function refresh() {
+  const res = await fetch('/api/watches');
+  if (!res.ok) { say('一覧を取得できませんでした', true); return; }
+  const body = await res.json();
+  const tbody = document.getElementById('list');
+  tbody.textContent = '';
+  for (const w of body.watches) {
+    const tr = document.createElement('tr');
+    for (const value of [w.id, w.interval_secs, w.authors.join(', '), w.keywords.join(', '), w.kinds.join(', ')]) {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.appendChild(td);
+    }
+    const td = document.createElement('td');
+    const edit = document.createElement('button');
+    edit.textContent = '編集';
+    edit.onclick = () => {
+      document.getElementById('id').value = w.id;
+      document.getElementById('interval_secs').value = w.interval_secs;
+      document.getElementById('authors').value = w.authors.join(', ');
+      document.getElementById('keywords').value = w.keywords.join(', ');
+      document.getElementById('kinds').value = w.kinds.join(',');
+    };
+    const del = document.createElement('button');
+    del.textContent = '削除';
+    del.onclick = async () => {
+      const res = await fetch('/api/watches/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: w.id }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        say(body.error || '削除できませんでした', true);
+        return;
+      }
+      say('削除しました');
+      refresh();
+    };
+    td.appendChild(edit);
+    td.appendChild(del);
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  if (body.watches.length === 0) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.className = 'muted';
+    td.textContent = '設定はまだありません';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+}
+document.getElementById('save').onclick = async () => {
+  const idText = document.getElementById('id').value.trim();
+  const payload = {
+    interval_secs: Number(document.getElementById('interval_secs').value),
+    authors: splitList(document.getElementById('authors').value),
+    keywords: splitList(document.getElementById('keywords').value),
+    kinds: splitKinds(document.getElementById('kinds').value),
+  };
+  if (idText) { payload.id = Number(idText); }
+  const res = await fetch('/api/watches', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    say(body.error || '保存できませんでした', true);
+    return;
+  }
+  say('保存しました');
+  document.getElementById('reset').click();
+  refresh();
+};
+document.getElementById('reset').onclick = () => {
+  for (const id of ['id', 'authors', 'keywords', 'kinds']) {
+    document.getElementById(id).value = '';
+  }
+  document.getElementById('interval_secs').value = '1800';
+};
+refresh();
+</script>
+</body>
+</html>

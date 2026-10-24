@@ -1,5 +1,8 @@
 use super::*;
+use crate::config::{InstanceConfig, WatchFilter, WatchPlacement};
+use crate::map::Lane;
 use crate::watch::plan_watch_args;
+use crate::watch_store::WatchSetting;
 
 #[test]
 fn nostr_runtime_always_supports_plain_delivery_and_optional_operations() {
@@ -37,10 +40,17 @@ fn watches_present_still_spawns_mention_keyword_lane() {
         delivery_mode: None,
         access: AccessConfig::default(),
     };
-    let planned = plan_lane_spawns(&cfg);
+    let watched = vec![WatchSetting {
+        id: 3,
+        interval_secs: 120,
+        authors: vec!["npub1watched".into()],
+        keywords: Vec::new(),
+        kinds: vec![1],
+    }];
+    let planned = plan_lane_spawns(&cfg, &watched);
     assert_eq!(planned.len(), 2, "mention + watch");
     assert_eq!(planned[0].lane, Lane::default_lane());
-    assert!(planned[0].watch.is_none());
+    assert!(planned[0].flush.is_none());
     let mention_args = plan_watch_args(&cfg.relays, &planned[0].filter);
     assert_eq!(mention_args[0], "watch");
     assert!(
@@ -160,31 +170,16 @@ fn watch_lane_defers_self_p_tag_only() {
 
 #[test]
 fn dedup_ttl_covers_max_watch_interval() {
-    let mut cfg = InstanceConfig {
-        relays: vec!["wss://example.invalid".into()],
-        filter: WatchFilter::default(),
-        self_pubkey: "aa".repeat(32),
-        name: None,
-        watches: vec![],
-        delivery_mode: None,
-        access: AccessConfig::default(),
-    };
     // watch 無しは下限。
-    assert_eq!(dedup_ttl(&cfg), DEDUP_TTL_FLOOR);
+    assert_eq!(dedup_ttl(0), DEDUP_TTL_FLOOR);
     // 大きい interval は 2 倍＋余裕で下限を超える。
-    cfg.watches = vec![WatchPlacement {
-        id: 1,
-        interval_secs: 3600,
-        legacy_session_id: None,
-        max_items: crate::config::DEFAULT_BUNDLE_MAX_ITEMS,
-        filter: WatchFilter::default(),
-        filter_json: None,
-    }];
-    let ttl = dedup_ttl(&cfg);
+    let ttl = dedup_ttl(3600);
     assert!(
         ttl >= Duration::from_secs(3600 * 2),
         "TTL は最大 interval の 2 倍以上: {ttl:?}"
     );
+    // D-1092: 間隔は実行中に延びうるので、許される最大間隔でも窓を跨ぐ。
+    assert!(dedup_ttl(crate::watch_store::MAX_INTERVAL_SECS) >= Duration::from_secs(86_400 * 2));
 }
 
 #[test]
@@ -352,4 +347,29 @@ fn capped_bundle_manifest_matches_coordinator_contract() {
         assert_eq!(mapped.reply_target, None);
         assert!(!mapped.text.contains(&dropped_origin));
     }
+}
+
+#[test]
+fn lane_plan_follows_the_current_watch_set() {
+    let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+        "relays": ["wss://example.invalid"],
+        "self_pubkey": "aa".repeat(32),
+        "name": "crab",
+    }))
+    .unwrap();
+    assert_eq!(plan_lane_spawns(&cfg, &[]).len(), 1, "mention lane only");
+
+    // D-1092: 車線は watch_store の現在値から作る（設定変更後は新しい値で作り直す）。
+    let watches = vec![WatchSetting {
+        id: 9,
+        interval_secs: 600,
+        authors: vec!["b".into()],
+        keywords: Vec::new(),
+        kinds: vec![1],
+    }];
+    let planned = plan_lane_spawns(&cfg, &watches);
+    assert_eq!(planned.len(), 2, "mention + watch");
+    assert_eq!(planned[1].flush, Some((600, 50)));
+    assert!(planned[1].filter.authors.contains(&"b".to_string()));
+    assert_eq!(planned[1].lane, Lane::watch(9));
 }

@@ -6,6 +6,7 @@
 //! event_id を導いて nostaro を叩く（層分離・§9.3）。秘密鍵は env(`NOSTARO_SECRET_KEY`) のみ。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -137,7 +138,50 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
             json!({"type": "object", "required": ["path"], "properties": {"path": str_prop("アップロードするファイルの相対パス")}}),
             conv("not_exposed", "agent_bound"),
         ),
+        // D-1092: watch は gateway の状態なので、保存も適用も gateway が持つ。core は宣言を
+        // 汎用に投影するだけで、watch という語も保存先も知らない。
+        decl(
+            "watch_delete",
+            "id 指定で watch を削除する。id は watch_list が返した値。削除は保存先にも反映され、実行中の取得からも外れる。",
+            json!({"type": "object", "required": ["id"], "properties": {
+                "id": {"type": "integer", "description": "削除する watch の id。"}
+            }}),
+            conv("not_exposed", "agent_bound"),
+        ),
+
+        decl(
+            "watch_list",
+            "この接続で設定されているタイムライン定期取得（watch）の一覧を返す。各要素: id、interval_secs、authors、keywords、kinds。",
+            json!({"type": "object", "properties": {}}),
+            conv("not_exposed", "agent_bound"),
+        ),
+        decl(
+            "watch_set",
+            "タイムラインを定期的に取得する設定（watch）を追加または更新する。id を省くと新規追加、id を渡すとその設定を更新する。interval_secs は取得間隔（秒・60〜86400）。authors は対象の公開鍵（hex か npub・最大2000件・空ならフォロー全体）、keywords は語の一致（最大32件）、kinds は 1/6/7 のいずれか（省略時 1）。設定はこの接続の保存先に残り、ゲートウェイを再起動しても維持される。変更は実行中の取得にすぐ反映される。範囲外の値は拒否され、設定は変わらない。",
+            json!({"type": "object", "required": ["interval_secs"], "properties": {
+                "id": {"type": "integer", "description": "更新する watch の id（watch_list が返した値）。省略時は新規追加。"},
+                "interval_secs": {"type": "integer", "description": "取得間隔（秒）。60〜86400。"},
+                "authors": {"type": "array", "items": {"type": "string"}, "description": "対象の公開鍵（hex か npub）。最大2000件。"},
+                "keywords": {"type": "array", "items": {"type": "string"}, "description": "本文に含まれる語。最大32件。"},
+                "kinds": {"type": "array", "items": {"type": "integer"}, "description": "対象イベント種別。1/6/7 のみ。省略時 [1]。"}
+            }}),
+            conv("not_exposed", "agent_bound"),
+        ),
     ]);
+    // D-1092: watch の設定はオーナーだけに限る（他の op は co_agent / guest / trusted も可）。
+    // watch_list は読むだけなので effect を read_only にする。
+    for op in operations.as_array_mut().unwrap() {
+        if !matches!(
+            op["name"].as_str(),
+            Some("watch_list" | "watch_set" | "watch_delete")
+        ) {
+            continue;
+        }
+        op["authorization"]["allowed_callers"] = json!(["owner"]);
+        if op["name"] == "watch_list" {
+            op["effect"] = json!("read_only");
+        }
+    }
     if enabled {
         for op in operations.as_array_mut().unwrap() {
             if matches!(op["name"].as_str(), Some("reply" | "say")) {
@@ -155,6 +199,7 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
 }
 
 mod follow_run;
+mod watch_ops;
 
 /// nostaro 実行結果（三結果へ写す前段）。
 enum Run {
@@ -175,6 +220,8 @@ pub struct NostrInvokeHandler {
     attachment_outbox_root: Option<PathBuf>,
     self_pubkey: String,
     upload_policy: crate::share_yabu::UploadPolicy,
+    /// D-1092: この instance の watch 集合（未接続なら None＝watch 系 op は拒否）。
+    watches: Option<Arc<crate::watch_store::WatchRegistry>>,
 }
 
 impl NostrInvokeHandler {
@@ -192,7 +239,14 @@ impl NostrInvokeHandler {
             attachment_outbox_root: None,
             self_pubkey: String::new(),
             upload_policy: crate::share_yabu::UploadPolicy::default(),
+            watches: None,
         }
+    }
+
+    /// D-1092: watch の読み書き先を渡す。渡さない構成では watch 系 op を拒否する。
+    pub fn with_watches(mut self, watches: Arc<crate::watch_store::WatchRegistry>) -> Self {
+        self.watches = Some(watches);
+        self
     }
 
     pub fn with_attachments(mut self, root: Option<PathBuf>, self_pubkey: String) -> Self {
@@ -339,6 +393,11 @@ impl InvokeHandler for NostrInvokeHandler {
         operation: &str,
         payload: &Value,
     ) -> InvokeOutcome {
+        // D-1092: watch はゲートウェイ自身の状態なので、nostaro もリレーも使わない。
+        // dry-run でも実際に保存・適用する（外部 I/O が無いので QC でも同じ挙動になる）。
+        if matches!(operation, "watch_list" | "watch_set" | "watch_delete") {
+            return self.watch_operation(operation, payload);
+        }
         // QC ハーネス（dry-run）: invoke を nostaro を spawn せず処理する。publish 系（発話
         // reply/reaction/repost や書き込み）は本文・種別を残して成功 ack し、実配線 E2E で
         // 配送を観測できる。read（resolve・照会クラス）は生 JSON 取得の代わりに短縮参照を
@@ -520,10 +579,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn declarations_are_sorted_and_nine() {
+    fn declarations_are_sorted_and_complete() {
         let decls = operation_declarations();
         let arr = decls.as_array().unwrap();
-        assert_eq!(arr.len(), 9);
+        assert_eq!(arr.len(), 12);
         let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -531,8 +590,18 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "follow", "kind0", "reaction", "reply", "repost", "resolve", "say", "unfollow",
-                "upload"
+                "follow",
+                "kind0",
+                "reaction",
+                "reply",
+                "repost",
+                "resolve",
+                "say",
+                "unfollow",
+                "upload",
+                "watch_delete",
+                "watch_list",
+                "watch_set"
             ]
         );
         // 全 callback なし。
@@ -675,3 +744,7 @@ mod attachment_tests;
 #[cfg(test)]
 #[path = "follow_tests.rs"]
 mod follow_tests;
+
+#[cfg(test)]
+#[path = "reply_target_tests.rs"]
+mod reply_target_tests;

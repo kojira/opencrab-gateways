@@ -365,3 +365,41 @@ async fn g5_barge_in_during_an_aizuchi_after_a_finished_reply_delivers_nothing()
     s.wait_played(2).await;
     assert_eq!(s.played_texts().last().unwrap(), "続きです。");
 }
+
+#[tokio::test]
+async fn g5_a_reply_queued_behind_the_playing_one_does_not_erase_what_was_heard() {
+    const B: &str = "5f0d2a3e-3333-4c1c-9c1c-000000000005";
+    const C: &str = "5f0d2a3e-3333-4c1c-9c1c-000000000006";
+    let mut s = setup(vec![(0, "ちょっと待って")], 0).await;
+    // 返事 A: 1・2 文目は流れ終わり、3 文目は流れている途中。
+    s.partial("一文目です。二文目です。三文目です。").await;
+    s.wait_played(3).await;
+    s.player.busy.store(true, Ordering::SeqCst);
+    s.finish_track();
+    s.finish_track();
+    // 返事 B が A の後ろに積まれる（22:23:42 の「ん、どうした？」）。
+    s.say_on("b1", "ん、どうした？", B).await;
+    s.wait_played(4).await;
+
+    s.speak(30, 0);
+    let interrupt = s.next_interrupt().await;
+    assert_eq!(
+        interrupt["delivered"], "一文目です。二文目です。",
+        "{interrupt}"
+    );
+    s.player.busy.store(false, Ordering::SeqCst);
+
+    // A も B も止めた扱い。この後に届く partial・say は読まない。
+    s.partial("一文目です。二文目です。三文目です。四文目です。")
+        .await;
+    s.say("a1", "一文目です。二文目です。三文目です。四文目です。")
+        .await;
+    s.say_on("b2", "ん、どうした？大丈夫？", B).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(s.played_texts().len(), 4, "{:?}", s.played_texts());
+
+    // 次の stream は普通に読む。
+    s.say_on("c1", "次の返事です。", C).await;
+    s.wait_played(5).await;
+    assert_eq!(s.played_texts().last().unwrap(), "次の返事です。");
+}

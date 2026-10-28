@@ -239,28 +239,18 @@ async fn g_e_leave_drops_the_draft_and_later_partials_are_ignored() {
 }
 
 #[tokio::test]
-async fn g_f_cumulative_speech_is_capped_with_the_suffix_once() {
+async fn g_f_cumulative_speech_is_not_capped() {
     let mut s = setup(true).await;
-    // 40 文字の文を 10 個（400 文字）。partial は 1 文ずつ伸びる。
+    // 40 文字の文を 10 個（400 文字）。partial は 1 文ずつ伸びる。全部読み、「以下省略」は付けない。
     let sentence = format!("{}。", "あ".repeat(39));
     let mut text = String::new();
     for _ in 0..10 {
         text.push_str(&sentence);
         s.partial(STREAM, &text).await;
     }
-    wait_played(&s.player, 8).await;
+    wait_played(&s.player, 10).await;
     s.say("s1", &text, Some(STREAM)).await;
     s.wait_posts(1).await;
     assert_eq!(s.transport.bodies().concat(), text);
-
-    let spoken = s.settled_speech().await;
-    let mut expected = vec![sentence.clone(); 7];
-    expected.push(format!("{}、以下省略", "あ".repeat(20)));
-    assert_eq!(spoken, expected);
-    let chars: usize = spoken
-        .iter()
-        .map(|t| t.trim_end_matches("、以下省略").chars().count())
-        .sum();
-    assert_eq!(chars, 300);
-    assert_eq!(spoken.iter().filter(|t| t.contains("以下省略")).count(), 1);
+    assert_eq!(s.settled_speech().await, vec![sentence; 10]);
 }

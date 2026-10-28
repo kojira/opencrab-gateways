@@ -1,4 +1,5 @@
 mod aizuchi;
+mod bargein;
 mod caller_vc;
 mod e2e;
 mod mock_http;

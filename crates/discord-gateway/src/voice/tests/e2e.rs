@@ -25,6 +25,8 @@ pub(super) struct FakePlayer {
     pub(super) played_at: Mutex<Vec<std::time::Instant>>,
     /// true のあいだ「再生中」と答える。
     pub(super) busy: std::sync::atomic::AtomicBool,
+    /// `stop` を受けた guild（受けた順）。
+    pub(super) stopped: Mutex<Vec<u64>>,
 }
 
 #[async_trait::async_trait]
@@ -47,6 +49,10 @@ impl VoicePlayer for FakePlayer {
     }
     async fn is_idle(&self, _: u64) -> bool {
         !self.busy.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    async fn stop(&self, guild: u64) -> anyhow::Result<()> {
+        self.stopped.lock().unwrap().push(guild);
+        Ok(())
     }
 }
 

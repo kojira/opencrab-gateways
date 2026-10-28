@@ -47,6 +47,8 @@ pub trait VoicePlayer: Send + Sync {
     async fn play(&self, guild: u64, wav: Vec<u8>) -> anyhow::Result<()>;
     /// その guild で再生中・再生待ちの音声が無い。
     async fn is_idle(&self, guild: u64) -> bool;
+    /// 再生中の音声と再生待ちの音声をすべて止めて捨てる（D-1096 バージイン）。
+    async fn stop(&self, guild: u64) -> anyhow::Result<()>;
 }
 
 pub struct VoiceManagerConfig {
@@ -631,6 +633,11 @@ impl VoiceManager {
         self.labels.lock().unwrap().insert(user, label.clone());
         label
     }
+}
+
+impl VoiceManager {
+    /// 再生へ渡した音声が最後まで流れた（songbird のトラック終了、D-1096）。
+    pub fn on_track_finished(&self, _guild: u64) {}
 }
 
 fn parse_id(raw: &str) -> Option<u64> {

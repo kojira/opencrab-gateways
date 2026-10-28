@@ -84,6 +84,10 @@ impl VoicePlayer for SongbirdPlayer {
         Ok(())
     }
 
+    async fn stop(&self, _guild: u64) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn is_idle(&self, guild: u64) -> bool {
         let Ok(guild) = guild_id(guild) else {
             return true;

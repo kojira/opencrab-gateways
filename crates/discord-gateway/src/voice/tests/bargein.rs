@@ -344,3 +344,24 @@ async fn g5_delivered_is_only_the_sentences_whose_playback_finished() {
         "{interrupt}"
     );
 }
+
+#[tokio::test]
+async fn g5_barge_in_during_an_aizuchi_after_a_finished_reply_delivers_nothing() {
+    let mut s = setup(vec![(0, "ちょっと待って")], 0).await;
+    // 返事 1 は最後まで流れた。
+    s.partial("一文目です。").await;
+    s.wait_played(1).await;
+    s.finish_track();
+    // 相づちは読み上げキューを通らず player で直接鳴る。読み上げ待ちは無く、player だけが鳴っている。
+    s.player.busy.store(true, Ordering::SeqCst);
+
+    s.speak(30, 0);
+    let interrupt = s.next_interrupt().await;
+    assert_eq!(interrupt["delivered"], "", "{interrupt}");
+    s.player.busy.store(false, Ordering::SeqCst);
+
+    // 返事 1 の stream は止めた扱いにしない。この後に届くその stream の文は読む。
+    s.say("s1", "一文目です。続きです。").await;
+    s.wait_played(2).await;
+    assert_eq!(s.played_texts().last().unwrap(), "続きです。");
+}

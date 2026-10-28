@@ -27,6 +27,18 @@ pub(super) struct FakePlayer {
     pub(super) busy: std::sync::atomic::AtomicBool,
     /// `stop` を受けた guild（受けた順）。
     pub(super) stopped: Mutex<Vec<u64>>,
+    /// 再生へ渡した読み上げの文の終了通知（渡した順）。テストが `finish_track` で 1 つずつ呼ぶ。
+    pub(super) track_ends: Mutex<std::collections::VecDeque<crate::voice::session::OnTrackEnd>>,
+}
+
+impl FakePlayer {
+    /// 再生へ渡した読み上げの文のうち、最も古いものが最後まで流れたことにする。
+    pub(super) fn finish_track(&self) {
+        let on_end = self.track_ends.lock().unwrap().pop_front();
+        if let Some(on_end) = on_end {
+            on_end();
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -47,11 +59,21 @@ impl VoicePlayer for FakePlayer {
             .push(std::time::Instant::now());
         Ok(())
     }
+    async fn play_speech(
+        &self,
+        guild: u64,
+        wav: Vec<u8>,
+        on_end: crate::voice::session::OnTrackEnd,
+    ) -> anyhow::Result<()> {
+        self.track_ends.lock().unwrap().push_back(on_end);
+        self.play(guild, wav).await
+    }
     async fn is_idle(&self, _: u64) -> bool {
         !self.busy.load(std::sync::atomic::Ordering::SeqCst)
     }
     async fn stop(&self, guild: u64) -> anyhow::Result<()> {
         self.stopped.lock().unwrap().push(guild);
+        self.track_ends.lock().unwrap().clear();
         Ok(())
     }
 }

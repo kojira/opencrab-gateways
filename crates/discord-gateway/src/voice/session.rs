@@ -15,14 +15,17 @@ use super::aizuchi::choose_aizuchi;
 use super::audio::{downmix_48k_stereo_to_16k_mono, pcm_to_wav, rms, SegmenterEvent};
 use super::draft::DraftState;
 use super::settings::{load_settings, VoiceSettings};
-use super::synthesizer::{SynthesisPriority, Synthesizer};
+use super::synthesizer::Synthesizer;
 use super::tts_cache::{TtsCache, DISK_LIMIT_BYTES, MEMORY_LIMIT_BYTES};
 use super::{clients, tts_text};
 use crate::config::AccessConfig;
 use crate::map::{parse_address, voice_origin_for};
 use crate::transport::{DiscordTransport, TransportOutcome};
 
+mod bargein;
+mod playback;
 mod speculation;
+use playback::{speak_serially, Playbacks, Speech};
 use speculation::{AizuchiSlot, Hold, Speculation, Started};
 
 /// これより小さい RMS（16kHz モノラル）の区間は無音・雑音として STT へ送らない。
@@ -31,6 +34,9 @@ const MIN_SEGMENT_RMS: f64 = 250.0;
 const VOICE_TEXT_PREFIX: &str = "（音声）";
 /// 音声 said の system_context。通話中は短い話し言葉で返すよう LLM へ伝える。
 pub(crate) const VOICE_SYSTEM_CONTEXT: &str = "これは音声通話での会話です。相手が詳しい説明や長い回答をはっきり求めていない限り、話し言葉で1〜2文の短い返事にしてください。最初の1文はとても短く（数文字〜10文字）してください。箇条書き・見出し・コードブロックなどの書式は使わないでください。";
+
+/// 読み上げの 1 文が最後まで流れたときに呼ぶ。
+pub type OnTrackEnd = Box<dyn FnOnce() + Send + Sync>;
 
 /// VC への接続と再生。production は songbird、テストは記録用の偽物。
 #[async_trait::async_trait]
@@ -45,6 +51,10 @@ pub trait VoicePlayer: Send + Sync {
     async fn leave(&self, guild: u64) -> anyhow::Result<()>;
     /// WAV を再生キューの末尾へ積む（順番に流れる）。
     async fn play(&self, guild: u64, wav: Vec<u8>) -> anyhow::Result<()>;
+    /// 読み上げの 1 文を [`Self::play`] と同じく積み、最後まで流れたら `on_end` を呼ぶ
+    /// （止めた・失敗したトラックでは呼ばれなくてよい。相手に届いた分を数えるため、D-1096）。
+    async fn play_speech(&self, guild: u64, wav: Vec<u8>, on_end: OnTrackEnd)
+        -> anyhow::Result<()>;
     /// その guild で再生中・再生待ちの音声が無い。
     async fn is_idle(&self, guild: u64) -> bool;
     /// 再生中の音声と再生待ちの音声をすべて止めて捨てる（D-1096 バージイン）。
@@ -78,13 +88,6 @@ enum SpeakerWork {
 /// 1 話者分の処理キュー。
 type SegmentQueue = mpsc::UnboundedSender<SpeakerWork>;
 
-struct Speech {
-    guild: u64,
-    text: String,
-    /// 先行生成が昇格した返事の最初の文なら、その発話を確定した時刻（確定から再生までを記録する）。
-    committed_at: Option<std::time::Instant>,
-}
-
 pub struct VoiceManager {
     config: VoiceManagerConfig,
     player: Arc<dyn VoicePlayer>,
@@ -109,6 +112,10 @@ pub struct VoiceManager {
     last_aizuchi: Mutex<HashMap<String, &'static str>>,
     /// provisional_id ごとの、先行生成の返事の保留（合成だけして再生しない、D-1085 P5）。
     holds: Mutex<HashMap<String, Hold>>,
+    /// guild ごとの再生状態（バージインで止める世代と、相手に届いた文、D-1096）。
+    playbacks: Arc<Playbacks>,
+    /// テキストチャンネルごとの、バージインで止めた返事の stream（その partial・say は読まない）。
+    cut_streams: Mutex<HashMap<String, String>>,
 }
 
 impl VoiceManager {
@@ -132,6 +139,7 @@ impl VoiceManager {
             synthesizer.refresh_if_changed(&settings.tts);
         }
         let pending_speech = Arc::new(AtomicUsize::new(0));
+        let playbacks = Arc::new(Playbacks::default());
         tokio::spawn(speak_serially(
             queue,
             config.settings_path.clone(),
@@ -139,6 +147,7 @@ impl VoiceManager {
             player.clone(),
             synthesizer.clone(),
             pending_speech.clone(),
+            playbacks.clone(),
         ));
         Arc::new(Self {
             config,
@@ -156,6 +165,8 @@ impl VoiceManager {
             pending_speech,
             last_aizuchi: Mutex::new(HashMap::new()),
             holds: Mutex::new(HashMap::new()),
+            playbacks,
+            cut_streams: Mutex::new(HashMap::new()),
         })
     }
 
@@ -264,8 +275,13 @@ impl VoiceManager {
     pub async fn leave(&self, binding_id: &str) -> Result<Value, String> {
         let (guild, _) = self.conversation(binding_id).await?;
         let session = self.sessions.lock().unwrap().remove(&guild);
+        self.playbacks.forget(guild);
         if let Some(session) = &session {
             self.drafts.lock().unwrap().remove(&session.text_channel);
+            self.cut_streams
+                .lock()
+                .unwrap()
+                .remove(&session.text_channel);
             self.holds
                 .lock()
                 .unwrap()
@@ -509,7 +525,7 @@ impl VoiceManager {
         if text.is_empty() {
             return;
         }
-        self.enqueue_speech(text_channel, &[text]);
+        self.enqueue_speech(text_channel, &[text], None);
     }
 
     /// 生成途中の返信（core の partial・完成した文だけの累積本文）のうち、まだ読んでいない文を
@@ -521,7 +537,9 @@ impl VoiceManager {
             text_chars = text.chars().count(),
             "voice partial received"
         );
-        if self.session_guilds(text_channel).is_empty() {
+        if self.session_guilds(text_channel).is_empty()
+            || self.is_cut_stream(text_channel, stream_id)
+        {
             return;
         }
         let speech = {
@@ -534,13 +552,18 @@ impl VoiceManager {
             }
             draft.advance(text)
         };
-        self.enqueue_speech(text_channel, &speech);
+        self.enqueue_speech(text_channel, &speech, Some(stream_id));
     }
 
     /// 投稿できた say を読み上げる。partial で読み始めた同じ stream の say なら、読んだ文との
     /// 最長共通接頭辞より後ろだけを読む。それ以外は [`Self::speak_posted`] と同じく全文を読む。
     pub fn speak_say(&self, text_channel: &str, text: &str, stream_id: Option<&str>) {
         self.clear_promoted_holds(text_channel);
+        if stream_id.is_some_and(|stream_id| self.is_cut_stream(text_channel, stream_id)) {
+            // バージインで止めた返事。文字は投稿済みで、声では読まない（D-1096）。
+            self.drafts.lock().unwrap().remove(text_channel);
+            return;
+        }
         let draft = stream_id.and_then(|stream_id| {
             let mut drafts = self.drafts.lock().unwrap();
             match drafts.get(text_channel) {
@@ -549,8 +572,13 @@ impl VoiceManager {
             }
         });
         match draft {
-            Some(draft) => self.enqueue_speech(text_channel, &draft.finish(text)),
-            None => self.speak_posted(text_channel, text),
+            Some(draft) => self.enqueue_speech(text_channel, &draft.finish(text), stream_id),
+            None => {
+                let text = tts_text::clean_for_tts(text);
+                if !text.is_empty() {
+                    self.enqueue_speech(text_channel, &[text], stream_id);
+                }
+            }
         }
     }
 
@@ -564,16 +592,18 @@ impl VoiceManager {
             .collect()
     }
 
-    fn enqueue_speech(&self, text_channel: &str, texts: &[String]) {
-        self.enqueue_speech_from(text_channel, texts, None);
+    fn enqueue_speech(&self, text_channel: &str, texts: &[String], stream: Option<&str>) {
+        self.enqueue_speech_from(text_channel, texts, None, stream);
     }
 
-    /// `committed_at` は最初の文にだけ付ける（確定から再生までの記録用）。
+    /// `committed_at` は最初の文にだけ付ける（確定から再生までの記録用）。`stream` は返事の
+    /// stream（同じ stream の文を 1 つの返事として、届いた分を数える）。
     fn enqueue_speech_from(
         &self,
         text_channel: &str,
         texts: &[String],
         committed_at: Option<std::time::Instant>,
+        stream: Option<&str>,
     ) {
         if texts.is_empty() {
             return;
@@ -586,12 +616,15 @@ impl VoiceManager {
                     "voice speech enqueued"
                 );
                 self.pending_speech.fetch_add(1, Ordering::SeqCst);
+                let (generation, reply) = self.playbacks.enqueue(guild, stream);
                 if self
                     .speech
                     .send(Speech {
                         guild,
                         text: text.clone(),
                         committed_at: committed_at.filter(|_| index == 0),
+                        generation,
+                        reply,
                     })
                     .is_err()
                 {
@@ -635,11 +668,6 @@ impl VoiceManager {
     }
 }
 
-impl VoiceManager {
-    /// 再生へ渡した音声が最後まで流れた（songbird のトラック終了、D-1096）。
-    pub fn on_track_finished(&self, _guild: u64) {}
-}
-
 fn parse_id(raw: &str) -> Option<u64> {
     raw.parse::<u64>().ok().filter(|id| *id != 0)
 }
@@ -679,80 +707,6 @@ async fn transcribe_serially(
                     .on_speech_event(guild, user, &mut speculation, event)
                     .await
             }
-        }
-    }
-}
-
-async fn speak_serially(
-    mut queue: mpsc::UnboundedReceiver<Speech>,
-    settings_path: PathBuf,
-    agent_id: String,
-    player: Arc<dyn VoicePlayer>,
-    synthesizer: Arc<Synthesizer>,
-    pending_speech: Arc<AtomicUsize>,
-) {
-    while let Some(Speech {
-        guild,
-        text,
-        committed_at,
-    }) = queue.recv().await
-    {
-        speak_one(
-            guild,
-            &text,
-            committed_at,
-            &settings_path,
-            &agent_id,
-            player.as_ref(),
-            &synthesizer,
-        )
-        .await;
-        pending_speech.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-async fn speak_one(
-    guild: u64,
-    text: &str,
-    committed_at: Option<std::time::Instant>,
-    settings_path: &std::path::Path,
-    agent_id: &str,
-    player: &dyn VoicePlayer,
-    synthesizer: &Arc<Synthesizer>,
-) {
-    let settings = match load_settings(settings_path) {
-        Ok(settings) => settings,
-        Err(error) => {
-            tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
-            return;
-        }
-    };
-    synthesizer.refresh_if_changed(&settings.tts);
-    let voice = settings.tts.voice_for_agent(agent_id);
-    // 文ごとに合成し、合成できた文から再生キューへ積む（play は songbird へ積むだけ）。
-    // 1 文の失敗は warn にして次の文へ進む。
-    let mut committed_at = committed_at;
-    for sentence in tts_text::split_sentences(text) {
-        let committed_at = committed_at.take();
-        let result = async {
-            let text_chars = sentence.chars().count();
-            let wav = synthesizer
-                .synthesize(&settings.tts, voice, &sentence, SynthesisPriority::Live)
-                .await?;
-            player.play(guild, wav).await?;
-            tracing::debug!(guild, text_chars, "TTS audio enqueued to the player");
-            if let Some(committed_at) = committed_at {
-                tracing::debug!(
-                    guild,
-                    commit_to_play_ms = committed_at.elapsed().as_millis() as u64,
-                    "promoted reply first played"
-                );
-            }
-            anyhow::Ok(())
-        }
-        .await;
-        if let Err(error) = result {
-            tracing::warn!(guild, error = %format!("{error:#}"), "TTS playback failed");
         }
     }
 }

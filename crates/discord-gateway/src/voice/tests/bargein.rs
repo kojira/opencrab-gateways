@@ -89,12 +89,34 @@ impl Setup {
     }
 
     async fn say(&mut self, id: &str, text: &str) {
+        self.say_on(id, text, STREAM).await;
+    }
+
+    /// core の say。gateway の ok を待つ。間に来る provisional には ok を返して読み飛ばす。
+    async fn say_on(&mut self, id: &str, text: &str, stream_id: &str) {
         self.send(json!({"id":id,"m":"say","binding_id":BINDING,
-                         "payload":{"text":text,"stream_id":STREAM}}))
+                         "payload":{"text":text,"stream_id":stream_id}}))
             .await;
-        let ok = self.next_frame().await;
-        assert_eq!(ok["id"], id, "{ok}");
-        assert_eq!(ok["m"], "ok", "{ok}");
+        loop {
+            let frame = self.next_frame().await;
+            if frame["m"] == "ok" {
+                assert_eq!(frame["id"], id, "{frame}");
+                return;
+            }
+            assert!(
+                matches!(
+                    frame["m"].as_str(),
+                    Some("provisional" | "provisional_cancel")
+                ),
+                "unexpected request: {frame}"
+            );
+            write_json(
+                &mut self.core.writer,
+                &json!({"id": frame["id"], "m": "ok"}),
+            )
+            .await
+            .unwrap();
+        }
     }
 
     async fn next_frame(&mut self) -> Value {
@@ -121,7 +143,10 @@ impl Setup {
                 return frame;
             }
             assert!(
-                matches!(frame["m"].as_str(), Some("provisional" | "provisional_cancel")),
+                matches!(
+                    frame["m"].as_str(),
+                    Some("provisional" | "provisional_cancel")
+                ),
                 "unexpected request: {frame}"
             );
         }
@@ -131,8 +156,7 @@ impl Setup {
     async fn assert_no_interrupt(&mut self) {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
         loop {
-            let next =
-                tokio::time::timeout_at(deadline, read_frame(&mut self.core.reader)).await;
+            let next = tokio::time::timeout_at(deadline, read_frame(&mut self.core.reader)).await;
             let Ok(frame) = next else {
                 return;
             };
@@ -184,9 +208,9 @@ impl Setup {
         .expect("TTS playback did not happen");
     }
 
-    /// FakePlayer が 1 文の再生を終えたことにする（songbird のトラック終了に当たる）。
+    /// 最も古い読み上げの文が最後まで流れたことにする（songbird のトラック終了に当たる）。
     fn finish_track(&self) {
-        self.manager.on_track_finished(20);
+        self.player.finish_track();
     }
 }
 
@@ -295,11 +319,12 @@ async fn g4_later_partials_and_the_final_say_of_the_cut_stream_are_not_spoken() 
     );
 
     // 次の stream は普通に読む。
-    s.send(json!({"id":"s2","m":"say","binding_id":BINDING,
-                  "payload":{"text":"次の返事です。","stream_id":"5f0d2a3e-3333-4c1c-9c1c-000000000004"}}))
-        .await;
-    let ok = s.next_frame().await;
-    assert_eq!(ok["m"], "ok", "{ok}");
+    s.say_on(
+        "s2",
+        "次の返事です。",
+        "5f0d2a3e-3333-4c1c-9c1c-000000000004",
+    )
+    .await;
     s.wait_played(2).await;
     assert_eq!(s.played_texts().last().unwrap(), "次の返事です。");
 }
@@ -314,5 +339,8 @@ async fn g5_delivered_is_only_the_sentences_whose_playback_finished() {
     s.finish_track(); // 1・2 文目は流れ終わり、3 文目は途中。
     s.speak(30, 0);
     let interrupt = s.next_interrupt().await;
-    assert_eq!(interrupt["delivered"], "一文目です。二文目です。", "{interrupt}");
+    assert_eq!(
+        interrupt["delivered"], "一文目です。二文目です。",
+        "{interrupt}"
+    );
 }

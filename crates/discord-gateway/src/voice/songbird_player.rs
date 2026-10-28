@@ -11,7 +11,7 @@ use songbird::id::{ChannelId, GuildId};
 use songbird::{CoreEvent, Event, EventContext, EventHandler, Songbird};
 
 use super::receiver::{SpeakerEvent, SsrcSegments};
-use super::session::{VoiceManager, VoicePlayer};
+use super::session::{OnTrackEnd, VoiceManager, VoicePlayer};
 
 /// 受信音声を 48kHz ステレオ PCM に復号させる songbird 設定。
 pub fn songbird_config() -> songbird::Config {
@@ -84,7 +84,32 @@ impl VoicePlayer for SongbirdPlayer {
         Ok(())
     }
 
-    async fn stop(&self, _guild: u64) -> anyhow::Result<()> {
+    async fn play_speech(
+        &self,
+        guild: u64,
+        wav: Vec<u8>,
+        on_end: OnTrackEnd,
+    ) -> anyhow::Result<()> {
+        let call = self
+            .songbird
+            .get(guild_id(guild)?)
+            .context("not in a voice channel")?;
+        let mut call = call.lock().await;
+        let track = call.enqueue_input(songbird::input::Input::from(wav)).await;
+        // 最後まで流れたときだけ呼ぶ。止めた（stop）トラックも End を出すので、状態で見分ける。
+        track
+            .add_event(
+                Event::Track(songbird::events::TrackEvent::End),
+                TrackEnded(Mutex::new(Some(on_end))),
+            )
+            .context("track event")?;
+        Ok(())
+    }
+
+    async fn stop(&self, guild: u64) -> anyhow::Result<()> {
+        if let Some(call) = self.songbird.get(guild_id(guild)?) {
+            call.lock().await.queue().stop();
+        }
         Ok(())
     }
 
@@ -96,6 +121,26 @@ impl VoicePlayer for SongbirdPlayer {
             Some(call) => call.lock().await.queue().is_empty(),
             None => true,
         }
+    }
+}
+
+/// 読み上げの 1 文が最後まで流れたら `on_end` を 1 回だけ呼ぶ（止めたトラックでは呼ばない）。
+struct TrackEnded(Mutex<Option<OnTrackEnd>>);
+
+#[async_trait::async_trait]
+impl EventHandler for TrackEnded {
+    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        if let EventContext::Track(tracks) = ctx {
+            let ended = tracks
+                .iter()
+                .any(|(state, _)| matches!(state.playing, songbird::tracks::PlayMode::End));
+            if ended {
+                if let Some(on_end) = self.0.lock().unwrap().take() {
+                    on_end();
+                }
+            }
+        }
+        None
     }
 }
 

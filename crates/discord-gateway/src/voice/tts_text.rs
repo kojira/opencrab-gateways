@@ -1,25 +1,9 @@
 //! 投稿本文を読み上げ向けに整える（旧 crates/discord voice_session.rs の clean_for_tts を移植）。
 //! コードブロック・URL・メンション・Markdown 記号は読み上げに向かないので置換・除去する。
 
-/// 1 回の読み上げの上限文字数。超えた分は「以下省略」にする。
-pub const MAX_TTS_CHARS: usize = 300;
-
+/// 読み上げ向けに整える。長さの上限は掛けない（長い返事も最後まで読む。止めたいときは話しかけて
+/// 割り込む、D-1096）。
 pub fn clean_for_tts(text: &str) -> String {
-    let trimmed = clean_for_tts_uncapped(text);
-    if trimmed.chars().count() > MAX_TTS_CHARS {
-        let cut: String = trimmed.chars().take(MAX_TTS_CHARS).collect();
-        format!("{cut}{TTS_CAP_SUFFIX}")
-    } else {
-        trimmed
-    }
-}
-
-/// 上限で切った読み上げの末尾に付ける。
-pub const TTS_CAP_SUFFIX: &str = "、以下省略";
-
-/// [`clean_for_tts`] と同じ整形で、文字数の上限を掛けない。生成途中の本文は文ごとに読み上げ、
-/// 上限は読み上げた累計で掛ける（D-1083）。
-pub fn clean_for_tts_uncapped(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_code_block = false;
     for line in text.lines() {

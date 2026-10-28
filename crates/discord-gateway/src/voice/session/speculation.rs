@@ -58,6 +58,8 @@ pub(super) struct Speculation {
     current: Option<Started>,
     /// この発話の最後の話し終わり候補（無音 100ms）の認識結果。
     onset: Option<(u64, String)>,
+    /// この発話でバージインした（発話ごとに 1 回だけ止める、D-1096）。
+    barged_in: bool,
 }
 
 /// 後ろに新しい出来事があれば飛ばしてよい途中認識（話している間のもの）。
@@ -92,6 +94,7 @@ impl VoiceManager {
                     self.cancel_current(guild, speculation).await;
                     speculation.utt = Some(utt);
                     speculation.onset = None;
+                    speculation.barged_in = false;
                 }
                 let Some(text) = self.transcribe_pcm(guild, user, &pcm).await else {
                     if onset {
@@ -100,6 +103,14 @@ impl VoiceManager {
                     return;
                 };
                 let text = text.trim().to_string();
+                // D-1096: ボットが話している間に途中認識が 5 文字に達したら、この発話で 1 回だけ止める。
+                if !speculation.barged_in
+                    && chars(&text) >= FIRST_PROVISIONAL_CHARS
+                    && self.bot_speaking(guild).await
+                {
+                    speculation.barged_in = true;
+                    self.barge_in(guild).await;
+                }
                 if onset {
                     let sentence_like = ends_like_sentence(&text);
                     verdict.set(seq, sentence_like);
@@ -287,6 +298,9 @@ impl VoiceManager {
     }
 
     fn hold_partial(&self, text_channel: &str, stream_id: &str, text: &str, provisional_id: &str) {
+        if self.is_cut_stream(text_channel, stream_id) {
+            return;
+        }
         let to_synthesize = {
             let mut holds = self.holds.lock().unwrap();
             match holds.get_mut(provisional_id) {
@@ -300,7 +314,7 @@ impl VoiceManager {
                         .lock()
                         .unwrap()
                         .insert(text_channel.to_string(), draft);
-                    self.enqueue_speech_from(text_channel, &speech, committed_at);
+                    self.enqueue_speech_from(text_channel, &speech, committed_at, Some(stream_id));
                     return;
                 }
                 Some(hold) => {
@@ -397,6 +411,11 @@ impl VoiceManager {
             .lock()
             .unwrap()
             .insert(hold.text_channel.clone(), draft);
-        self.enqueue_speech_from(&hold.text_channel, &speech, hold.committed_at);
+        self.enqueue_speech_from(
+            &hold.text_channel,
+            &speech,
+            hold.committed_at,
+            Some(&stream_id),
+        );
     }
 }

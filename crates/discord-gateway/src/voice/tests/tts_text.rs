@@ -1,4 +1,4 @@
-use super::super::tts_text::{clean_for_tts, split_sentences, MAX_TTS_CHARS};
+use super::super::tts_text::{clean_for_tts, split_sentences};
 
 #[test]
 fn strips_code_blocks_and_replaces_urls() {
@@ -18,14 +18,9 @@ fn strips_mentions_and_custom_emoji() {
 }
 
 #[test]
-fn caps_length() {
-    let long = "あ".repeat(MAX_TTS_CHARS + 50);
-    let out = clean_for_tts(&long);
-    assert!(out.ends_with("、以下省略"));
-    assert_eq!(
-        out.chars().count(),
-        MAX_TTS_CHARS + "、以下省略".chars().count()
-    );
+fn long_text_is_not_capped() {
+    let long = "あ".repeat(1000);
+    assert_eq!(clean_for_tts(&long), long);
 }
 
 #[test]

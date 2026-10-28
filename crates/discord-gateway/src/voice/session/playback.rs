@@ -137,12 +137,22 @@ impl Playbacks {
     }
 
     /// 世代を進めて積んだ文と再生中の文を捨て、止めた返事を返す。
+    ///
+    /// いまの返事の文が積まれても再生中でもなければ（最後まで流れ終わった後に相づちだけが
+    /// 鳴っているなど）、止めた返事は無い。届いた分は空、stream は None を返す。
     pub(super) fn cut(&self, guild: u64) -> Cut {
         let mut guilds = self.guilds.lock().unwrap();
         let playback = guilds.entry(guild).or_default();
+        let reply_in_progress = playback.queued > 0 || !playback.playing.is_empty();
         playback.generation += 1;
         playback.queued = 0;
         playback.playing.clear();
+        if !reply_in_progress {
+            return Cut {
+                delivered: String::new(),
+                stream: None,
+            };
+        }
         Cut {
             delivered: std::mem::take(&mut playback.delivered),
             stream: playback.stream.take(),

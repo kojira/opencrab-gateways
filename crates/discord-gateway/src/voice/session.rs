@@ -115,7 +115,7 @@ pub struct VoiceManager {
     /// guild ごとの再生状態（バージインで止める世代と、相手に届いた文、D-1096）。
     playbacks: Arc<Playbacks>,
     /// テキストチャンネルごとの、バージインで止めた返事の stream（その partial・say は読まない）。
-    cut_streams: Mutex<HashMap<String, String>>,
+    cut_streams: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl VoiceManager {

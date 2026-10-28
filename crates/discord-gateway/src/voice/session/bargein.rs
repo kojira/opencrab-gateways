@@ -23,11 +23,11 @@ impl VoiceManager {
         if let Err(error) = self.player.stop(guild).await {
             tracing::warn!(guild, error = %format!("{error:#}"), "voice playback stop failed");
         }
-        if let Some(stream) = &cut.stream {
+        if !cut.cut_streams.is_empty() {
             self.cut_streams
                 .lock()
                 .unwrap()
-                .insert(session.text_channel.clone(), stream.clone());
+                .insert(session.text_channel.clone(), cut.cut_streams.clone());
         }
         self.drafts.lock().unwrap().remove(&session.text_channel);
         self.clear_promoted_holds(&session.text_channel);
@@ -35,6 +35,12 @@ impl VoiceManager {
             return;
         };
         let delivered_chars = cut.delivered.chars().count();
+        tracing::debug!(
+            guild,
+            stream = cut.stream.as_deref().unwrap_or("-"),
+            cut_streams = cut.cut_streams.len(),
+            "voice barge-in cut"
+        );
         let result = client
             .interrupt(&session.address, Some(&cut.delivered))
             .await;
@@ -52,6 +58,6 @@ impl VoiceManager {
             .lock()
             .unwrap()
             .get(text_channel)
-            .is_some_and(|cut| cut == stream_id)
+            .is_some_and(|cut| cut.iter().any(|cut| cut == stream_id))
     }
 }

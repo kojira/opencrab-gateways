@@ -30,6 +30,10 @@ pub struct Placement {
     /// `voice/settings.json` next to the placement (instance mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_settings: Option<String>,
+    /// D-1097: this instance's channel-request socket (daemon mode). Absent = an owner mention
+    /// in an unknown channel is ignored, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_socket: Option<String>,
     pub instances: Vec<InstancePlacement>,
 }
 
@@ -363,6 +367,7 @@ mod tests {
             database_path: None,
             run_env: None,
             voice_settings: None,
+            channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -388,6 +393,7 @@ mod tests {
             database_path: None,
             run_env: None,
             voice_settings: None,
+            channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -409,6 +415,7 @@ mod tests {
             database_path: None,
             run_env: None,
             voice_settings: None,
+            channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -454,6 +461,7 @@ mod tests {
             database_path: None,
             run_env: None,
             voice_settings: None,
+            channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -530,6 +538,7 @@ mod tests {
             database_path: None,
             run_env: None,
             voice_settings: None,
+            channel_socket: None,
             instances: vec![
                 instance("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
                 instance("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),

@@ -261,6 +261,10 @@ pub trait SpawnerFactory: Send + Sync {
     fn control_socket(&self, _row: &InstanceRow, _start_nonce: &str) -> Option<PathBuf> {
         None
     }
+    /// D-1097: where this instance's child asks for one more channel. `None` = not offered.
+    fn channel_socket(&self, _row: &InstanceRow) -> Option<PathBuf> {
+        None
+    }
     fn for_instance(
         &self,
         row: &InstanceRow,
@@ -312,6 +316,10 @@ pub struct DiscordDaemon<R, F> {
     factory: Arc<F>,
     supervisors: Arc<ProcessSupervisorSet>,
     startup_recovered: std::sync::atomic::AtomicBool,
+    /// D-1097: one channel-request listener per started child, stopped with the child.
+    channel_tasks: Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<Result<()>>>>,
+    /// Set by [`DiscordDaemon::serve_channel_requests`]; `None` = no listeners are started.
+    channel_binder: Mutex<Option<Arc<dyn crate::channel_request::ChannelBinder>>>,
 }
 
 impl<R, F> DiscordDaemon<R, F>
@@ -332,6 +340,8 @@ where
             factory,
             supervisors: ProcessSupervisorSet::new(SupervisorConfig::daemon_owned()),
             startup_recovered: std::sync::atomic::AtomicBool::new(false),
+            channel_tasks: Mutex::new(std::collections::HashMap::new()),
+            channel_binder: Mutex::new(None),
         })
     }
 
@@ -419,6 +429,7 @@ where
             match row.lifecycle_state {
                 opencrab_process_supervisor::lifecycle::LifecycleState::Pending => {
                     self.supervisors.stop(&row.instance_id).await;
+                    self.stop_channel_listener(&row.instance_id);
                     self.factory.reap_stale(&row)?;
                     self.factory.cleanup_artifacts(&row)?;
                     if !self
@@ -499,11 +510,13 @@ where
                 opencrab_process_supervisor::lifecycle::LifecycleState::Disabled
                 | opencrab_process_supervisor::lifecycle::LifecycleState::Provisioning => {
                     self.supervisors.stop(&row.instance_id).await;
+                    self.stop_channel_listener(&row.instance_id);
                     self.factory.reap_stale(&row)?;
                     self.factory.cleanup_artifacts(&row)?;
                 }
                 opencrab_process_supervisor::lifecycle::LifecycleState::Error => {
                     self.supervisors.stop(&row.instance_id).await;
+                    self.stop_channel_listener(&row.instance_id);
                     self.factory.reap_stale(&row)?;
                     self.factory.cleanup_artifacts(&row)?;
                     let _ = self.store.lock().unwrap().retry_due_error(
@@ -538,6 +551,7 @@ where
             Some(path) => Some(prepare_readiness_listener(&path)?),
             None => None,
         };
+        self.start_channel_listener(&row);
         let spawner = self.factory.for_instance(&row, credential, &nonce)?;
         let observer = Arc::new(StoreObserver {
             store: self.store.clone(),
@@ -577,31 +591,10 @@ where
             .mark_running(instance_id, generation, pid, nonce)
     }
 
-    /// D-1097: adds `address` to a running instance without rebuilding it. Core sends the new
-    /// bind to the live child, so the child can deliver the message that asked for it.
-    pub async fn bind_address(&self, instance_id: &str, address: &str) -> Result<()> {
-        let row = self
-            .store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("store poisoned"))?
-            .get(instance_id)?
-            .context("instance unknown")?;
-        anyhow::ensure!(
-            crate::config::parse_address_owner(&row.agent_id, address),
-            "address does not belong to this agent"
-        );
-        if row.addresses.iter().any(|a| a == address) {
-            return Ok(());
-        }
-        let binding_id = self.reconciler.bind(&row, address).await?;
-        self.store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("store poisoned"))?
-            .add_bound_address(instance_id, address, &binding_id)?;
-        Ok(())
-    }
-
     pub async fn shutdown(&self) {
+        for (_, task) in self.channel_tasks.lock().unwrap().drain() {
+            task.abort();
+        }
         self.supervisors.shutdown_all().await;
     }
 }
@@ -699,7 +692,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     if let Some(import) = &config.legacy_import {
         run_legacy_import(&store, import, &client, &raw).await?;
     }
-    let daemon = DiscordDaemon::new(
+    let daemon = Arc::new(DiscordDaemon::new(
         store,
         raw,
         Arc::new(UdsGateReconciler::new(client, "discord")),
@@ -712,7 +705,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             database_path: config.database_path.clone(),
             voice_settings: config.voice_settings_path(),
         }),
-    )?;
+    )?);
+    daemon.serve_channel_requests(Arc::new(DaemonChannels(Arc::downgrade(&daemon))));
     let grants = config
         .creation_namespace
         .map(|_| {
@@ -763,6 +757,10 @@ async fn run_legacy_import(
         }
     }
 }
+
+#[path = "daemon_channels.rs"]
+mod channels;
+pub use channels::DaemonChannels;
 
 #[cfg(test)]
 #[path = "daemon_tests.rs"]

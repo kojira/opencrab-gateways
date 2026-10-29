@@ -91,6 +91,7 @@ impl SpawnerFactory for ProductionFactory {
             self.placement_dir.join(format!("{}.json", row.instance_id)),
             self.placement_dir
                 .join(format!("{}.control.sock", row.instance_id)),
+            crate::channel_request::socket_path(&self.placement_dir, &row.instance_id),
         ] {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
@@ -99,6 +100,13 @@ impl SpawnerFactory for ProductionFactory {
             }
         }
         Ok(())
+    }
+
+    fn channel_socket(&self, row: &InstanceRow) -> Option<PathBuf> {
+        Some(crate::channel_request::socket_path(
+            &self.placement_dir,
+            &row.instance_id,
+        ))
     }
 
     fn control_socket(&self, row: &InstanceRow, _: &str) -> Option<PathBuf> {
@@ -126,6 +134,7 @@ impl SpawnerFactory for ProductionFactory {
             "attachment_outbox_root": self.attachment_outbox_root,
             "database_path": self.database_path,
             "voice_settings": self.voice_settings,
+            "channel_socket": self.channel_socket(row),
             "control_socket": control_socket,
             "start_nonce": start_nonce,
             "instances": [{"instance_id":row.instance_id,"revision":revision,

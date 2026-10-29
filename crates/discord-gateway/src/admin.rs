@@ -15,7 +15,10 @@ use tokio::net::{UnixListener, UnixStream};
 struct Request {
     id: String,
     op: String,
+    /// Absent only for `list`, which covers every instance in scope.
+    #[serde(default)]
     scope_instance_id: String,
+    #[serde(default)]
     instance_id: String,
     #[serde(default)]
     agent_id: Option<String>,
@@ -31,6 +34,9 @@ struct Request {
     subject_grant: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
+    /// D-1097: the whole Discord instance config as JSON (`set_config`).
+    #[serde(default)]
+    config: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -109,6 +115,12 @@ fn apply(
 ) -> Response {
     let id = request.id.clone();
     let result = (|| -> Result<Value> {
+        if request.op == "list" {
+            let store = store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+            return crate::admin_settings::list(&store, scope);
+        }
         anyhow::ensure!(
             request.scope_instance_id == request.instance_id
                 && scope.contains(&request.instance_id),
@@ -149,6 +161,30 @@ fn apply(
                 )?;
                 Ok(json!({"desired_generation": generation, "state": "pending"}))
             }
+            "set_config" => crate::admin_settings::set_config(
+                &store,
+                &request.instance_id,
+                request.config.as_ref().context("config required")?,
+                key,
+            ),
+            "set_addresses" => crate::admin_settings::set_addresses(
+                &store,
+                &request.instance_id,
+                request.addresses.as_deref().context("addresses required")?,
+                key,
+            ),
+            "set_credential" => crate::admin_settings::set_credential(
+                &store,
+                &request.instance_id,
+                request.credential.as_deref().unwrap_or_default(),
+                key,
+            ),
+            "set_enabled" => crate::admin_settings::set_enabled(
+                &store,
+                &request.instance_id,
+                request.enabled.context("enabled required")?,
+                key,
+            ),
             _ => anyhow::bail!("unknown_operation"),
         }
     })();
@@ -291,3 +327,7 @@ mod tests {
         task.abort();
     }
 }
+
+#[cfg(test)]
+#[path = "admin_settings_tests.rs"]
+mod settings_tests;

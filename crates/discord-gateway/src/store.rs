@@ -115,6 +115,21 @@ impl DiscordStore {
         })
     }
 
+    /// Runs `f` in one transaction: every write in it commits, or none does.
+    pub fn in_transaction<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(self) {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -202,6 +217,19 @@ impl DiscordStore {
                 })
             },
         ).optional().map_err(Into::into)
+    }
+
+    /// The last exit code recorded for the instance (`child_exit`, `reconciliation_failed`, ...).
+    pub fn last_exit(&self, instance_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT last_exit FROM instances WHERE instance_id=?1",
+                params![instance_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     pub fn retry_due_error(

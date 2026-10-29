@@ -281,6 +281,11 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// D-1097: whether `address` is a channel address of `agent_id` (`discord-{agent}-{guild}-{channel}`).
+pub fn parse_address_owner(agent_id: &str, address: &str) -> bool {
+    crate::map::parse_address(agent_id, address).is_some()
+}
+
 /// 10進 snowflake（u64 に収まる非空数字列）。生 ID は会話へ出さないが config の妥当性検査には使う。
 pub fn is_snowflake(raw: &str) -> bool {
     !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) && raw.parse::<u64>().is_ok()

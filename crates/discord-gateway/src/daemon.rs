@@ -29,6 +29,9 @@ pub struct DaemonConfig {
     pub attachment_outbox_root: Option<PathBuf>,
     #[serde(default = "default_reconcile_millis")]
     pub reconcile_millis: u64,
+    /// D-1097 D3: instance-mode placements and token files to import while the store is empty.
+    #[serde(default)]
+    pub legacy_import: Option<crate::legacy_import::LegacyImport>,
 }
 
 fn default_reconcile_millis() -> u64 {
@@ -75,6 +78,9 @@ impl DaemonConfig {
                 path.is_absolute(),
                 "attachment_outbox_root must be absolute"
             );
+        }
+        if let Some(import) = &self.legacy_import {
+            import.validate()?;
         }
         anyhow::ensure!(
             self.reconcile_millis > 0,
@@ -618,6 +624,9 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         config.gate_admin_socket.clone(),
         &config.gate_admin_credential,
     )?;
+    if let Some(import) = &config.legacy_import {
+        run_legacy_import(&store, import, &client, &raw).await?;
+    }
     let daemon = DiscordDaemon::new(
         store,
         raw,
@@ -643,6 +652,29 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     loop {
         interval.tick().await;
         daemon.reconcile_once().await?;
+    }
+}
+
+/// D-1097 D3: import the instance-mode setup once. Core may still be starting, so a core that
+/// cannot be reached is retried; any other error stops the daemon.
+async fn run_legacy_import(
+    store: &DiscordStore,
+    import: &crate::legacy_import::LegacyImport,
+    core: &dyn crate::legacy_import::SubjectLookup,
+    key: &[u8; 32],
+) -> Result<()> {
+    loop {
+        match crate::legacy_import::import_legacy(store, import, core, key).await {
+            Ok(outcome) => {
+                tracing::info!(?outcome, "discord legacy import");
+                return Ok(());
+            }
+            Err(error) if error.is::<crate::legacy_import::CoreUnavailable>() => {
+                tracing::warn!(error = %error, "discord legacy import waiting for core");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(error) => return Err(error.context("discord legacy import failed")),
+        }
     }
 }
 

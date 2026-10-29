@@ -342,3 +342,26 @@ async fn generate_key_requires_overwrite_and_never_returns_the_key() {
         "a new identity starts disabled until the operator enables it"
     );
 }
+
+#[tokio::test]
+async fn a_key_pasted_into_access_is_rejected_without_echoing_it() {
+    use nostr::nips::nip19::ToBech32 as _;
+    let f = fixture(PathBuf::from("/nonexistent")).await;
+    let nsec = nostr::Keys::generate().secret_key().to_bech32().unwrap();
+    let reply = call(
+        &f.socket,
+        op("set_access", json!({"settings": {"owner": [nsec.clone()]}})),
+    )
+    .await;
+    assert_eq!(reply["ok"], json!(false), "{reply}");
+    assert!(!reply.to_string().contains(&nsec), "input echoed: {reply}");
+    let reply = call(
+        &f.socket,
+        op(
+            "set_access",
+            json!({"settings": {"co_agents": {nsec.clone(): "peer"}}}),
+        ),
+    )
+    .await;
+    assert!(!reply.to_string().contains(&nsec), "input echoed: {reply}");
+}

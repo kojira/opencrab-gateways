@@ -96,10 +96,10 @@ pub(crate) fn set_config(
         .filter(|relay| !relay.is_empty())
         .collect();
     for relay in &relays {
-        let url = url::Url::parse(relay).with_context(|| format!("relay is not a URL: {relay}"))?;
+        let url = url::Url::parse(relay).context("a relay is not a URL")?;
         anyhow::ensure!(
             matches!(url.scheme(), "wss" | "ws"),
-            "relay must be a ws:// or wss:// URL: {relay}"
+            "every relay must be a ws:// or wss:// URL"
         );
     }
     let mut config = stored_config(row)?;
@@ -137,8 +137,10 @@ pub(crate) fn set_access(
     let keys = |field: &str, values: &[String]| -> Result<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
         for value in values.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
-            let hex = canonical_hex(value)
-                .with_context(|| format!("{field}: not a Nostr public key: {value}"))?;
+            // Never echo the input: a pasted secret key would come straight back.
+            let hex = canonical_hex(value).with_context(|| {
+                format!("{field}: an entry is not a Nostr public key (hex or npub)")
+            })?;
             if !out.contains(&hex) {
                 out.push(hex);
             }
@@ -153,11 +155,11 @@ pub(crate) fn set_access(
     };
     for (pubkey, agent_id) in &edit.co_agents {
         let hex = canonical_hex(pubkey)
-            .with_context(|| format!("co_agents: not a Nostr public key: {pubkey}"))?;
+            .context("co_agents: an entry is not a Nostr public key (hex or npub)")?;
         let agent_id = agent_id.trim();
         anyhow::ensure!(
             !agent_id.is_empty(),
-            "co_agents: agent id is required for {pubkey}"
+            "co_agents: every key needs an agent id"
         );
         access.co_agents.insert(hex, agent_id.to_string());
     }

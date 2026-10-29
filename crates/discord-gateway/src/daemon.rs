@@ -681,3 +681,7 @@ async fn run_legacy_import(
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "daemon_settings_tests.rs"]
+mod settings_tests;

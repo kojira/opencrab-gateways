@@ -219,6 +219,36 @@ impl DiscordStore {
         ).optional().map_err(Into::into)
     }
 
+    /// D-1097: records one more address and its core binding on the same generation, so the
+    /// running child keeps running and the core observation still matches.
+    pub fn add_bound_address(
+        &self,
+        instance_id: &str,
+        address: &str,
+        binding_id: &str,
+    ) -> Result<bool> {
+        let row = self.get(instance_id)?.context("instance unknown")?;
+        if row.addresses.iter().any(|a| a == address) {
+            return Ok(false);
+        }
+        let mut addresses = row.addresses.clone();
+        addresses.push(address.to_string());
+        let mut bindings = row.core_bindings.clone();
+        bindings.push(binding_id.to_string());
+        self.conn.execute(
+            "UPDATE instances SET addresses_json=?2, binding_inventory_json=?3, updated_at=?4
+             WHERE instance_id=?1 AND desired_generation=?5",
+            params![
+                instance_id,
+                serde_json::to_string(&addresses)?,
+                serde_json::to_string(&bindings)?,
+                chrono::Utc::now().to_rfc3339(),
+                row.desired_generation
+            ],
+        )?;
+        Ok(true)
+    }
+
     /// The last exit code recorded for the instance (`child_exit`, `reconciliation_failed`, ...).
     pub fn last_exit(&self, instance_id: &str) -> Result<Option<String>> {
         Ok(self

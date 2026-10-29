@@ -573,3 +573,124 @@ async fn d1097_a_created_bot_is_put_in_core_with_its_grant_and_starts() {
     assert_eq!(row.subject_id, 11);
     daemon.shutdown().await;
 }
+
+/// D-1097 owner mention: adding one channel to a running bot creates the core binding live and
+/// keeps the bot running (no rebuild, so the triggering message is not lost). The address is
+/// stored, so it survives a daemon restart.
+#[tokio::test]
+async fn d1097_bind_address_adds_a_channel_live_and_persists() {
+    #[derive(Default)]
+    struct BindGate(Mutex<Vec<String>>);
+    #[async_trait]
+    impl GateReconciler for BindGate {
+        async fn observe(
+            &self,
+            desired: &InstanceRow,
+        ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+            let _ = desired;
+            Ok(opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled)
+        }
+        async fn reconcile(
+            &self,
+            desired: &InstanceRow,
+            _: Option<&str>,
+        ) -> Result<VerifiedInstance> {
+            Ok(VerifiedInstance {
+                revision: 1,
+                digest: "neutral".into(),
+                bindings: desired.addresses.clone(),
+                enabled: desired.enabled,
+            })
+        }
+        async fn bind(&self, _: &InstanceRow, address: &str) -> Result<String> {
+            self.0.lock().unwrap().push(address.to_string());
+            Ok(format!("binding-{address}"))
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("owner.db");
+    let store = DiscordStore::open(&path).unwrap();
+    store
+        .upsert_desired(
+            A,
+            "agent",
+            7,
+            &config(&[]),
+            &["discord-agent-1-2".into()],
+            "t",
+            None,
+            true,
+            &KEY,
+        )
+        .unwrap();
+    let gate = Arc::new(BindGate::default());
+    let factory = Arc::new(CountingFactory::default());
+    let daemon = DiscordDaemon::new(store, KEY, gate.clone(), factory.clone()).unwrap();
+    daemon.reconcile_once().await.unwrap();
+    let generation = daemon
+        .store()
+        .lock()
+        .unwrap()
+        .get(A)
+        .unwrap()
+        .unwrap()
+        .desired_generation;
+
+    daemon.bind_address(A, "discord-agent-1-3").await.unwrap();
+    daemon.bind_address(A, "discord-agent-1-3").await.unwrap();
+    assert!(
+        daemon.bind_address(A, "discord-other-1-3").await.is_err(),
+        "not this agent's"
+    );
+    assert_eq!(
+        gate.0.lock().unwrap().clone(),
+        vec!["discord-agent-1-3"],
+        "bound once"
+    );
+    let row = daemon.store().lock().unwrap().get(A).unwrap().unwrap();
+    assert_eq!(
+        row.addresses,
+        vec!["discord-agent-1-2", "discord-agent-1-3"]
+    );
+    assert_eq!(row.desired_generation, generation, "no rebuild");
+    // Confirm readiness the way the child's readiness signal would, then reconcile: a running
+    // child is left alone.
+    for _ in 0..100 {
+        if daemon
+            .store()
+            .lock()
+            .unwrap()
+            .get(A)
+            .unwrap()
+            .unwrap()
+            .process_nonce
+            .is_some()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let row = daemon.store().lock().unwrap().get(A).unwrap().unwrap();
+    assert!(daemon
+        .confirm_child_ready(
+            A,
+            row.desired_generation,
+            4242,
+            row.process_nonce.as_deref().unwrap()
+        )
+        .unwrap());
+    daemon.reconcile_once().await.unwrap();
+    assert_eq!(
+        factory.starts.lock().unwrap().get(A),
+        Some(&1),
+        "the bot keeps running"
+    );
+    assert_eq!(factory.kills.load(Ordering::SeqCst), 0);
+    daemon.shutdown().await;
+    drop(daemon);
+    let reopened = DiscordStore::open(&path).unwrap();
+    assert_eq!(
+        reopened.get(A).unwrap().unwrap().addresses,
+        vec!["discord-agent-1-2", "discord-agent-1-3"]
+    );
+}

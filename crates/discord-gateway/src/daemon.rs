@@ -137,6 +137,11 @@ pub trait GateReconciler: Send + Sync {
         desired: &InstanceRow,
         subject_grant: Option<&str>,
     ) -> Result<VerifiedInstance>;
+
+    /// Creates the core binding for one more address of a live instance and returns its id.
+    async fn bind(&self, _desired: &InstanceRow, _address: &str) -> Result<String> {
+        anyhow::bail!("binding a single address is not supported")
+    }
 }
 
 pub struct UdsGateReconciler {
@@ -215,6 +220,22 @@ impl GateReconciler for UdsGateReconciler {
                 .collect(),
             enabled: observed.enabled,
         })
+    }
+
+    async fn bind(&self, desired: &InstanceRow, address: &str) -> Result<String> {
+        // Same binding id rule as `GateAdminClient::reconcile`, so a later full reconcile finds it.
+        let namespace = uuid::Uuid::parse_str(&desired.instance_id)?;
+        let binding_id = uuid::Uuid::new_v5(&namespace, address.as_bytes()).to_string();
+        self.client
+            .put_binding(
+                &binding_id,
+                &desired.instance_id,
+                address,
+                &format!("extgate-{binding_id}"),
+                "gateway session",
+            )
+            .await?;
+        Ok(binding_id)
     }
 }
 
@@ -554,6 +575,30 @@ where
             .lock()
             .map_err(|_| anyhow::anyhow!("store poisoned"))?
             .mark_running(instance_id, generation, pid, nonce)
+    }
+
+    /// D-1097: adds `address` to a running instance without rebuilding it. Core sends the new
+    /// bind to the live child, so the child can deliver the message that asked for it.
+    pub async fn bind_address(&self, instance_id: &str, address: &str) -> Result<()> {
+        let row = self
+            .store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store poisoned"))?
+            .get(instance_id)?
+            .context("instance unknown")?;
+        anyhow::ensure!(
+            crate::config::parse_address_owner(&row.agent_id, address),
+            "address does not belong to this agent"
+        );
+        if row.addresses.iter().any(|a| a == address) {
+            return Ok(());
+        }
+        let binding_id = self.reconciler.bind(&row, address).await?;
+        self.store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store poisoned"))?
+            .add_bound_address(instance_id, address, &binding_id)?;
+        Ok(())
     }
 
     pub async fn shutdown(&self) {

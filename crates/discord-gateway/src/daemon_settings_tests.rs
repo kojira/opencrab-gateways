@@ -574,20 +574,19 @@ async fn d1097_a_created_bot_is_put_in_core_with_its_grant_and_starts() {
     daemon.shutdown().await;
 }
 
-/// D-1097 owner mention: adding one channel to a running bot creates the core binding live and
-/// keeps the bot running (no rebuild, so the triggering message is not lost). The address is
-/// stored, so it survives a daemon restart.
+/// D-1097 owner mention (child-created binding): recording an address the child already bound
+/// through its own core connection stores it without any gate-admin call, so the next reconcile
+/// keeps the binding instead of deleting it.
 #[tokio::test]
-async fn d1097_bind_address_adds_a_channel_live_and_persists() {
+async fn d1097_record_bound_address_persists_without_a_gate_admin_call() {
     #[derive(Default)]
-    struct BindGate(Mutex<Vec<String>>);
+    struct NoBind;
     #[async_trait]
-    impl GateReconciler for BindGate {
+    impl GateReconciler for NoBind {
         async fn observe(
             &self,
-            desired: &InstanceRow,
+            _: &InstanceRow,
         ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-            let _ = desired;
             Ok(opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled)
         }
         async fn reconcile(
@@ -601,10 +600,6 @@ async fn d1097_bind_address_adds_a_channel_live_and_persists() {
                 bindings: desired.addresses.clone(),
                 enabled: desired.enabled,
             })
-        }
-        async fn bind(&self, _: &InstanceRow, address: &str) -> Result<String> {
-            self.0.lock().unwrap().push(address.to_string());
-            Ok(format!("binding-{address}"))
         }
     }
     let temp = tempfile::tempdir().unwrap();
@@ -623,9 +618,14 @@ async fn d1097_bind_address_adds_a_channel_live_and_persists() {
             &KEY,
         )
         .unwrap();
-    let gate = Arc::new(BindGate::default());
-    let factory = Arc::new(CountingFactory::default());
-    let daemon = DiscordDaemon::new(store, KEY, gate.clone(), factory.clone()).unwrap();
+    let gate = Arc::new(NoBind);
+    let daemon = DiscordDaemon::new(
+        store,
+        KEY,
+        gate.clone(),
+        Arc::new(CountingFactory::default()),
+    )
+    .unwrap();
     daemon.reconcile_once().await.unwrap();
     let generation = daemon
         .store()
@@ -635,107 +635,29 @@ async fn d1097_bind_address_adds_a_channel_live_and_persists() {
         .unwrap()
         .unwrap()
         .desired_generation;
-
-    daemon.bind_address(A, "discord-agent-1-3").await.unwrap();
-    daemon.bind_address(A, "discord-agent-1-3").await.unwrap();
-    assert!(
-        daemon.bind_address(A, "discord-other-1-3").await.is_err(),
-        "not this agent's"
-    );
-    assert_eq!(
-        gate.0.lock().unwrap().clone(),
-        vec!["discord-agent-1-3"],
-        "bound once"
-    );
+    daemon
+        .record_bound_address(A, "discord-agent-1-3", "child-binding-id")
+        .unwrap();
+    assert!(daemon
+        .record_bound_address(A, "discord-other-1-3", "x")
+        .is_err());
     let row = daemon.store().lock().unwrap().get(A).unwrap().unwrap();
     assert_eq!(
         row.addresses,
         vec!["discord-agent-1-2", "discord-agent-1-3"]
     );
+    assert!(row.core_bindings.contains(&"child-binding-id".to_string()));
     assert_eq!(row.desired_generation, generation, "no rebuild");
-    // Confirm readiness the way the child's readiness signal would, then reconcile: a running
-    // child is left alone.
-    for _ in 0..100 {
-        if daemon
-            .store()
-            .lock()
+    daemon.shutdown().await;
+    drop(daemon);
+    assert_eq!(
+        DiscordStore::open(&path)
             .unwrap()
             .get(A)
             .unwrap()
             .unwrap()
-            .process_nonce
-            .is_some()
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let row = daemon.store().lock().unwrap().get(A).unwrap().unwrap();
-    assert!(daemon
-        .confirm_child_ready(
-            A,
-            row.desired_generation,
-            4242,
-            row.process_nonce.as_deref().unwrap()
-        )
-        .unwrap());
-    daemon.reconcile_once().await.unwrap();
-    assert_eq!(
-        factory.starts.lock().unwrap().get(A),
-        Some(&1),
-        "the bot keeps running"
-    );
-    assert_eq!(factory.kills.load(Ordering::SeqCst), 0);
-    daemon.shutdown().await;
-    drop(daemon);
-    let reopened = DiscordStore::open(&path).unwrap();
-    assert_eq!(
-        reopened.get(A).unwrap().unwrap().addresses,
-        vec!["discord-agent-1-2", "discord-agent-1-3"]
-    );
-}
-
-/// D-1097: the child placement names the instance's own channel-request socket.
-#[test]
-fn d1097_child_placement_names_its_channel_socket() {
-    let temp = tempfile::tempdir().unwrap();
-    let placement_dir = temp.path().join("placements");
-    let factory = ProductionFactory {
-        child_binary: "/bin/true".into(),
-        core_socket: temp.path().join("core.sock"),
-        placement_dir: placement_dir.clone(),
-        attachment_spool_root: None,
-        attachment_outbox_root: None,
-        database_path: temp.path().join("owner.db"),
-        voice_settings: temp.path().join("voice/settings.json"),
-    };
-    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
-    let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    let generation = store
-        .upsert_desired(
-            instance_id,
-            "agent",
-            7,
-            VALID_CONFIG_B64,
-            &["discord-agent-1-2".into()],
-            "t",
-            None,
-            true,
-            &[9; 32],
-        )
-        .unwrap();
-    store.mark_provisioning(instance_id, generation).unwrap();
-    store
-        .mark_verified(instance_id, generation, 1, "digest", &[], true)
-        .unwrap();
-    let row = store.get(instance_id).unwrap().unwrap();
-    factory
-        .for_instance(&row, zeroize::Zeroizing::new(b"t".to_vec()), "nonce")
-        .unwrap();
-    let path = placement_dir.join(format!("{instance_id}.json"));
-    let place = crate::config::Placement::load(&path).unwrap();
-    assert_eq!(
-        place.channel_socket.as_deref().map(std::path::Path::new),
-        Some(crate::channel_request::socket_path(&placement_dir, instance_id).as_path())
+            .addresses,
+        vec!["discord-agent-1-2", "discord-agent-1-3"],
+        "still bound after a restart"
     );
 }

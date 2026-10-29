@@ -89,24 +89,24 @@ mod end_to_end {
     use std::time::Duration;
     use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-    const NEW_BINDING: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
 
-    /// A daemon stand-in: records the request and makes "core" send the bind to the child.
-    struct Binder {
-        asked: Mutex<Vec<String>>,
-        core_writer: tokio::sync::Mutex<OwnedWriteHalf>,
-    }
+    /// The daemon stand-in: records what the child tells it.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<(String, String)>>);
 
     #[async_trait::async_trait]
-    impl ChannelBinder for Binder {
-        async fn bind_address(&self, _instance: &str, address: &str) -> anyhow::Result<()> {
-            self.asked.lock().unwrap().push(address.to_string());
-            write_json(
-                &mut *self.core_writer.lock().await,
-                &json!({"id":"bind-2","m":"bind","binding_id":NEW_BINDING,"address":address}),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    impl ChannelBinder for Recorder {
+        async fn record_address(
+            &self,
+            _instance: &str,
+            address: &str,
+            binding_id: &str,
+        ) -> anyhow::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((address.to_string(), binding_id.to_string()));
             Ok(())
         }
     }
@@ -115,25 +115,24 @@ mod end_to_end {
         _dir: tempfile::TempDir,
         client: Arc<InstanceClient>,
         reader: OwnedReadHalf,
-        binder: Arc<Binder>,
+        writer: OwnedWriteHalf,
+        recorder: Arc<Recorder>,
         socket: std::path::PathBuf,
     }
 
     async fn world() -> World {
-        let dir = tempfile::tempdir().unwrap();
+        // A short directory: Unix socket paths are limited to about 104 bytes.
+        let dir = tempfile::Builder::new()
+            .prefix("om")
+            .tempdir_in("/tmp")
+            .unwrap();
         let core_path = dir.path().join("core.sock");
         let listener = tokio::net::UnixListener::bind(&core_path).unwrap();
         let path = core_path.clone();
         let connect = tokio::spawn(async move {
-            InstanceClient::connect(
-                &path,
-                "11111111-1111-4111-8111-111111111111".into(),
-                1,
-                BOT.into(),
-                "0".repeat(64),
-            )
-            .await
-            .unwrap()
+            InstanceClient::connect(&path, INSTANCE.into(), 1, BOT.into(), "0".repeat(64))
+                .await
+                .unwrap()
         });
         let (stream, _) = listener.accept().await.unwrap();
         let (mut reader, mut writer) = stream.into_split();
@@ -142,12 +141,9 @@ mod end_to_end {
             .await
             .unwrap();
         let client = connect.await.unwrap();
-        let binder = Arc::new(Binder {
-            asked: Mutex::new(Vec::new()),
-            core_writer: tokio::sync::Mutex::new(writer),
-        });
-        let socket = crate::channel_request::socket_path(dir.path(), "instance");
-        tokio::spawn(serve(socket.clone(), "instance".into(), binder.clone()));
+        let recorder = Arc::new(Recorder::default());
+        let socket = crate::channel_request::socket_path(dir.path(), INSTANCE);
+        tokio::spawn(serve(socket.clone(), INSTANCE.into(), recorder.clone()));
         for _ in 0..200 {
             if socket.exists() {
                 break;
@@ -158,7 +154,8 @@ mod end_to_end {
             _dir: dir,
             client,
             reader,
-            binder,
+            writer,
+            recorder,
             socket,
         }
     }
@@ -169,8 +166,8 @@ mod end_to_end {
         .to_string()
     }
 
-    /// Runs the child's per-line handling: owner-mention enable, then the normal said path.
-    async fn receive(w: &World, line: String) -> tokio::task::JoinHandle<()> {
+    /// The child's per-line handling: owner-mention enable, then the normal said path.
+    fn receive(w: &World, line: String) -> tokio::task::JoinHandle<()> {
         let client = w.client.clone();
         let socket = w.socket.clone();
         tokio::spawn(async move {
@@ -181,41 +178,70 @@ mod end_to_end {
         })
     }
 
+    async fn next(reader: &mut OwnedReadHalf) -> Value {
+        serde_json::from_slice(
+            &tokio::time::timeout(Duration::from_secs(5), read_frame(reader))
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn d1097_owner_mention_in_a_new_channel_binds_then_delivers_that_message() {
         let mut w = world().await;
-        let task = receive(&w, line(OWNER, &[BOT])).await;
-        // Core sees the bind ack first, then the said for the very message that asked.
-        let ack: Value = serde_json::from_slice(
-            &tokio::time::timeout(Duration::from_secs(5), read_frame(&mut w.reader))
-                .await
-                .unwrap()
-                .unwrap(),
+        let address = crate::map::address_for("agent", "100", "200");
+        let task = receive(&w, line(OWNER, &[BOT]));
+
+        // The child asks core for the binding on its own connection.
+        let create = next(&mut w.reader).await;
+        assert_eq!(create["m"], "create_binding", "{create}");
+        assert_eq!(create["address"], address);
+        let binding = create["binding_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            Some(binding.clone()),
+            super::super::owner_mention::binding_id_for(INSTANCE, &address)
+        );
+        write_json(&mut w.writer, &json!({"id":create["id"],"m":"ok"}))
+            .await
+            .unwrap();
+        // Core then binds it, as it does for any created binding.
+        write_json(
+            &mut w.writer,
+            &json!({"id":"bind-2","m":"bind","binding_id":binding,"address":address}),
         )
+        .await
         .unwrap();
-        assert_eq!(ack["id"], "bind-2");
-        assert_eq!(ack["m"], "ok");
-        let said: Value = serde_json::from_slice(
-            &tokio::time::timeout(Duration::from_secs(5), read_frame(&mut w.reader))
-                .await
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
+        let ack = next(&mut w.reader).await;
+        assert_eq!(
+            (ack["id"].as_str(), ack["m"].as_str()),
+            (Some("bind-2"), Some("ok"))
+        );
+
+        // The very message that asked becomes a said on the new binding.
+        let said = next(&mut w.reader).await;
         assert_eq!(said["m"], "said");
-        assert_eq!(said["binding_id"], NEW_BINDING);
+        assert_eq!(said["binding_id"], binding);
         assert_eq!(said["author_id"], OWNER);
         assert!(said["text"].as_str().unwrap().contains("hello"));
         write_json(
-            &mut *w.binder.core_writer.lock().await,
+            &mut w.writer,
             &json!({"id": said["id"], "m": "ok", "seq": 1}),
         )
         .await
         .unwrap();
         task.await.unwrap();
+        for _ in 0..200 {
+            if !w.recorder.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // The daemon was told, so its store keeps the channel across restarts.
         assert_eq!(
-            w.binder.asked.lock().unwrap().clone(),
-            vec![crate::map::address_for("agent", "100", "200")]
+            w.recorder.0.lock().unwrap().clone(),
+            vec![(address, binding)]
         );
     }
 
@@ -223,9 +249,9 @@ mod end_to_end {
     async fn d1097_a_non_owner_mention_or_an_owner_without_one_does_nothing() {
         let mut w = world().await;
         for line in [line("444444444444444444", &[BOT]), line(OWNER, &[])] {
-            receive(&w, line).await.await.unwrap();
+            receive(&w, line).await.unwrap();
         }
-        assert!(w.binder.asked.lock().unwrap().is_empty());
+        assert!(w.recorder.0.lock().unwrap().is_empty());
         let nothing =
             tokio::time::timeout(Duration::from_millis(200), read_frame(&mut w.reader)).await;
         assert!(nothing.is_err(), "no frame reaches core");

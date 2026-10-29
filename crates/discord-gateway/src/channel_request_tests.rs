@@ -6,8 +6,14 @@ struct Recorder(Mutex<Vec<(String, String)>>);
 
 #[async_trait::async_trait]
 impl ChannelBinder for Recorder {
-    async fn bind_address(&self, instance_id: &str, address: &str) -> Result<()> {
+    async fn record_address(
+        &self,
+        instance_id: &str,
+        address: &str,
+        binding_id: &str,
+    ) -> Result<()> {
         anyhow::ensure!(address.starts_with("discord-agent-"), "not this agent's");
+        anyhow::ensure!(binding_id == "binding-1", "binding id passed through");
         self.0
             .lock()
             .unwrap()
@@ -34,8 +40,12 @@ async fn d1097_a_child_binds_an_address_of_its_own_instance_only() {
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    request(&path, "discord-agent-1-3").await.unwrap();
-    assert!(request(&path, "discord-other-1-3").await.is_err());
+    request(&path, "discord-agent-1-3", "binding-1")
+        .await
+        .unwrap();
+    assert!(request(&path, "discord-other-1-3", "binding-1")
+        .await
+        .is_err());
     assert_eq!(
         binder.0.lock().unwrap().clone(),
         vec![("instance-a".to_string(), "discord-agent-1-3".to_string())],
@@ -46,7 +56,7 @@ async fn d1097_a_child_binds_an_address_of_its_own_instance_only() {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
     let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
     stream
-        .write_all(b"{\"address\":\"discord-agent-1-4\",\"instance_id\":\"instance-b\"}\n")
+        .write_all(b"{\"address\":\"discord-agent-1-4\",\"binding_id\":\"binding-1\",\"instance_id\":\"instance-b\"}\n")
         .await
         .unwrap();
     let mut line = String::new();
@@ -63,5 +73,19 @@ async fn d1097_a_child_binds_an_address_of_its_own_instance_only() {
 async fn d1097_a_missing_daemon_socket_is_an_error_not_a_hang() {
     let temp = tempfile::tempdir().unwrap();
     let path = socket_path(temp.path(), "nobody");
-    assert!(request(&path, "discord-agent-1-3").await.is_err());
+    assert!(request(&path, "discord-agent-1-3", "binding-1")
+        .await
+        .is_err());
+}
+
+/// The production path fits a Unix socket address (`sun_path`, 104 bytes on macOS).
+#[test]
+fn d1097_the_production_socket_path_fits_a_unix_socket_address() {
+    let dir = std::path::Path::new("/tmp/opencrab-prod-discord-0123456-0123456");
+    let path = socket_path(dir, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    assert!(path.as_os_str().len() < 104, "{}", path.display());
+    assert_ne!(
+        socket_path(dir, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        socket_path(dir, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    );
 }

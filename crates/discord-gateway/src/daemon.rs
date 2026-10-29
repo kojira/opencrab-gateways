@@ -137,11 +137,6 @@ pub trait GateReconciler: Send + Sync {
         desired: &InstanceRow,
         subject_grant: Option<&str>,
     ) -> Result<VerifiedInstance>;
-
-    /// Creates the core binding for one more address of a live instance and returns its id.
-    async fn bind(&self, _desired: &InstanceRow, _address: &str) -> Result<String> {
-        anyhow::bail!("binding a single address is not supported")
-    }
 }
 
 pub struct UdsGateReconciler {
@@ -220,22 +215,6 @@ impl GateReconciler for UdsGateReconciler {
                 .collect(),
             enabled: observed.enabled,
         })
-    }
-
-    async fn bind(&self, desired: &InstanceRow, address: &str) -> Result<String> {
-        // Same binding id rule as `GateAdminClient::reconcile`, so a later full reconcile finds it.
-        let namespace = uuid::Uuid::parse_str(&desired.instance_id)?;
-        let binding_id = uuid::Uuid::new_v5(&namespace, address.as_bytes()).to_string();
-        self.client
-            .put_binding(
-                &binding_id,
-                &desired.instance_id,
-                address,
-                &format!("extgate-{binding_id}"),
-                "gateway session",
-            )
-            .await?;
-        Ok(binding_id)
     }
 }
 

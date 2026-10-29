@@ -40,27 +40,25 @@ where
         }
     }
 
-    /// D-1097: adds `address` to a running instance without rebuilding it. Core sends the new
-    /// bind to the live child, so the child can deliver the message that asked for it.
-    pub async fn bind_address(&self, instance_id: &str, address: &str) -> Result<()> {
-        let row = self
+    /// D-1097: records an address the child already bound through its own core connection
+    /// (`create_binding`), so it survives a restart and the next reconcile keeps the binding.
+    pub fn record_bound_address(
+        &self,
+        instance_id: &str,
+        address: &str,
+        binding_id: &str,
+    ) -> Result<()> {
+        let store = self
             .store
             .lock()
-            .map_err(|_| anyhow::anyhow!("store poisoned"))?
-            .get(instance_id)?
-            .context("instance unknown")?;
+            .map_err(|_| anyhow::anyhow!("store poisoned"))?;
+        let row = store.get(instance_id)?.context("instance unknown")?;
         anyhow::ensure!(
             crate::config::parse_address_owner(&row.agent_id, address),
             "address does not belong to this agent"
         );
-        if row.addresses.iter().any(|a| a == address) {
-            return Ok(());
-        }
-        let binding_id = self.reconciler.bind(&row, address).await?;
-        self.store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("store poisoned"))?
-            .add_bound_address(instance_id, address, &binding_id)?;
+        anyhow::ensure!(!binding_id.is_empty(), "binding id required");
+        store.add_bound_address(instance_id, address, binding_id)?;
         Ok(())
     }
 
@@ -81,8 +79,13 @@ where
     R: GateReconciler + 'static,
     F: SpawnerFactory + 'static,
 {
-    async fn bind_address(&self, instance_id: &str, address: &str) -> Result<()> {
+    async fn record_address(
+        &self,
+        instance_id: &str,
+        address: &str,
+        binding_id: &str,
+    ) -> Result<()> {
         let daemon = self.0.upgrade().context("daemon stopped")?;
-        daemon.bind_address(instance_id, address).await
+        daemon.record_bound_address(instance_id, address, binding_id)
     }
 }

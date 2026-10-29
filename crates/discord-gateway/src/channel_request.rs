@@ -1,5 +1,8 @@
-//! D-1097: the one thing a bot child may ask its daemon for — bind one more channel address of
-//! its own instance (an owner @mentioned the bot there).
+//! D-1097: the one thing a bot child may tell its daemon — it bound one more channel address of
+//! its own instance (an owner @mentioned the bot there), so the daemon records it.
+//!
+//! The child creates the binding itself on its own core connection (`create_binding`); this
+//! socket only makes the daemon's store remember it across restarts.
 //!
 //! The daemon creates one Unix socket per instance (mode 0600) and gives its path only to that
 //! child. A request names an address; the instance is fixed by which socket it came in on, so
@@ -11,15 +14,23 @@ use std::path::{Path, PathBuf};
 /// What the daemon does for a request on an instance's socket.
 #[async_trait::async_trait]
 pub trait ChannelBinder: Send + Sync {
-    async fn bind_address(&self, instance_id: &str, address: &str) -> Result<()>;
+    async fn record_address(
+        &self,
+        instance_id: &str,
+        address: &str,
+        binding_id: &str,
+    ) -> Result<()>;
 }
 
-/// The socket path for `instance_id` under `dir`.
+/// The socket path for `instance_id` under `dir`. Kept short: a Unix socket path must fit in
+/// `sun_path` (104 bytes on macOS), and `dir` is already a per-release directory.
 pub fn socket_path(dir: &Path, instance_id: &str) -> PathBuf {
-    dir.join(format!("{instance_id}.channels.sock"))
+    let short: String = instance_id.chars().filter(|c| *c != '-').take(12).collect();
+    dir.join(format!("{short}.ch"))
 }
 
-/// Serves `instance_id`'s socket at `path`. Each request is one JSON line `{"address": ...}`,
+/// Serves `instance_id`'s socket at `path`. Each request is one JSON line
+/// `{"address": ..., "binding_id": ...}`,
 /// answered with one line `{"ok": bool, "error"?: ...}`.
 pub async fn serve(
     path: PathBuf,
@@ -56,6 +67,7 @@ pub async fn serve(
 #[serde(deny_unknown_fields)]
 struct Request {
     address: String,
+    binding_id: String,
 }
 
 async fn answer(
@@ -68,7 +80,11 @@ async fn answer(
     let mut line = String::new();
     tokio::io::BufReader::new(read).read_line(&mut line).await?;
     let result = match serde_json::from_str::<Request>(&line) {
-        Ok(request) => binder.bind_address(instance_id, &request.address).await,
+        Ok(request) => {
+            binder
+                .record_address(instance_id, &request.address, &request.binding_id)
+                .await
+        }
         Err(_) => Err(anyhow::anyhow!("bad_request")),
     };
     let reply = match result {
@@ -79,12 +95,12 @@ async fn answer(
     Ok(())
 }
 
-/// The child's side: asks for `address` and returns once the daemon has bound it.
-pub async fn request(path: &Path, address: &str) -> Result<()> {
+/// The child's side: tells the daemon it bound `address` as `binding_id`.
+pub async fn request(path: &Path, address: &str, binding_id: &str) -> Result<()> {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
     let call = async {
         let mut stream = tokio::net::UnixStream::connect(path).await?;
-        let line = serde_json::json!({ "address": address });
+        let line = serde_json::json!({ "address": address, "binding_id": binding_id });
         stream.write_all(format!("{line}\n").as_bytes()).await?;
         let mut reply = String::new();
         tokio::io::BufReader::new(stream)

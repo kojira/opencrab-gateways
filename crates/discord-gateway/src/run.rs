@@ -14,8 +14,7 @@ use opencrab_gate_client::{InvokeHandler, SayPolicy};
 
 use crate::attachment::AttachmentSpool;
 use crate::config::{
-    config_digest, parse_instance_config, AccessConfig, InstanceConfig, InstancePlacement,
-    SystemReactions,
+    parse_instance_config, AccessConfig, InstanceConfig, InstancePlacement, SystemReactions,
 };
 use crate::harness::HarnessOverrides;
 use crate::map::{
@@ -85,10 +84,7 @@ pub fn spawn_instance_with_voice(
     }
     let cfg = parse_instance_config(config_bytes)?;
     // D-1097 D2: the digest of what core holds (`InstancePlacement::hello_digest`).
-    let digest = place
-        .core_config_b64
-        .as_ref()
-        .map_or_else(|| Ok(config_digest(config_bytes)), |_| place.hello_digest())?;
+    let digest = place.hello_digest()?;
 
     // transport: dry-run（REST を叩かずログ）か production（serenity REST・token 保持）。
     // say も invoke も同一 transport を通すので dry-run 分岐は 1 箇所。
@@ -177,6 +173,7 @@ pub fn spawn_instance_with_voice(
     supervise(Supervision {
         client: client.clone(),
         addresses: place.addresses.clone(),
+        channel_socket: place.channel_socket.clone(),
         cfg,
         transport,
         token,
@@ -194,6 +191,7 @@ pub fn spawn_instance_with_voice(
 struct Supervision {
     client: Arc<InstanceClient>,
     addresses: Vec<String>,
+    channel_socket: Option<PathBuf>,
     cfg: InstanceConfig,
     transport: Arc<dyn DiscordTransport>,
     token: Option<Arc<String>>,
@@ -210,6 +208,7 @@ fn supervise(supervision: Supervision) {
     let Supervision {
         client,
         addresses,
+        channel_socket,
         cfg,
         transport,
         token,
@@ -233,7 +232,7 @@ fn supervise(supervision: Supervision) {
         attachment_spool,
         serenity_http,
         voice.clone(),
-        activity_store.clone(),
+        (activity_store.clone(), channel_socket),
     );
     tokio::spawn(async move {
         if let Some(fixture) = overrides.fake_events {
@@ -278,7 +277,7 @@ fn build_on_line(
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
     voice: Option<Arc<VoiceManager>>,
-    activity_store: Option<crate::webhook::RouteStore>,
+    (activity_store, channel_socket): (Option<crate::webhook::RouteStore>, Option<PathBuf>),
 ) -> OnLine {
     let model_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     Arc::new(move |line: String| {
@@ -292,6 +291,7 @@ fn build_on_line(
         let model_cache = model_cache.clone();
         let voice = voice.clone();
         let activity_store = activity_store.clone();
+        let channel_socket = channel_socket.clone();
         tokio::spawn(async move {
             let gate = (
                 &*client,
@@ -329,6 +329,8 @@ fn build_on_line(
                     return;
                 }
             }
+            let mention = (&*client, agent_id.as_str(), self_bot_id.as_str(), &access);
+            owner_mention::maybe_enable(mention, channel_socket.as_deref(), &line).await;
             handle_incoming(
                 &client,
                 &agent_id,
@@ -776,6 +778,7 @@ pub(crate) fn spawn_say_consumer(
 
 mod caller;
 mod model_command;
+mod owner_mention;
 #[cfg(test)]
 mod silent_origin_tests;
 mod thinking_command;
@@ -783,6 +786,9 @@ mod webhook_command;
 
 #[cfg(test)]
 mod caller_tests;
+
+#[cfg(test)]
+mod owner_mention_tests;
 
 #[cfg(test)]
 #[path = "run/webhook_command_tests.rs"]

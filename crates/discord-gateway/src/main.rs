@@ -87,17 +87,19 @@ async fn run() -> anyhow::Result<()> {
         anyhow::bail!("DISCORD_BOT_TOKEN が未設定（production は token 必須・dry-run 以外）");
     }
 
-    let inst = place
+    let mut inst = place
         .instances
         .first()
+        .cloned()
         .context("validated placement has no instance")?;
+    inst.channel_socket = place.channel_socket.as_deref().map(PathBuf::from);
     let bytes = decode_config_b64(&inst.config_b64)?;
     // VC 設定は placement が示す共有ファイル（daemon 配下）か、無ければ placement の隣の
     // voice/settings.json（instance モード）。無ければ VC は「未設定」を返す。
     let voice_settings = place.voice_settings_path(&path);
     let client = spawn_instance_with_voice(
         socket,
-        inst,
+        &inst,
         &bytes,
         token,
         overrides,

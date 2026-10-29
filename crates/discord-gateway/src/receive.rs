@@ -81,6 +81,7 @@ fn message_to_line(msg: &SerenityMessage) -> String {
             "nickname": msg.member.as_ref().and_then(|member| member.nick.as_deref()),
         },
         "content": msg.content,
+        "mentions": msg.mentions.iter().map(|user| user.id.get().to_string()).collect::<Vec<_>>(),
         "attachments": msg.attachments.iter().map(|attachment| serde_json::json!({
             "id": attachment.id.get().to_string(),
             "filename": attachment.filename,

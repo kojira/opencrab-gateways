@@ -65,6 +65,10 @@ pub struct InstancePlacement {
     /// its digest. Absent = the digest of `config_b64` (placements written before D-1097).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub core_config_b64: Option<String>,
+    /// D-1097: the channel-request socket, copied from [`Placement::channel_socket`] for the
+    /// running instance. Not part of the instance entry on disk.
+    #[serde(skip)]
+    pub channel_socket: Option<std::path::PathBuf>,
 }
 
 impl InstancePlacement {
@@ -374,6 +378,7 @@ mod tests {
                 addresses: vec!["discord-agent-x-100-200".into()],
                 config_b64: encode(&sample_config()),
                 core_config_b64: None,
+                channel_socket: None,
             }],
         };
         p.validate().unwrap();
@@ -400,6 +405,7 @@ mod tests {
                 addresses: vec!["discord-agent-x-100-200".into()],
                 config_b64: encode(&sample_config()),
                 core_config_b64: None,
+                channel_socket: None,
             }],
         };
         place("/data/attachments/outbox").validate().unwrap();
@@ -422,6 +428,7 @@ mod tests {
                 addresses: vec![],
                 config_b64: encode(&sample_config()),
                 core_config_b64: None,
+                channel_socket: None,
             }],
         };
         assert!(p.validate().is_err());
@@ -468,6 +475,7 @@ mod tests {
                 addresses: vec!["discord-agent-x--200".into()],
                 config_b64: encode(&sample_config()),
                 core_config_b64: None,
+                channel_socket: None,
             }],
         };
         p.validate().unwrap();
@@ -530,6 +538,7 @@ mod tests {
             addresses: vec!["discord-agent-x-100-200".into()],
             config_b64: encode(&sample_config()),
             core_config_b64: None,
+            channel_socket: None,
         };
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
@@ -619,6 +628,7 @@ mod core_config_tests {
             addresses: vec!["discord-a-1-2".into()],
             config_b64: config.clone(),
             core_config_b64: None,
+            channel_socket: None,
         };
         assert_eq!(
             place.hello_digest().unwrap(),

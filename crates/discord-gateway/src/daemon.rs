@@ -35,6 +35,15 @@ pub struct DaemonConfig {
     /// D-1097: the VC settings file (see [`DaemonConfig::voice_settings_path`]).
     #[serde(default)]
     pub voice_settings: Option<PathBuf>,
+    /// D-1097: the gate-admin principal's creation namespace. When set, the admin socket may
+    /// create a bot for an agent that has none (instance id = core's namespace rule), and
+    /// instances under it are in admin scope without listing them in `admin_instance_ids`.
+    #[serde(default)]
+    pub creation_namespace: Option<uuid::Uuid>,
+    /// D-1097: core's public HTTP API, read by the settings page for the agent list
+    /// (for example `http://127.0.0.1:8080`).
+    #[serde(default)]
+    pub core_api: Option<String>,
 }
 
 fn default_reconcile_millis() -> u64 {
@@ -659,10 +668,23 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             voice_settings: config.voice_settings_path(),
         }),
     )?;
-    let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());
-    let _admin = crate::admin::spawn(
+    let grants = config
+        .creation_namespace
+        .map(|_| {
+            crate::subject_grant::GateAdminGrants::from_credential_file(
+                config.gate_admin_socket.clone(),
+                &config.gate_admin_credential,
+            )
+            .map(|issuer| Arc::new(issuer) as Arc<dyn crate::subject_grant::SubjectGrantIssuer>)
+        })
+        .transpose()?;
+    let _admin = crate::admin::spawn_with(
         config.admin_socket.clone(),
-        admin_scope,
+        crate::admin::AdminContext {
+            scope: Arc::new(config.admin_instance_ids.iter().cloned().collect()),
+            creation_namespace: config.creation_namespace,
+            grants,
+        },
         daemon.store(),
         Arc::new(raw),
     );

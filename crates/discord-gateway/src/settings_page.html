@@ -22,8 +22,16 @@ iframe { width: 100%; border: 1px solid #ccc; height: 900px; }
 <nav id="tabs"></nav>
 <div id="panel"></div>
 <fieldset id="create"><legend>新しいエージェントの bot</legend>
-  <p>まだこの画面からは作れません。bot を持っていないエージェントに新しく bot を付けるには、いまは運用側の作業（gate-admin の付与）が必要です。
-  bot を持っているエージェントは、上のタブからトークン・オーナー・チャンネル・起動停止を変えられます。</p>
+  <p>bot をまだ持っていないエージェントに bot を付けます。トークンは Discord に確認して bot ID を自動で入れます（表示はしません）。</p>
+  <label>エージェント<select id="c-agent"></select></label>
+  <label>bot トークン<input id="c-token" type="password" autocomplete="off"></label>
+  <label>オーナー（Discord ユーザー ID。改行区切り）<textarea id="c-owners"></textarea></label>
+  <div class="row">
+    <label>サーバー ID（DM は空欄）<input id="c-guild"></label>
+    <label>チャンネル ID<input id="c-channel"></label>
+  </div>
+  <button id="c-save">bot を作る</button>
+  <div class="status" id="c-status"></div>
 </fieldset>
 <script>
 const api = "api/instances";
@@ -166,6 +174,42 @@ function render() {
   };
 }
 
+async function loadAgents() {
+  const select = document.getElementById("c-agent");
+  const res = await fetch("api/agents");
+  if (!res.ok) { document.getElementById("c-status").textContent = `エージェント一覧を読めません: ${await errorText(res)}`; return; }
+  const { agents } = await res.json();
+  select.innerHTML = "";
+  for (const a of agents.filter(a => !a.has_bot)) {
+    const opt = document.createElement("option");
+    opt.value = a.id; opt.textContent = `${a.name || a.id}（${a.id}）`;
+    select.appendChild(opt);
+  }
+  if (!select.options.length) document.getElementById("c-status").textContent = "bot を持っていないエージェントはいません。";
+}
+
+document.getElementById("c-save").onclick = async () => {
+  const status = document.getElementById("c-status");
+  const token = document.getElementById("c-token").value.trim();
+  document.getElementById("c-token").value = "";
+  status.textContent = "Discord にトークンを確認して作っています…";
+  const res = await fetch(api, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      agent_id: document.getElementById("c-agent").value,
+      credential: token,
+      owners: lines(document.getElementById("c-owners").value),
+      guild_id: document.getElementById("c-guild").value.trim(),
+      channel_id: document.getElementById("c-channel").value.trim(),
+    }),
+  });
+  if (!res.ok) { status.textContent = `作れません: ${await errorText(res)}`; return; }
+  const body = await res.json();
+  status.textContent = `作りました（bot ID ${body.self_bot_id}）。数秒でつながります。`;
+  await load(body.instance_id);
+  await loadAgents();
+};
+
 async function load(keep) {
   const res = await fetch(api);
   if (!res.ok) { document.getElementById("panel").textContent = `読み込めません: ${await errorText(res)}`; return; }
@@ -175,6 +219,7 @@ async function load(keep) {
 }
 
 load();
+loadAgents();
 </script>
 </body>
 </html>

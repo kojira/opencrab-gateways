@@ -243,6 +243,10 @@ async fn fake_discord(known: &'static str, id: &'static str) -> String {
 }
 
 async fn fixture_with_discord(discord: String) -> Fixture {
+    fixture_with(discord, None).await
+}
+
+async fn fixture_with(discord: String, core: Option<String>) -> Fixture {
     let mut f = fixture().await;
     for task in f.tasks.drain(1..) {
         task.abort();
@@ -256,6 +260,7 @@ async fn fixture_with_discord(discord: String) -> Fixture {
         socket,
         voice,
         DiscordApi::new(discord),
+        core,
     )));
     f
 }
@@ -353,22 +358,75 @@ async fn d1097_channel_field_adds_the_channel_address() {
     );
 }
 
-/// Slice 1: the page says plainly that a new agent's bot needs an operator step for now.
+/// A fake core `GET /api/agents`.
+async fn fake_core_agents() -> String {
+    let app = axum::Router::new().route(
+        "/api/agents",
+        axum::routing::get(|| async {
+            axum::Json(serde_json::json!([
+                {"id":"agent-a","name":"A"},{"id":"agent-b","name":"B"},{"id":"agent-new","name":"New"}
+            ]))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    base
+}
+
+/// The create form lists core's agents and marks those that already have a bot.
 #[tokio::test]
-async fn d1097_page_says_new_agents_need_an_operator_grant() {
-    let f = fixture().await;
+async fn d1097_page_lists_core_agents_and_which_have_a_bot() {
+    let discord = fake_discord("good-token", "999999999999999999").await;
+    let f = fixture_with(discord, Some(fake_core_agents().await)).await;
     let html = reqwest::get(format!("{}/", f.base))
         .await
         .unwrap()
         .text()
         .await
         .unwrap();
-    assert!(
-        html.contains("新しいエージェントの bot"),
-        "create section present"
-    );
-    assert!(
-        html.contains("まだこの画面からは作れません"),
-        "explains it is not available yet"
-    );
+    assert!(html.contains("新しいエージェントの bot"));
+    assert!(!html.contains("まだこの画面からは作れません"));
+    let agents: serde_json::Value = reqwest::get(format!("{}/api/agents", f.base))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = agents["agents"].as_array().unwrap();
+    let has = |id: &str| rows.iter().find(|a| a["id"] == id).unwrap()["has_bot"].clone();
+    assert_eq!(has("agent-a"), true);
+    assert_eq!(has("agent-new"), false);
+}
+
+/// The create route checks the token with Discord, then asks the daemon to create the bot with
+/// the bot id the token belongs to.
+#[tokio::test]
+async fn d1097_create_route_checks_the_token_and_forwards_to_the_daemon() {
+    let discord = fake_discord("good-token", "999999999999999999").await;
+    let f = fixture_with(discord, None).await;
+    let http = reqwest::Client::new();
+    let body = |token: &str| {
+        serde_json::json!({"agent_id":"agent-new","credential":token,
+            "owners":["222222222222222222"],"guild_id":"100","channel_id":"200"})
+    };
+    let bad = http
+        .post(format!("{}/api/instances", f.base))
+        .json(&body("wrong"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    assert!(!bad.text().await.unwrap().contains("create_unavailable"));
+    let good = http
+        .post(format!("{}/api/instances", f.base))
+        .json(&body("good-token"))
+        .send()
+        .await
+        .unwrap();
+    // The fixture's daemon has no creation namespace, so the daemon refuses: the route reached it.
+    assert_eq!(good.status(), 400);
+    let text = good.text().await.unwrap();
+    assert!(text.contains("create_unavailable"), "{text}");
+    assert!(!text.contains("good-token"));
 }

@@ -509,3 +509,67 @@ async fn d1097_disabling_stops_the_running_bot_and_enabling_restarts_it() {
     );
     daemon.shutdown().await;
 }
+
+/// D-1097 create path: the grant stored by `create` reaches core's instance PUT on the first
+/// reconcile, and is cleared once core has verified the instance.
+#[tokio::test]
+async fn d1097_a_created_bot_is_put_in_core_with_its_grant_and_starts() {
+    struct GrantGate(Mutex<Vec<Option<String>>>);
+    #[async_trait]
+    impl GateReconciler for GrantGate {
+        async fn observe(
+            &self,
+            _: &InstanceRow,
+        ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
+            Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Mismatch)
+        }
+        async fn reconcile(
+            &self,
+            desired: &InstanceRow,
+            grant: Option<&str>,
+        ) -> Result<VerifiedInstance> {
+            self.0.lock().unwrap().push(grant.map(str::to_string));
+            Ok(VerifiedInstance {
+                revision: 1,
+                digest: "neutral".into(),
+                bindings: desired.addresses.clone(),
+                enabled: desired.enabled,
+            })
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    let plan = crate::admin_settings::plan_create(
+        "agent",
+        "555555555555555555",
+        &["222222222222222222".into()],
+        &["discord-agent-1-2".into()],
+        "bot-token",
+    )
+    .unwrap();
+    let grant = crate::subject_grant::SubjectGrant {
+        subject_id: 11,
+        grant: zeroize::Zeroizing::new("single-use-grant".into()),
+    };
+    crate::admin_settings::store_create(&store, A, &plan, &grant, &KEY).unwrap();
+    let gate = Arc::new(GrantGate(Mutex::new(Vec::new())));
+    let factory = Arc::new(CountingFactory::default());
+    let daemon = DiscordDaemon::new(store, KEY, gate.clone(), factory.clone()).unwrap();
+    daemon.reconcile_once().await.unwrap();
+    assert_eq!(
+        gate.0.lock().unwrap().clone(),
+        vec![Some("single-use-grant".to_string())]
+    );
+    assert_eq!(
+        factory.starts.lock().unwrap().get(A),
+        Some(&1),
+        "the bot starts"
+    );
+    let row = daemon.store().lock().unwrap().get(A).unwrap().unwrap();
+    assert!(
+        row.subject_grant_envelope.is_none(),
+        "the used grant is not kept"
+    );
+    assert_eq!(row.subject_id, 11);
+    daemon.shutdown().await;
+}

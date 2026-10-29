@@ -7,6 +7,9 @@
 //!
 //! - `GET  /`                                   one HTML page for every instance plus voice
 //! - `GET  /api/instances`                      every instance (no secrets)
+//! - `POST /api/instances`                      a new bot: `{agent_id, credential, owners,
+//!                                              guild_id, channel_id}` (token checked with Discord)
+//! - `GET  /api/agents`                         core's agents, with `has_bot`
 //! - `PUT  /api/instances/{id}/config`          the whole Discord instance config (JSON)
 //! - `PUT  /api/instances/{id}/addresses`       `{"addresses": [...]}`
 //! - `PUT  /api/instances/{id}/credential`      `{"credential": "<bot token>"}` (write-only)
@@ -32,6 +35,8 @@ const PAGE: &str = include_str!("settings_page.html");
 struct AppState {
     admin_socket: PathBuf,
     discord: DiscordApi,
+    /// Core's public HTTP API (`http://127.0.0.1:8080`), read only for the agent list.
+    core_api: Option<String>,
     http: reqwest::Client,
 }
 
@@ -48,7 +53,14 @@ pub async fn run(config: crate::daemon::DaemonConfig, bind: SocketAddr) -> anyho
     let voice = config.voice_settings_path();
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(addr = %listener.local_addr()?, "discord settings UI listening");
-    serve_on(listener, config.admin_socket, voice).await
+    serve_with(
+        listener,
+        config.admin_socket,
+        voice,
+        DiscordApi::new(DISCORD_API),
+        config.core_api.clone(),
+    )
+    .await
 }
 
 /// How the page asks Discord which bot a token belongs to.
@@ -112,6 +124,7 @@ pub async fn serve_on(
         admin_socket,
         voice_settings,
         DiscordApi::new(DISCORD_API),
+        None,
     )
     .await
 }
@@ -121,15 +134,18 @@ pub async fn serve_with(
     admin_socket: PathBuf,
     voice_settings: PathBuf,
     discord: DiscordApi,
+    core_api: Option<String>,
 ) -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         admin_socket,
         discord,
+        core_api,
         http: reqwest::Client::new(),
     });
     let app = Router::new()
         .route("/", get(|| async { Html(PAGE) }))
-        .route("/api/instances", get(list))
+        .route("/api/instances", get(list).post(create))
+        .route("/api/agents", get(agents))
         .route("/api/instances/{id}/credential", put(set_credential))
         .route("/api/instances/{id}/channels", post(add_channel))
         .route("/api/instances/{id}/{field}", put(update))
@@ -262,6 +278,111 @@ async fn add_channel(
         "instance_id":id,"addresses":addresses});
     match admin(&state, request).await {
         Ok(value) => Json(value).into_response(),
+        Err(AdminError::Rejected(message)) => error(StatusCode::BAD_REQUEST, message),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// Core's agents, each marked with whether it already has a bot here.
+async fn agents(State(state): Shared) -> Response {
+    let Some(core) = &state.core_api else {
+        return error(StatusCode::NOT_FOUND, "the core API is not configured");
+    };
+    let listed = match admin(&state, json!({"id":"settings","op":"list"})).await {
+        Ok(value) => value,
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    };
+    let with_bot: std::collections::BTreeSet<String> = listed["instances"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["agent_id"].as_str().map(str::to_string))
+        .collect();
+    let response = match state.http.get(format!("{core}/api/agents")).send().await {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("core answered {}", response.status()),
+            )
+        }
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("core: {e}")),
+    };
+    let body: Value = match response.json().await {
+        Ok(body) => body,
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("core: {e}")),
+    };
+    let rows: Vec<Value> = body
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|agent| {
+            let id = agent["id"].as_str()?;
+            Some(json!({"id": id, "name": agent["name"], "has_bot": with_bot.contains(id)}))
+        })
+        .collect();
+    Json(json!({ "agents": rows })).into_response()
+}
+
+/// A new bot for an agent that has none: check the token with Discord (that gives the bot id),
+/// then let the daemon create it. `guild_id` + `channel_id` give its first channel.
+async fn create(State(state): Shared, Json(body): Json<Value>) -> Response {
+    let agent = body["agent_id"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let token = body["credential"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let owners: Vec<String> = body["owners"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let guild = body["guild_id"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let channel = body["channel_id"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if agent.is_empty() || token.is_empty() || owners.is_empty() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "agent, bot token and at least one owner are required",
+        );
+    }
+    let mut addresses = Vec::new();
+    if !channel.is_empty() {
+        if !crate::config::is_snowflake(&channel)
+            || !(guild.is_empty() || crate::config::is_snowflake(&guild))
+        {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "server and channel ids must be Discord ids",
+            );
+        }
+        addresses.push(crate::map::address_for(&agent, &guild, &channel));
+    }
+    let bot_id = match state.discord.bot_id(&state.http, &token).await {
+        Ok(id) => id,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let request = json!({"id":"settings","op":"create","agent_id":agent,"credential":token,
+        "self_bot_id":bot_id,"owners":owners,"addresses":addresses});
+    match admin(&state, request).await {
+        Ok(mut value) => {
+            value["self_bot_id"] = json!(bot_id);
+            Json(value).into_response()
+        }
         Err(AdminError::Rejected(message)) => error(StatusCode::BAD_REQUEST, message),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }

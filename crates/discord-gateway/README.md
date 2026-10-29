@@ -23,11 +23,6 @@ discord-gateway voice-settings <settings.json> <port>    # 旧 VC 設定画面�
 {
   "database_path": "/srv/opencrab/data/discord-gateway.db",
   "admin_socket": "/srv/opencrab/data/run/discord-admin.sock",
-  "admin_instance_ids": [
-    "<既存 instance id 1>", "<既存 instance id 2>", "<既存 instance id 3>"
-  ],
-  "gate_admin_socket": "/srv/opencrab/data/run/gate-admin.sock",
-  "gate_admin_credential": "/srv/opencrab/data/secrets/gate-admin/discord.token",
   "core_socket": "/srv/opencrab/data/run/gate.sock",
   "child_binary": "/srv/releases/opencrab-<tag>/bin/discord-gateway",
   "placement_dir": "/tmp/opencrab-prod-discord-<tag>",
@@ -51,15 +46,12 @@ discord-gateway voice-settings <settings.json> <port>    # 旧 VC 設定画面�
 |---|---|---|
 | `database_path` | ○ | gateway の DB。instance の設定・暗号化した bot トークン・状態。隣に `.lock` を作る |
 | `admin_socket` | ○ | 設定用 UDS（mode 0600）。`settings` プロセスがここに接続する |
-| `admin_instance_ids` | | 設定画面から触れてよい instance。**取り込んだ既存 instance の id を全部並べる**。空なら既存 bot は画面に出ない |
-| `gate_admin_socket` / `gate_admin_credential` | ○ | core の gate-admin UDS と、そのクレデンシャル（mode 0600 のファイル） |
-| `core_socket` | ○ | core の gate UDS。子が接続する |
+| `core_socket` | ○ | core の gate UDS。daemon が instance を provision し、子が接続する |
 | `child_binary` | ○ | 子として起動する `discord-gateway` |
 | `placement_dir` | ○ | 子の配置・制御ソケット・チャンネル要求ソケットを置く場所。release ごとに分ける |
 | `attachment_spool_root` / `attachment_outbox_root` | | 受信添付の置き場 / 送信添付の置き場（core の workspace） |
 | `voice_settings` | | VC 設定ファイル。省略時は `database_path` と同じディレクトリの `voice/settings.json` |
 | `core_api` | | core の HTTP（エージェント一覧の取得にだけ使う）。無いと設定画面の「新しい bot」が使えない |
-| `creation_namespace` | | 新しい bot を作るときの instance id の名前空間（後述） |
 | `legacy_import` | | 初回だけ取り込む instance モードの配置とトークン（後述） |
 | `reconcile_millis` | | reconcile の間隔。既定 1000 |
 
@@ -69,12 +61,15 @@ env:
 
 ## core とのやりとり
 
-instance と binding について core とやりとりするコードは、`src/core_provisioning.rs` の 1 か所にまとまっている。それ以外の部分は trait（`GateReconciler`・`SubjectGrantIssuer`・`SubjectLookup`）しか見ない。
+core とのやりとりは `src/core_provisioning.rs` の 1 か所（`ProvisionReconciler`）にまとまっている。それ以外の部分は trait `GateReconciler` しか見ない。core のクレデンシャルは要らない。
 
-現在は core の gate-admin API を使っている。gate-admin のクレデンシャルの範囲（principal の scope）と、新しい bot を作る方法は、core 側で見直し中（Issue #1033）。決まったら `core_provisioning.rs` だけを差し替える。
+1. daemon はその bot の子を止める。
+2. core の gate UDS に新しい接続を張り、`hello` の前に `provision` を 1 回送る。中身は instance id、kind `discord`、agent、`enabled`、固定の中立 config、DB にあるチャンネル全部（binding id は `uuid5(instance_id, address)`）。
+3. core が返した revision と config digest を DB に記録し、子を起動する。子はその revision で `hello` する。
 
-- いまのクレデンシャルで扱えるのは、principal の範囲に入っている instance だけ。既存の 3 bot は、exact scope の principal で運用できる。
-- 新しい bot の作成（設定画面の「新しい bot」と admin の `create`）を使うには、`creation_namespace` の principal と core の `POST /api/gate-subject-grants` が必要になる。そのため、上の見直しが決まるまでは本番では使わない。
+送ったチャンネルの一覧が core 側の正になる。一覧に無い binding は core が閉じる。
+
+新しい bot（設定画面の「新しい bot」と admin の `create`）は、新しい UUID v4 の instance id で作る。エージェント 1 つにつき bot は 1 つ。
 
 ## 初回の取り込み（legacy_import）
 
@@ -82,10 +77,9 @@ DB が空のときだけ、次の手順で取り込む。1 件でも問題があ
 
 1. `placements` の各配置を検証する。instance は 1 つだけ。`run_env` を持つ配置は取り込まない。
 2. 各 bot について、`<token_dir>/<agent_id>.token` を読む。通常ファイル・mode 0600・空でないことが条件。
-3. core に、各 instance の kind（`discord` であること）と subject を問い合わせる。
-4. 全行を 1 つのトランザクションで書く。トークンは暗号化する。
+3. 全行を 1 つのトランザクションで書く。トークンは暗号化する。instance id は配置にあるものをそのまま使う。
 
-core にまだつながらないときは、つながるまで 1 秒ごとに待つ。それ以外の問題（配置の不備、トークンの不備、kind の不一致など）では、daemon は起動しない。
+core には何も問い合わせない。最初の reconcile がそのままの id で provision する。問題（配置の不備、トークンの不備）があれば daemon は起動しない。
 
 取り込んだあとは、配置ファイルを二度と読まない。設定は DB が正になる。
 

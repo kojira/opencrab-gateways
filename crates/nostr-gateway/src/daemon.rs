@@ -552,12 +552,13 @@ async fn wait_for_child_readiness<F: SpawnerFactory + 'static>(
     }
 }
 
-struct ProductionFactory {
-    child_binary: PathBuf,
-    core_socket: PathBuf,
-    placement_dir: PathBuf,
-    nostaro_bin: PathBuf,
-    attachment_outbox_root: Option<PathBuf>,
+/// The production child spawner: writes the daemon-owned child placement and starts the child.
+pub struct ProductionFactory {
+    pub child_binary: PathBuf,
+    pub core_socket: PathBuf,
+    pub placement_dir: PathBuf,
+    pub nostaro_bin: PathBuf,
+    pub attachment_outbox_root: Option<PathBuf>,
 }
 
 impl SpawnerFactory for ProductionFactory {

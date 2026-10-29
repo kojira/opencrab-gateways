@@ -88,7 +88,7 @@ async fn wire_hb(core: &Core, fixture: &Fixture, channel: &str) -> (Arc<Instance
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
 
-    let binding_id = provision(core, &instance_id, "discord", &config_b64, &[addr.clone()])
+    let binding_id = provision(core, &instance_id, "discord", &config_b64, std::slice::from_ref(&addr))
         .await
         .remove(0);
 
@@ -125,7 +125,7 @@ async fn provision_hb_no_gateway(core: &Core, channel: &str) -> String {
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
-    let binding_id = provision(core, &instance_id, "discord", &config_b64, &[addr.clone()])
+    let binding_id = provision(core, &instance_id, "discord", &config_b64, std::slice::from_ref(&addr))
         .await
         .remove(0);
     binding_id

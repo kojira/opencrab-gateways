@@ -550,7 +550,7 @@ async fn wire_instance(
     let address = format!("nostr-{AGENT_ID}");
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
 
-    let binding_id = provision(core, &instance_id, "nostr", &config_b64, &[address.clone()])
+    let binding_id = provision(core, &instance_id, "nostr", &config_b64, std::slice::from_ref(&address))
         .await
         .remove(0);
 

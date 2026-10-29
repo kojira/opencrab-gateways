@@ -27,6 +27,10 @@ pub(crate) fn binding_id_for(instance_id: &str, address: &str) -> Option<String>
     opencrab_gate_client::provision::binding_id_for(instance_id, address).ok()
 }
 
+/// Session theme core's `provision` gives its bindings. A binding created with any other theme
+/// is a `binding_conflict` on the next provision, so the daemon could not restart the bot.
+const BINDING_SESSION_THEME: &str = "gateway session";
+
 /// Creates the binding on this child's own core connection, waits for core's bind, then tells
 /// the daemon (when there is one) so the store keeps it. True = the channel is bound.
 pub(crate) async fn enable_channel(
@@ -38,7 +42,7 @@ pub(crate) async fn enable_channel(
         return false;
     };
     if let Err(error) = client
-        .create_binding(&binding_id, address, "Discord channel")
+        .create_binding(&binding_id, address, BINDING_SESSION_THEME)
         .await
     {
         tracing::warn!(%address, error = ?error, "owner mention: core refused the channel");

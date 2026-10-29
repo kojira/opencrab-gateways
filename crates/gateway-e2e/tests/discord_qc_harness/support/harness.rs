@@ -206,7 +206,14 @@ pub(crate) async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<Instanc
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = address();
 
-    provision(core, &instance_id, "discord", &config_b64, &[addr.clone()]).await;
+    provision(
+        core,
+        &instance_id,
+        "discord",
+        &config_b64,
+        std::slice::from_ref(&addr),
+    )
+    .await;
 
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
@@ -255,7 +262,14 @@ pub(crate) async fn wire_instance_on_channel(
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
 
-    provision(core, &instance_id, "discord", &config_b64, &[addr.clone()]).await;
+    provision(
+        core,
+        &instance_id,
+        "discord",
+        &config_b64,
+        std::slice::from_ref(&addr),
+    )
+    .await;
 
     let place = InstancePlacement {
         instance_id: instance_id.clone(),

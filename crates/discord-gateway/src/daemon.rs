@@ -548,7 +548,7 @@ async fn wait_for_child_readiness<F: SpawnerFactory + 'static>(
 
 #[path = "daemon_production.rs"]
 mod production;
-use production::ProductionFactory;
+pub use production::ProductionFactory;
 
 pub async fn run(config: DaemonConfig) -> Result<()> {
     config.validate()?;

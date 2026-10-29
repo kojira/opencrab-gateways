@@ -7,17 +7,17 @@ use opencrab_process_supervisor::ChildSpawner;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub(crate) struct ProductionFactory {
-    pub(crate) child_binary: PathBuf,
-    pub(crate) core_socket: PathBuf,
-    pub(crate) placement_dir: PathBuf,
-    pub(crate) attachment_spool_root: Option<PathBuf>,
-    pub(crate) attachment_outbox_root: Option<PathBuf>,
+pub struct ProductionFactory {
+    pub child_binary: PathBuf,
+    pub core_socket: PathBuf,
+    pub placement_dir: PathBuf,
+    pub attachment_spool_root: Option<PathBuf>,
+    pub attachment_outbox_root: Option<PathBuf>,
     /// Gateway store DB. The instance opens it for the per-session activity webhook routes
     /// (D-1087); the daemon owns the schema and the master key.
-    pub(crate) database_path: PathBuf,
+    pub database_path: PathBuf,
     /// D-1097: the shared VC settings file the settings page writes.
-    pub(crate) voice_settings: PathBuf,
+    pub voice_settings: PathBuf,
 }
 
 impl SpawnerFactory for ProductionFactory {

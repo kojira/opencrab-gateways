@@ -10,21 +10,22 @@ nostr-gateway instance /path/to/placement.json
 nostr-gateway settings /path/to/daemon.json 0.0.0.0:8794
 ```
 
-`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。`instance` はplacementに従ってcore UDSへ接続し、watch childを起動する。`daemon` と `instance` は HTTP listen と server proxy を作らない（設定画面は別プロセスの `settings` が引数の bind で listen する）。
+`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。reconcile は子を止め、core の gate UDS に `hello` の前の `provision`（instance id、kind `nostr`、agent、`enabled`、固定の中立 config `{"delivery_mode":"tool_driven"}`、address 1 つ。binding id は `uuid5(instance_id, address)`）を送り、返った revision で子を起動する。core のクレデンシャルは要らない。`instance` はplacementに従ってcore UDSへ接続し、watch childを起動する。`daemon` と `instance` は HTTP listen と server proxy を作らない（設定画面は別プロセスの `settings` が引数の bind で listen する）。
 
 ```json
 {
   "database_path": "/var/lib/opencrab-nostr/gateway.db",
-  "core_database_path": "/var/lib/opencrab/opencrab.db",
-  "legacy_database_path": "/var/lib/opencrab/opencrab.db",
   "admin_socket": "/run/opencrab/nostr-admin.sock",
   "core_socket": "/run/opencrab/gate.sock",
+  "child_binary": "/usr/local/bin/nostr-gateway",
+  "placement_dir": "/var/lib/opencrab-nostr/placements",
   "nostaro_bin": "/usr/local/bin/nostaro",
-  "placement_dir": "/var/lib/opencrab-nostr/placements"
+  "attachment_outbox_root": "/var/lib/opencrab/attachments/outbox",
+  "reconcile_millis": 1000
 }
 ```
 
-`legacy_database_path`は一回限りのimport元であり、完了marker後のruntime読取には使わない。admin UDSは0600で、秘密鍵を応答へ含めない。`database_path`と`core_database_path`を同一pathにしてはならない。
+`attachment_outbox_root` と `reconcile_millis`（既定 1000）は省略できる。知らないキーがあると起動しない。daemon は env `OPENCRAB_SECRET_MASTER_KEY`（DB 内の nsec を暗号化する鍵）を必須とする。admin UDSは0600で、秘密鍵を応答へ含めない。
 
 `NOSTARO_SECRET_KEY` は起動時に process env から除去し、watch child env にだけ渡す。argv・log・status・config に出さない。
 
@@ -71,7 +72,7 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 
 ## 設定画面（D-1097）
 
-`nostr-gateway settings <daemon.json> <bind>` を別プロセスで起動する（本番は `0.0.0.0:8794`、Tailscale から開く）。状態を持たず、daemon の admin socket（mode 0600）を通して読み書きする。admin scope の全 instance を列挙し、暗黙に 1 つを選ばない。
+`nostr-gateway settings <daemon.json> <bind>` を別プロセスで起動する（本番は `0.0.0.0:8794`、Tailscale から開く）。状態を持たず、daemon の admin socket（mode 0600）を通して読み書きする。gateway の DB にある全 instance を列挙し、暗黙に 1 つを選ばない。
 
 | HTTP | 内容 | admin op |
 |---|---|---|
@@ -86,4 +87,4 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 
 - 設定の変更は desired generation を上げて `pending` に戻すので、daemon の reconcile（既定 1 秒）が子を作り直す。どのプロセスも手で再起動しない。
 - 秘密（nsec）は応答・ログ・URL に出さない。表示は「設定済み／未設定」だけ。
-- 範囲外の instance は `scope_denied`（HTTP 404）。不正な値は状態を変えずに 400。
+- 無い instance は HTTP 404。不正な値は状態を変えずに 400。

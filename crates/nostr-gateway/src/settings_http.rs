@@ -49,6 +49,18 @@ struct AppState {
 
 type Shared = State<Arc<AppState>>;
 
+/// A request failure: an HTTP status and a message without secrets.
+struct Failure {
+    status: StatusCode,
+    message: String,
+}
+
+impl IntoResponse for Failure {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
+
 /// Load the daemon config, then serve the page on `bind` (e.g. `0.0.0.0:8794`).
 pub async fn run(daemon_config: PathBuf, bind: String) -> anyhow::Result<()> {
     let config = crate::daemon::DaemonConfig::load(&daemon_config)?;
@@ -105,7 +117,7 @@ async fn admin(
     op: &str,
     instance_id: &str,
     extra: Value,
-) -> Result<Value, Response> {
+) -> Result<Value, Failure> {
     let mut request =
         json!({"id": op, "op": op, "scope_instance_id": instance_id, "instance_id": instance_id});
     if let Value::Object(fields) = extra {
@@ -113,8 +125,8 @@ async fn admin(
             request[key] = value;
         }
     }
-    let unavailable = |_| {
-        fail(
+    let unavailable = |_: std::io::Error| {
+        failure(
             StatusCode::SERVICE_UNAVAILABLE,
             "nostr gateway is not reachable",
         )
@@ -123,7 +135,7 @@ async fn admin(
         .await
         .map_err(unavailable)?;
     let mut line = serde_json::to_vec(&request)
-        .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "encode"))?;
+        .map_err(|_| failure(StatusCode::INTERNAL_SERVER_ERROR, "encode"))?;
     line.push(b'\n');
     stream.write_all(&line).await.map_err(unavailable)?;
     let mut reply = String::new();
@@ -132,7 +144,7 @@ async fn admin(
         .await
         .map_err(unavailable)?;
     let reply: Value = serde_json::from_str(&reply)
-        .map_err(|_| fail(StatusCode::BAD_GATEWAY, "bad admin reply"))?;
+        .map_err(|_| failure(StatusCode::BAD_GATEWAY, "bad admin reply"))?;
     if reply["ok"] == json!(true) {
         return Ok(reply["result"].clone());
     }
@@ -141,21 +153,24 @@ async fn admin(
         "scope_denied" | "instance unknown" => StatusCode::NOT_FOUND,
         _ => StatusCode::BAD_REQUEST,
     };
-    Err(fail(status, error))
+    Err(Failure {
+        status,
+        message: error,
+    })
 }
 
 async fn list(State(state): Shared) -> Response {
     let socket = &state.settings.admin_socket;
     let listed = match admin(socket, "list", "", json!({})).await {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(failure) => return failure.into_response(),
     };
     let mut instances = Vec::new();
     for item in listed["instances"].as_array().cloned().unwrap_or_default() {
         let id = item["instance_id"].as_str().unwrap_or_default().to_string();
         match admin(socket, "get", &id, json!({})).await {
             Ok(detail) => instances.push(detail),
-            Err(response) => return response,
+            Err(failure) => return failure.into_response(),
         }
     }
     Json(json!({ "instances": instances })).into_response()
@@ -245,7 +260,7 @@ async fn edit_enabled(
 
 /// The instance's watch registry. The first open seeds an absent store from the instance's
 /// stored config, exactly as the child does, so opening the page first loses nothing.
-async fn registry(state: &AppState, id: &str) -> Result<Arc<WatchRegistry>, Response> {
+async fn registry(state: &AppState, id: &str) -> Result<Arc<WatchRegistry>, Failure> {
     if let Some(found) = state
         .watches
         .lock()
@@ -257,7 +272,7 @@ async fn registry(state: &AppState, id: &str) -> Result<Arc<WatchRegistry>, Resp
     // Ask the daemon first: unknown or out-of-scope ids never get a file.
     let detail = admin(&state.settings.admin_socket, "get", id, json!({})).await?;
     if detail.is_null() {
-        return Err(fail(StatusCode::NOT_FOUND, "instance unknown"));
+        return Err(failure(StatusCode::NOT_FOUND, "instance unknown"));
     }
     let seed: Vec<WatchPlacement> =
         serde_json::from_value(detail["settings"]["watches"].clone()).unwrap_or_default();
@@ -266,7 +281,7 @@ async fn registry(state: &AppState, id: &str) -> Result<Arc<WatchRegistry>, Resp
         id,
     );
     let opened = WatchRegistry::load(path, &seed)
-        .map_err(|_| fail(StatusCode::INTERNAL_SERVER_ERROR, "watch store unavailable"))?;
+        .map_err(|_| failure(StatusCode::INTERNAL_SERVER_ERROR, "watch store unavailable"))?;
     let mut map = state.watches.lock().unwrap_or_else(|e| e.into_inner());
     Ok(map.entry(id.to_string()).or_insert(opened).clone())
 }
@@ -274,7 +289,7 @@ async fn registry(state: &AppState, id: &str) -> Result<Arc<WatchRegistry>, Resp
 async fn list_watches(State(state): Shared, Path(id): Path<String>) -> Response {
     let registry = match registry(&state, &id).await {
         Ok(registry) => registry,
-        Err(response) => return response,
+        Err(failure) => return failure.into_response(),
     };
     // The agent (watch_set / watch_delete) may have written the file since the last read.
     registry.reload_if_changed();
@@ -288,7 +303,7 @@ async fn set_watch(
 ) -> Response {
     let registry = match registry(&state, &id).await {
         Ok(registry) => registry,
-        Err(response) => return response,
+        Err(failure) => return failure.into_response(),
     };
     // The same validation as the agent capability.
     let request = match parse_set_request(&body) {
@@ -308,7 +323,7 @@ async fn delete_watch(
 ) -> Response {
     let registry = match registry(&state, &id).await {
         Ok(registry) => registry,
-        Err(response) => return response,
+        Err(failure) => return failure.into_response(),
     };
     let Some(watch_id) = body.get("id").and_then(Value::as_i64) else {
         return fail(StatusCode::BAD_REQUEST, "id is required");
@@ -329,15 +344,22 @@ fn view(watch: &WatchSetting) -> Value {
     })
 }
 
-fn reply(result: Result<Value, Response>) -> Response {
+fn reply(result: Result<Value, Failure>) -> Response {
     match result {
         Ok(value) => Json(value).into_response(),
-        Err(response) => response,
+        Err(failure) => failure.into_response(),
+    }
+}
+
+fn failure(status: StatusCode, message: impl ToString) -> Failure {
+    Failure {
+        status,
+        message: message.to_string(),
     }
 }
 
 fn fail(status: StatusCode, message: impl ToString) -> Response {
-    (status, Json(json!({ "error": message.to_string() }))).into_response()
+    failure(status, message).into_response()
 }
 
 #[cfg(test)]

@@ -789,3 +789,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "daemon_settings_tests.rs"]
+mod settings_tests;

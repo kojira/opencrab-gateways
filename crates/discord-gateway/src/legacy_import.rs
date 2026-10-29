@@ -41,8 +41,6 @@ impl std::fmt::Display for CoreUnavailable {
 impl std::error::Error for CoreUnavailable {}
 
 /// The core side of an instance: `(kind_id, subject_id)`, or `None` when core has no instance.
-/// An error that is [`CoreUnavailable`] is retried; any other error (core answered and refused,
-/// for example `unauthorized`) fails the import.
 #[async_trait::async_trait]
 pub trait SubjectLookup: Send + Sync {
     async fn core_instance(&self, instance_id: &str) -> Result<Option<(String, i64)>>;
@@ -51,15 +49,10 @@ pub trait SubjectLookup: Send + Sync {
 #[async_trait::async_trait]
 impl SubjectLookup for opencrab_gate_client::admin::GateAdminClient {
     async fn core_instance(&self, instance_id: &str) -> Result<Option<(String, i64)>> {
-        match self.get_instance(instance_id).await {
-            Ok(observed) => Ok(observed.map(|observed| (observed.kind_id, observed.subject_id))),
-            // Core answered with a status: a refusal, not an outage.
-            Err(error) if format!("{error:#}").contains("gate admin rejected request") => {
-                Err(error.context(format!("core refused instance {instance_id}")))
-            }
-            // No answer at all (socket missing, connection refused, cut short): core is not up.
-            Err(error) => Err(anyhow::Error::new(CoreUnavailable(error))),
-        }
+        Ok(self
+            .get_instance(instance_id)
+            .await?
+            .map(|observed| (observed.kind_id, observed.subject_id)))
     }
 }
 
@@ -104,7 +97,10 @@ pub async fn import_legacy(
     let planned = plan(import)?;
     let mut subjects = Vec::with_capacity(planned.len());
     for item in &planned {
-        let observed = core.core_instance(&item.instance_id).await?;
+        let observed = core
+            .core_instance(&item.instance_id)
+            .await
+            .map_err(|error| anyhow::Error::new(CoreUnavailable(error)))?;
         let (kind, subject_id) = observed
             .with_context(|| format!("core has no instance {} to import", item.instance_id))?;
         anyhow::ensure!(

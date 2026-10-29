@@ -31,8 +31,7 @@ pub fn instance_id_for(namespace: &uuid::Uuid, agent_id: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(namespace, format!("instance\0{agent_id}").as_bytes())
 }
 
-/// Core's gate-admin over its Unix socket, with the creation-namespace principal's credential.
-#[derive(Clone)]
+/// Core's gate-admin over its Unix socket, with the daemon's gate-admin credential.
 pub struct GateAdminGrants {
     socket: std::path::PathBuf,
     token: std::sync::Arc<Zeroizing<String>>,

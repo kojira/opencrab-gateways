@@ -15,7 +15,6 @@ pub mod attachment;
 pub mod channel_request;
 pub mod config;
 pub mod daemon;
-pub mod gate_routing;
 pub mod harness;
 pub mod legacy_import;
 pub mod map;

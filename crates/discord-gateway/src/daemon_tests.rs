@@ -654,6 +654,7 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
             attachment_spool_root: None,
             attachment_outbox_root: None,
             database_path: temp.path().join("owner.db"),
+            voice_settings: temp.path().join("voice/settings.json"),
         }),
     )
     .unwrap();
@@ -712,6 +713,7 @@ fn d1079_production_placement_carries_attachment_outbox_root() {
         attachment_spool_root: Some(temp.path().join("inbox")),
         attachment_outbox_root: Some(temp.path().join("outbox")),
         database_path: temp.path().join("owner.db"),
+        voice_settings: temp.path().join("voice/settings.json"),
     };
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -804,6 +806,7 @@ fn d1097_child_placement_carries_the_neutral_core_config() {
         attachment_spool_root: None,
         attachment_outbox_root: None,
         database_path: temp.path().join("owner.db"),
+        voice_settings: temp.path().join("voice/settings.json"),
     };
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -846,5 +849,57 @@ fn d1097_child_placement_carries_the_neutral_core_config() {
     assert_eq!(
         instance.hello_digest().unwrap(),
         crate::config::config_digest(&core_bytes)
+    );
+}
+
+/// D-1097: a daemon child reads the shared VC settings file the settings page writes, not a
+/// file next to its daemon-written placement.
+#[test]
+fn d1097_child_placement_points_at_the_shared_voice_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let placement_dir = temp.path().join("placements");
+    let voice = temp.path().join("gate/discord/voice/settings.json");
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: temp.path().join("core.sock"),
+        placement_dir: placement_dir.clone(),
+        attachment_spool_root: None,
+        attachment_outbox_root: None,
+        database_path: temp.path().join("owner.db"),
+        voice_settings: voice.clone(),
+    };
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let generation = store
+        .upsert_desired(
+            instance_id,
+            "agent",
+            7,
+            VALID_CONFIG_B64,
+            &["discord-agent-1-2".into()],
+            "token",
+            None,
+            true,
+            &[9; 32],
+        )
+        .unwrap();
+    store.mark_provisioning(instance_id, generation).unwrap();
+    store
+        .mark_verified(instance_id, generation, 1, "digest", &[], true)
+        .unwrap();
+    let row = store.get(instance_id).unwrap().unwrap();
+    factory
+        .for_instance(&row, zeroize::Zeroizing::new(b"token".to_vec()), "nonce")
+        .unwrap();
+    let path = placement_dir.join(format!("{instance_id}.json"));
+    let place = crate::config::Placement::load(&path).unwrap();
+    assert_eq!(place.voice_settings_path(&path), voice);
+    // A placement without the field keeps the previous location.
+    let legacy = temp.path().join("gate/discord/agent.json");
+    let mut old = place.clone();
+    old.voice_settings = None;
+    assert_eq!(
+        old.voice_settings_path(&legacy),
+        temp.path().join("gate/discord/voice/settings.json")
     );
 }

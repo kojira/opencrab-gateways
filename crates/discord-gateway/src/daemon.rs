@@ -32,6 +32,9 @@ pub struct DaemonConfig {
     /// D-1097 D3: instance-mode placements and token files to import while the store is empty.
     #[serde(default)]
     pub legacy_import: Option<crate::legacy_import::LegacyImport>,
+    /// D-1097: the VC settings file (see [`DaemonConfig::voice_settings_path`]).
+    #[serde(default)]
+    pub voice_settings: Option<PathBuf>,
 }
 
 fn default_reconcile_millis() -> u64 {
@@ -61,6 +64,18 @@ impl DaemonConfig {
         Ok(value)
     }
 
+    /// D-1097: the VC settings file the children and the settings page share. Optional in the
+    /// daemon config; absent = `voice/settings.json` next to the store.
+    pub fn voice_settings_path(&self) -> PathBuf {
+        self.voice_settings.clone().unwrap_or_else(|| {
+            self.database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .join("voice")
+                .join("settings.json")
+        })
+    }
+
     pub fn validate(&self) -> Result<()> {
         for (name, path) in [
             ("database_path", &self.database_path),
@@ -81,6 +96,9 @@ impl DaemonConfig {
         }
         if let Some(import) = &self.legacy_import {
             import.validate()?;
+        }
+        if let Some(path) = &self.voice_settings {
+            anyhow::ensure!(path.is_absolute(), "voice_settings must be absolute");
         }
         anyhow::ensure!(
             self.reconcile_millis > 0,
@@ -638,6 +656,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             attachment_spool_root: config.attachment_spool_root.clone(),
             attachment_outbox_root: config.attachment_outbox_root.clone(),
             database_path: config.database_path.clone(),
+            voice_settings: config.voice_settings_path(),
         }),
     )?;
     let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());

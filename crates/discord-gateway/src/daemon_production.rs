@@ -16,6 +16,8 @@ pub(crate) struct ProductionFactory {
     /// Gateway store DB. The instance opens it for the per-session activity webhook routes
     /// (D-1087); the daemon owns the schema and the master key.
     pub(crate) database_path: PathBuf,
+    /// D-1097: the shared VC settings file the settings page writes.
+    pub(crate) voice_settings: PathBuf,
 }
 
 impl SpawnerFactory for ProductionFactory {
@@ -123,6 +125,7 @@ impl SpawnerFactory for ProductionFactory {
             "attachment_spool_root": self.attachment_spool_root,
             "attachment_outbox_root": self.attachment_outbox_root,
             "database_path": self.database_path,
+            "voice_settings": self.voice_settings,
             "control_socket": control_socket,
             "start_nonce": start_nonce,
             "instances": [{"instance_id":row.instance_id,"revision":revision,

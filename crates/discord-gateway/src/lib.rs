@@ -25,6 +25,7 @@ mod reply_files;
 pub mod run;
 pub mod secret;
 pub mod secret_store;
+pub mod settings_http;
 pub mod store;
 pub mod thinking;
 pub mod transport;

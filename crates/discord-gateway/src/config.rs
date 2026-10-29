@@ -26,10 +26,22 @@ pub struct Placement {
     /// keep the file mode 0600. The bot token itself is still env-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_env: Option<std::collections::BTreeMap<String, String>>,
+    /// D-1097: the VC settings file. The daemon writes the shared one here; absent = the
+    /// `voice/settings.json` next to the placement (instance mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_settings: Option<String>,
     pub instances: Vec<InstancePlacement>,
 }
 
 impl Placement {
+    /// The VC settings file for the placement at `placement_path`.
+    pub fn voice_settings_path(&self, placement_path: &std::path::Path) -> std::path::PathBuf {
+        match &self.voice_settings {
+            Some(path) => std::path::PathBuf::from(path),
+            None => crate::voice::settings::settings_path_for_placement(placement_path),
+        }
+    }
+
     /// D-1091: the declaration to put on this instance's hello. Absent placement entry = empty
     /// map = the previous frame (no `run_env` key at all).
     pub fn declared_run_env(&self) -> std::collections::BTreeMap<String, String> {
@@ -176,6 +188,11 @@ impl Placement {
         if let Some(path) = &self.database_path {
             if !std::path::Path::new(path).is_absolute() {
                 anyhow::bail!("database_path must be an absolute path");
+            }
+        }
+        if let Some(path) = &self.voice_settings {
+            if !std::path::Path::new(path).is_absolute() {
+                anyhow::bail!("voice_settings must be an absolute path");
             }
         }
         if self.instances.len() != 1 {
@@ -345,6 +362,7 @@ mod tests {
             attachment_outbox_root: None,
             database_path: None,
             run_env: None,
+            voice_settings: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -369,6 +387,7 @@ mod tests {
             attachment_outbox_root: Some(root.into()),
             database_path: None,
             run_env: None,
+            voice_settings: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -389,6 +408,7 @@ mod tests {
             attachment_outbox_root: None,
             database_path: None,
             run_env: None,
+            voice_settings: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -433,6 +453,7 @@ mod tests {
             attachment_outbox_root: None,
             database_path: None,
             run_env: None,
+            voice_settings: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
@@ -508,6 +529,7 @@ mod tests {
             attachment_outbox_root: None,
             database_path: None,
             run_env: None,
+            voice_settings: None,
             instances: vec![
                 instance("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
                 instance("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),

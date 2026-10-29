@@ -13,11 +13,9 @@ async fn d1097_owner_mention_enables_the_channel_in_real_core() {
     let fixture = Fixture::new();
 
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let binding_id = uuid::Uuid::new_v4().to_string();
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
-    put_instance(&core, &instance_id, &config_b64).await;
-    put_binding(&core, &binding_id, &instance_id, &address()).await;
+    provision(&core, &instance_id, "discord", &config_b64, &[address()]).await;
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
         revision: 1,

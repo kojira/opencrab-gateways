@@ -102,9 +102,12 @@ async fn d1097_import_runs_once_and_never_rereads_the_placements() {
     );
 }
 
+/// Breaks one part of a valid setup.
+type BreakSetup = dyn Fn(&tempfile::TempDir, &mut LegacyImport);
+
 #[tokio::test]
 async fn d1097_import_is_all_or_nothing() {
-    let failures: Vec<Box<dyn Fn(&tempfile::TempDir, &mut LegacyImport)>> = vec![
+    let failures: Vec<Box<BreakSetup>> = vec![
         Box::new(|temp, _| std::fs::remove_file(temp.path().join("tokens/agent-b.token")).unwrap()),
         Box::new(|temp, _| {
             std::fs::set_permissions(

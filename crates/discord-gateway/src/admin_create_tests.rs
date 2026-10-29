@@ -110,16 +110,17 @@ async fn d1097_create_stores_a_pending_instance_with_a_core_grant() {
     assert_eq!(cfg.agent_id, "agent-new");
     assert_eq!(cfg.self_bot_id, "555555555555555555");
     assert_eq!(cfg.access.owners, vec!["222222222222222222"]);
-    let store = f.store.lock().unwrap();
-    assert_eq!(
-        &*store.decrypt_credential(&id, &KEY).unwrap(),
-        b"bot-token-secret"
-    );
-    assert_eq!(
-        &**store.decrypt_subject_grant(&id, &KEY).unwrap().unwrap(),
-        b"grant-for-agent-new"
-    );
-    drop(store);
+    {
+        let store = f.store.lock().unwrap();
+        assert_eq!(
+            &*store.decrypt_credential(&id, &KEY).unwrap(),
+            b"bot-token-secret"
+        );
+        assert_eq!(
+            &**store.decrypt_subject_grant(&id, &KEY).unwrap().unwrap(),
+            b"grant-for-agent-new"
+        );
+    }
 
     // The new instance is now in scope for the settings ops.
     let response = call(&f.socket, json!({"id":"l","op":"list"})).await;

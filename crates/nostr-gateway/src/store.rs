@@ -244,6 +244,10 @@ impl NostrStore {
         Ok(access)
     }
 
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn retry_due_error(
         &self,
         instance_id: &str,
@@ -412,6 +416,10 @@ impl NostrStore {
         )? == 1)
     }
 }
+
+#[cfg(test)]
+#[path = "store_edit_tests.rs"]
+mod edit_tests;
 
 #[cfg(test)]
 mod tests {

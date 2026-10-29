@@ -18,6 +18,7 @@ pub mod secret;
 pub mod secret_store;
 mod share_yabu;
 pub mod store;
+mod store_edit;
 pub mod watch;
 pub mod watch_settings;
 pub mod watch_store;

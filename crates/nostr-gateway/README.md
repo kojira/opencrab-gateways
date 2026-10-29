@@ -7,9 +7,10 @@ Nostr ingress／delivery の独立 binary。`nostaro watch` 子プロセスの J
 ```text
 nostr-gateway daemon /path/to/daemon.json
 nostr-gateway instance /path/to/placement.json
+nostr-gateway settings /path/to/daemon.json 0.0.0.0:8794
 ```
 
-`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。`instance` はplacementに従ってcore UDSへ接続し、watch childを起動する。`daemon` と `instance` は HTTP listen と server proxy を作らない（watch 設定画面は別プロセスの `watch-settings` だけが loopback で listen する）。
+`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。`instance` はplacementに従ってcore UDSへ接続し、watch childを起動する。`daemon` と `instance` は HTTP listen と server proxy を作らない（設定画面は別プロセスの `settings` が引数の bind で listen する）。
 
 ```json
 {
@@ -44,7 +45,7 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 - 保存ファイルが無い初回起動だけ、配置 `config_b64` の `watches` を種にして書き出す（1 度だけの移行。以後は配置の `watches` を読まない）。
 - エージェントは宣言能力 `watch_list` / `watch_set` / `watch_delete` で読み書きする（owner のみ。`watch_list` は read_only、ほかは state_change）。範囲（interval 60〜86400 秒・authors 最大 2000・keywords 最大 32・kinds は 1/6/7）を外れた値は状態を変えずに拒否する。
 - 変更は保存と同時に watch 車線だけを作り直して即時に効く（say consumer とフォロー反映は止めない）。ファイルが外から書き換えられた場合（設定画面・手編集）は 2 秒ごとの再読込で反映する。
-- 設定画面: `nostr-gateway watch-settings <placement.json> <port>` を別プロセスで起動する。127.0.0.1 だけに bind し、一覧・追加・編集・削除ができる。検証は能力と同じ。鍵・トークンは画面にもログにも出さない。
+- 設定画面: 下の「設定画面（D-1097）」の watch 欄。検証は能力と同じ。
 - 間隔は実行中に変わりうるので、車線をまたぐ dedup の TTL は許される最大間隔（86400 秒）の 2 倍＋余裕で取る。
 
 ## 写像
@@ -67,3 +68,22 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 - 本設計: `DESIGN-NOSTRGATE.md`
 - 線の契約: `DESIGN-EXTGATE-V3.md`
 - V3 client: `opencrab-gate-client`
+
+## 設定画面（D-1097）
+
+`nostr-gateway settings <daemon.json> <bind>` を別プロセスで起動する（本番は `0.0.0.0:8794`、Tailscale から開く）。状態を持たず、daemon の admin socket（mode 0600）を通して読み書きする。admin scope の全 instance を列挙し、暗黙に 1 つを選ばない。
+
+| HTTP | 内容 | admin op |
+|---|---|---|
+| `GET /` | 画面 | – |
+| `GET /api/instances` | 全 instance の設定とアクセス（秘密なし） | `list` + `get` |
+| `POST /api/instances/{id}/config` | `{relays, name, filter}`。`self_pubkey` は保持 | `set_config` |
+| `POST /api/instances/{id}/access` | `{owner, trusted_users, followees, co_agents}`。hex / npub / nprofile を hex に正規化 | `set_access` |
+| `POST /api/instances/{id}/key` | `{nsec}`（書き込み専用。`self_pubkey` を同じ世代で更新） | `set_key` |
+| `POST /api/instances/{id}/generate-key` | `{prefix, overwrite: true}`。`nostaro vanity --json` で生成し、停止状態で保存 | `generate_key` |
+| `POST /api/instances/{id}/enabled` | `{enabled}` | `set_enabled` |
+| `GET/POST /api/instances/{id}/watches`、`POST …/watches/delete` | instance ごとの `nostaro-watches-<id>.json`。初回は instance の config の watches を種にする（child と同じ） | – |
+
+- 設定の変更は desired generation を上げて `pending` に戻すので、daemon の reconcile（既定 1 秒）が子を作り直す。どのプロセスも手で再起動しない。
+- 秘密（nsec）は応答・ログ・URL に出さない。表示は「設定済み／未設定」だけ。
+- 範囲外の instance は `scope_denied`（HTTP 404）。不正な値は状態を変えずに 400。

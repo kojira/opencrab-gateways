@@ -1,5 +1,5 @@
 //! 投稿本文を読み上げ向けに整える（旧 crates/discord voice_session.rs の clean_for_tts を移植）。
-//! コードブロック・URL・メンション・Markdown 記号は読み上げに向かないので置換・除去する。
+//! コードブロック・URL・メンション・Markdown 記号は読み上げに向かないので置換・除去する（URL は読まずに消す）。
 
 /// 読み上げ向けに整える。長さの上限は掛けない（長い返事も最後まで読む。止めたいときは話しかけて
 /// 割り込む、D-1096）。
@@ -22,7 +22,7 @@ pub fn clean_for_tts(text: &str) -> String {
     }
     let mut cleaned = String::with_capacity(out.len());
     for line in out.lines() {
-        cleaned.push_str(&replace_urls(line));
+        cleaned.push_str(&drop_urls(line));
         cleaned.push('\n');
     }
     let mut result = String::with_capacity(cleaned.len());
@@ -62,10 +62,11 @@ pub fn clean_for_tts(text: &str) -> String {
         .join("\n")
 }
 
-/// `http://` / `https://` で始まる URL を「リンク」に置き換える。日本語の文では URL が前後の文字に
-/// 空白なしで続くので、語頭だけでなく文中のどこでも探す。URL は空白か、URL に使えない文字
-/// （ASCII 以外の文字・全角記号）の直前で終わる。末尾の `)` `]` `>` `"` `'` は文の記号として残す。
-fn replace_urls(line: &str) -> String {
+/// `http://` / `https://` で始まる URL を読まずに消す（「リンク」とも読まない）。日本語の
+/// 文では URL が前後の文字に空白なしで続くので、語頭だけでなく文中のどこでも探す。URL は空白か、
+/// URL に使えない文字（ASCII 以外の文字・全角記号）の直前で終わる。末尾の `)` `]` `>` `"` `'` は
+/// 文の記号として残す。URL だけを囲んでいた「（）」「()」は、消すと空のかっこが残るので一緒に消す。
+fn drop_urls(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(start) = find_scheme(rest) {
@@ -78,8 +79,14 @@ fn replace_urls(line: &str) -> String {
         while end > 0 && matches!(tail.as_bytes()[end - 1], b')' | b']' | b'>' | b'"' | b'\'') {
             end -= 1;
         }
-        out.push_str("リンク");
         rest = &tail[end..];
+        for (open, close) in [('（', '）'), ('(', ')')] {
+            if out.ends_with(open) && rest.starts_with(close) {
+                out.pop();
+                rest = &rest[close.len_utf8()..];
+                break;
+            }
+        }
     }
     out.push_str(rest);
     out

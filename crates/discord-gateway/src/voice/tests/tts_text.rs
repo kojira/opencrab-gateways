@@ -1,61 +1,105 @@
 use super::super::tts_text::{clean_for_tts, split_sentences};
 
 #[test]
-fn strips_code_blocks_and_replaces_urls() {
+fn strips_code_blocks_and_drops_urls() {
     let input = "結果です。\n```rust\nfn main() {}\n```\n詳細は https://example.com/x を見てください **重要**";
     let out = clean_for_tts(input);
     assert!(!out.contains("fn main"), "{out}");
     assert!(out.contains("（コードは省略）"), "{out}");
-    assert!(!out.contains("https://"), "{out}");
-    assert!(out.contains("リンク"), "{out}");
-    assert!(!out.contains("**"), "{out}");
-}
-
-#[test]
-fn replaces_url_glued_to_preceding_text() {
-    let out = clean_for_tts("公式第1話：https://comic-days.com/episode/123 です");
     assert!(!out.contains("http"), "{out}");
-    assert_eq!(out, "公式第1話：リンク です");
-}
-
-#[test]
-fn replaces_url_after_sentence_end_without_space() {
+    assert!(!out.contains("リンク"), "{out}");
+    assert!(!out.contains("**"), "{out}");
     assert_eq!(
-        clean_for_tts("載ってた。https://jules.google/docs/changelog/ ただ"),
-        "載ってた。リンク ただ"
+        out,
+        "結果です。\n（コードは省略）\n詳細は を見てください 重要"
     );
 }
 
 #[test]
+fn drops_url_glued_to_preceding_text() {
+    assert_eq!(
+        clean_for_tts("公式第1話：https://comic-days.com/episode/123 です"),
+        "公式第1話： です"
+    );
+}
+
+#[test]
+fn drops_url_after_sentence_end_without_space() {
+    assert_eq!(
+        clean_for_tts("載ってた。https://jules.google/docs/changelog/ ただ"),
+        "載ってた。 ただ"
+    );
+}
+
+#[test]
+fn drops_url_and_its_now_empty_full_width_parentheses() {
+    assert_eq!(
+        clean_for_tts("詳しくは（https://a.example/x）を見て"),
+        "詳しくはを見て"
+    );
+    assert_eq!(clean_for_tts("（https://a.example/x）"), "");
+}
+
+#[test]
+fn drops_url_and_its_now_empty_ascii_parentheses() {
+    assert_eq!(
+        clean_for_tts("詳しくは(https://a.example/x)と"),
+        "詳しくはと"
+    );
+}
+
+#[test]
+fn parentheses_that_held_more_than_the_url_are_kept() {
+    assert_eq!(
+        clean_for_tts("公式（無料：https://a.example/x）で"),
+        "公式（無料：）で"
+    );
+}
+
+#[test]
+fn empty_parentheses_not_left_by_a_url_are_kept() {
+    assert_eq!(clean_for_tts("顔文字（）です"), "顔文字（）です");
+}
+
+#[test]
 fn url_ends_at_full_width_punctuation() {
-    assert_eq!(clean_for_tts("（https://a.example/x）"), "（リンク）");
     assert_eq!(
         clean_for_tts("見て→https://a.example/x、続き"),
-        "見て→リンク、続き"
+        "見て→、続き"
     );
 }
 
 #[test]
 fn url_ends_at_cjk_text() {
-    assert_eq!(
-        clean_for_tts("https://a.example/xを見てね"),
-        "リンクを見てね"
-    );
+    assert_eq!(clean_for_tts("https://a.example/xを見てね"), "を見てね");
 }
 
 #[test]
-fn url_drops_trailing_ascii_closers() {
-    assert_eq!(
-        clean_for_tts("詳しくは(https://a.example/x)と\"https://b.example/y\"へ"),
-        "詳しくは(リンク)と\"リンク\"へ"
-    );
+fn url_keeps_trailing_ascii_quote() {
+    assert_eq!(clean_for_tts("と\"https://b.example/y\"へ"), "と\"\"へ");
 }
 
 #[test]
-fn replaces_two_urls_on_one_line() {
+fn drops_two_urls_on_one_line() {
     assert_eq!(
         clean_for_tts("Aは:https://a.example/1、Bはhttp://b.example/2です"),
-        "Aは:リンク、Bはリンクです"
+        "Aは:、Bはです"
+    );
+}
+
+#[test]
+fn line_that_is_only_a_url_disappears() {
+    assert_eq!(
+        clean_for_tts("前の行\nhttps://a.example/x\n次の行"),
+        "前の行\n次の行"
+    );
+}
+
+#[test]
+fn drops_space_separated_url() {
+    assert_eq!(
+        clean_for_tts("ここ https://a.example/x を見て"),
+        "ここ を見て"
     );
 }
 

@@ -319,7 +319,7 @@ async fn posted_say_and_reply_are_spoken_in_order() {
     assert_eq!(
         *queries,
         vec![
-            ("こんにちは リンク".to_string(), "8".to_string()),
+            ("こんにちは".to_string(), "8".to_string()),
             ("返信です".to_string(), "8".to_string()),
         ]
     );

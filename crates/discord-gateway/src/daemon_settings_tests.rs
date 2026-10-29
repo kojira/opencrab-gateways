@@ -228,10 +228,10 @@ async fn d1097_disabling_stops_the_running_bot_and_enabling_restarts_it() {
 }
 
 /// D-1097 owner mention (child-created binding): recording an address the child already bound
-/// through its own core connection stores it without any gate-admin call, so the next reconcile
-/// keeps the binding instead of deleting it.
+/// through its own core connection stores it without asking core anything, so the next
+/// reconcile keeps the binding instead of deleting it.
 #[tokio::test]
-async fn d1097_record_bound_address_persists_without_a_gate_admin_call() {
+async fn d1097_record_bound_address_persists_without_calling_core() {
     #[derive(Default)]
     struct NoBind;
     #[async_trait]

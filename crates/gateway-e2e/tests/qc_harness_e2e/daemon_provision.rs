@@ -80,7 +80,7 @@ mod nostr_daemon_provision {
         }
     }
 
-    /// Test 5: a Nostr instance in the daemon's store is provisioned in core with no gate-admin
+    /// Test 5: a Nostr instance in the daemon's store is provisioned in core with no core
     /// credential, its child says `hello` with the provisioned revision and core accepts it
     /// (the address is bound, which core does only after `hello ok`).
     #[tokio::test]

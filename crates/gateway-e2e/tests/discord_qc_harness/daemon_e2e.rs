@@ -1,325 +1,4 @@
-// ==================== D-1098: the Discord daemon against a real core ====================
-//
-// Real pieces: core (extgate + AppState + mock LLM) on its gate socket, the Discord daemon with
-// the real `ProvisionReconciler`, its admin socket, the settings HTTP API, and the real child
-// code (`spawn_instance_with_voice` reading the placement the daemon wrote). The child runs in
-// this process with a fake event file and the dry-run transport instead of serenity, which is
-// the only stand-in: no Discord. No gate-admin credential exists anywhere.
-
-mod daemon_e2e {
-    use super::*;
-    use opencrab_discord_gateway::daemon::{
-        DiscordDaemon, ProductionFactory, ProvisionReconciler, SpawnerFactory,
-    };
-    use opencrab_discord_gateway::store::{DiscordStore, InstanceRow};
-    use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
-    use std::path::PathBuf;
-
-    pub(crate) const KEY: [u8; 32] = [7; 32];
-
-    /// Every child the daemon started, with its instance id, oldest first.
-    pub(crate) type StartedChildren = Arc<Mutex<Vec<(String, Arc<InstanceClient>)>>>;
-
-    /// The real child (`main`'s path), in this process: reads the daemon-written placement,
-    /// connects to core and sends `hello` with the provisioned revision and digest.
-    pub(crate) struct InProcessFactory {
-        pub(crate) production: ProductionFactory,
-        /// Events per agent: what "Discord" delivers to that bot.
-        pub(crate) events: std::collections::BTreeMap<String, PathBuf>,
-        pub(crate) clients: StartedChildren,
-    }
-
-    /// The child's own runtime: killing it drops every task and the core connection, like
-    /// a process exit.
-    struct Child {
-        stop: Option<std::sync::mpsc::Sender<()>>,
-        exited: Option<tokio::sync::oneshot::Receiver<()>>,
-    }
-    #[async_trait::async_trait]
-    impl SupervisedChild for Child {
-        async fn wait_exit(&mut self) -> String {
-            if let Some(exited) = self.exited.take() {
-                let _ = exited.await;
-            }
-            "killed".into()
-        }
-        async fn kill(&mut self) {
-            self.stop.take();
-        }
-        /// A real child has a pid; the daemon records the start only with one.
-        fn pid(&self) -> Option<u32> {
-            Some(std::process::id())
-        }
-    }
-
-    struct Spawner {
-        target: String,
-        placement: PathBuf,
-        events: PathBuf,
-        clients: StartedChildren,
-    }
-
-    #[async_trait::async_trait]
-    impl ChildSpawner for Spawner {
-        async fn spawn(&self) -> std::io::Result<Box<dyn SupervisedChild>> {
-            let place = opencrab_discord_gateway::config::Placement::load(&self.placement)
-                .map_err(std::io::Error::other)?;
-            let mut inst = place.instances[0].clone();
-            inst.channel_socket = place.channel_socket.as_deref().map(PathBuf::from);
-            let bytes =
-                opencrab_discord_gateway::config::decode_config_b64(&inst.config_b64).unwrap();
-            let events = self.events.clone();
-            let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
-            let (client_tx, client_rx) = std::sync::mpsc::channel();
-            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                let client = rt.block_on(async {
-                    opencrab_discord_gateway::run::spawn_instance_with_voice(
-                        PathBuf::from(&place.core_socket),
-                        &inst,
-                        &bytes,
-                        None,
-                        HarnessOverrides {
-                            fake_events: Some(events),
-                            dry_run: true,
-                        },
-                        (None, None),
-                        None,
-                        None,
-                        Default::default(),
-                    )
-                });
-                let _ = client_tx.send(client.map_err(|e| e.to_string()));
-                let _ = stop_rx.recv();
-                rt.shutdown_timeout(Duration::from_secs(1));
-                let _ = exit_tx.send(());
-            });
-            let client = client_rx
-                .recv()
-                .map_err(std::io::Error::other)?
-                .map_err(std::io::Error::other)?;
-            self.clients
-                .lock()
-                .unwrap()
-                .push((self.target.clone(), client));
-            Ok(Box::new(Child {
-                stop: Some(stop_tx),
-                exited: Some(exit_rx),
-            }))
-        }
-        fn target_id(&self) -> &str {
-            &self.target
-        }
-    }
-
-    impl SpawnerFactory for InProcessFactory {
-        fn cleanup_artifacts(&self, row: &InstanceRow) -> anyhow::Result<()> {
-            self.production.cleanup_artifacts(row)
-        }
-        fn channel_socket(&self, row: &InstanceRow) -> Option<PathBuf> {
-            self.production.channel_socket(row)
-        }
-        fn for_instance(
-            &self,
-            row: &InstanceRow,
-            credential: zeroize::Zeroizing<Vec<u8>>,
-            nonce: &str,
-        ) -> anyhow::Result<Arc<dyn ChildSpawner>> {
-            // Writes the real placement exactly as production does.
-            self.production.for_instance(row, credential, nonce)?;
-            Ok(Arc::new(Spawner {
-                target: row.instance_id.clone(),
-                placement: self
-                    .production
-                    .placement_dir
-                    .join(format!("{}.json", row.instance_id)),
-                events: self.events[&row.agent_id].clone(),
-                clients: self.clients.clone(),
-            }))
-        }
-    }
-
-    pub(crate) struct World {
-        pub(crate) core: Core,
-        pub(crate) dir: tempfile::TempDir,
-        pub(crate) daemon: Arc<DiscordDaemon<ProvisionReconciler, InProcessFactory>>,
-        pub(crate) admin_socket: PathBuf,
-        pub(crate) clients: StartedChildren,
-        pub(crate) events: std::collections::BTreeMap<String, PathBuf>,
-    }
-
-    pub(crate) fn add_agent(core: &Core, agent_id: &str) {
-        let conn = core.extgate.db.lock().unwrap();
-        opencrab_db::queries::upsert_agent(
-            &conn,
-            &opencrab_db::queries::AgentRow {
-                agent_id: agent_id.into(),
-                name: agent_id.into(),
-                job_title: None,
-                organization: None,
-                image_url: None,
-                persona_name: "p".into(),
-                personality: None,
-                instructions: String::new(),
-                model: None,
-                reasoning_effort: None,
-                web_search: None,
-                metadata_json: None,
-            },
-        )
-        .unwrap();
-    }
-
-    /// A daemon on a real core, with an event file per agent in `agents`.
-    pub(crate) async fn world(
-        agents: &[&str],
-        store: impl FnOnce(&DiscordStore, &std::path::Path),
-    ) -> World {
-        let core = start_core(Arc::new(RoutedMock::new()) as Arc<dyn LlmProvider>).await;
-        for agent in agents {
-            add_agent(&core, agent);
-        }
-        let dir = tempfile::Builder::new()
-            .prefix("dd")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let db = dir.path().join("discord.db");
-        let discord_store = DiscordStore::open(&db).unwrap();
-        store(&discord_store, dir.path());
-        let mut events = std::collections::BTreeMap::new();
-        for agent in agents {
-            let path = dir.path().join(format!("{agent}.jsonl"));
-            std::fs::write(&path, "").unwrap();
-            events.insert(agent.to_string(), path);
-        }
-        let clients = Arc::new(Mutex::new(Vec::new()));
-        let factory = InProcessFactory {
-            production: ProductionFactory {
-                child_binary: "/bin/true".into(),
-                core_socket: core.sock.clone(),
-                placement_dir: dir.path().join("p"),
-                attachment_spool_root: None,
-                attachment_outbox_root: None,
-                database_path: db.clone(),
-                voice_settings: dir.path().join("voice/settings.json"),
-            },
-            events: events.clone(),
-            clients: clients.clone(),
-        };
-        let daemon = Arc::new(
-            DiscordDaemon::new(
-                discord_store,
-                KEY,
-                Arc::new(ProvisionReconciler::new(core.sock.clone(), "discord")),
-                Arc::new(factory),
-            )
-            .unwrap(),
-        );
-        daemon.serve_channel_requests(Arc::new(opencrab_discord_gateway::daemon::DaemonChannels(
-            Arc::downgrade(&daemon),
-        )));
-        let admin_socket = dir.path().join("admin.sock");
-        opencrab_discord_gateway::admin::spawn(admin_socket.clone(), daemon.store(), Arc::new(KEY));
-        for _ in 0..200 {
-            if admin_socket.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        World {
-            core,
-            dir,
-            daemon,
-            admin_socket,
-            clients,
-            events,
-        }
-    }
-
-    impl World {
-        /// Runs the daemon loop until `done` holds.
-        pub(crate) async fn until(&self, done: impl Fn(&World) -> bool) {
-            for _ in 0..200 {
-                self.daemon.reconcile_once().await.unwrap();
-                if done(self) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            panic!("the daemon did not reach the expected state");
-        }
-
-        pub(crate) fn client_of(&self, instance_id: &str) -> Option<Arc<InstanceClient>> {
-            self.clients
-                .lock()
-                .unwrap()
-                .iter()
-                .rev()
-                .find(|(id, _)| id == instance_id)
-                .map(|(_, c)| c.clone())
-        }
-
-        pub(crate) fn say(
-            &self,
-            agent: &str,
-            id: &str,
-            channel: &str,
-            author: &str,
-            text: &str,
-            mentions: &[&str],
-        ) {
-            use std::io::Write as _;
-            let line = serde_json::json!({"id": id, "channel_id": channel, "guild_id": GUILD,
-                "author": {"id": author, "bot": false, "username": "u"},
-                "content": text, "mentions": mentions});
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&self.events[agent])
-                .unwrap();
-            writeln!(f, "{line}").unwrap();
-        }
-    }
-
-    pub(crate) async fn admin_call(
-        socket: &std::path::Path,
-        request: serde_json::Value,
-    ) -> serde_json::Value {
-        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
-        let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
-        stream
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .unwrap();
-        let mut line = String::new();
-        tokio::io::BufReader::new(stream)
-            .read_line(&mut line)
-            .await
-            .unwrap();
-        serde_json::from_str(&line).unwrap()
-    }
-
-    /// Whether a dry-run post of `kind` with `body` reached `channel`.
-    pub(crate) async fn posted(
-        buf: &Arc<Mutex<Vec<Captured>>>,
-        kind: &str,
-        channel: &str,
-        body: &str,
-    ) -> bool {
-        let buf = buf.clone();
-        let (kind, channel, body) = (kind.to_string(), channel.to_string(), body.to_string());
-        wait_until(move || {
-            captured(&buf)
-                .iter()
-                .any(|c| c.kind == kind && c.channel == channel && c.body.contains(&body))
-        })
-        .await
-    }
-}
+// ==================== D-1098: Discord daemon cases against a real core ====================
 
 mod daemon_cases {
     use super::daemon_e2e::*;
@@ -379,7 +58,7 @@ mod daemon_cases {
     #[tokio::test]
     async fn d1098_a_new_bot_created_from_the_settings_page_answers_its_owner() {
         let buf = install_capture();
-        let w = world(&[NEW_AGENT], |_, _| {}).await;
+        let w = world(&[NEW_AGENT], |_, _, _| {}).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(opencrab_discord_gateway::settings_http::serve_with(
@@ -507,7 +186,7 @@ mod daemon_cases {
             .map(|_| uuid::Uuid::new_v4().to_string())
             .collect();
         let ids_for_store = ids.clone();
-        let w = world(&LEGACY, move |store, dir| {
+        let w = world(&LEGACY, move |_, store, dir| {
             let tokens = dir.join("tokens");
             std::fs::create_dir(&tokens).unwrap();
             let mut placements = Vec::new();
@@ -575,7 +254,7 @@ mod daemon_cases {
         let buf = install_capture();
         const AGENT: &str = "agent-owner-edit";
         const NEW_OWNER: &str = "333333333333333333";
-        let w = world(&[AGENT], |_, _| {}).await;
+        let w = world(&[AGENT], |_, _, _| {}).await;
         let created = admin_call(
             &w.admin_socket,
             serde_json::json!({"id":"c","op":"create","agent_id": AGENT,"credential":"t",
@@ -637,7 +316,7 @@ mod daemon_cases {
     async fn d1098_owner_mention_enables_a_channel_that_survives_a_restart() {
         let buf = install_capture();
         const AGENT: &str = "agent-mention";
-        let w = world(&[AGENT], |_, _| {}).await;
+        let w = world(&[AGENT], |_, _, _| {}).await;
         let created = admin_call(
             &w.admin_socket,
             serde_json::json!({"id":"c","op":"create","agent_id": AGENT,"credential":"t",

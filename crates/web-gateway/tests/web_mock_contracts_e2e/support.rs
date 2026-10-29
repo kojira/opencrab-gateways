@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 const AGENT: &str = "e2eagent";
 const AUTHOR: &str = "e2e-owner";
 const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
-const TOKEN: &str = "e2e-operator-token";
 // base64 of `{"author_id":"e2e-owner"}`。web author=owner に解決させ caller=Owner にする。
 const CONFIG_B64: &str = "eyJhdXRob3JfaWQiOiJlMmUtb3duZXIifQ==";
 
@@ -328,7 +327,6 @@ fn spawn_core(root: &Path) -> Proc {
     Proc(
         Command::new(server_bin())
             .current_dir(root)
-            .env("OPENCRAB_GATE_OPERATOR_TOKEN", TOKEN)
             .env(
                 "RUST_LOG",
                 "opencrab=info,opencrab_server=info,opencrab_extgate=info,opencrab_core=info",
@@ -445,31 +443,7 @@ fn setup(mock_port: u16, tag: &str, auto_dispatch: bool, tools_block: &str) -> H
     .expect("model pricing");
     assert_eq!(st, 200, "model-pricing {body}");
 
-    let (_, agent_json) = http(
-        core_port,
-        "GET",
-        &format!("/api/agents/{AGENT}"),
-        None,
-        None,
-        Duration::from_secs(5),
-    )
-    .expect("get agent");
-    let agent_v: serde_json::Value = serde_json::from_str(agent_json.trim()).expect("agent json");
-    let subject = agent_v["subject_id"].as_i64().expect("subject_id");
-
-    let inst_body = format!(
-        r#"{{"kind_id":"web","subject_id":{subject},"enabled":true,"config_b64":"{CONFIG_B64}"}}"#
-    );
-    let (st, body) = http(
-        core_port,
-        "PUT",
-        &format!("/api/gate-instances/{INSTANCE}"),
-        Some(TOKEN),
-        Some(&inst_body),
-        Duration::from_secs(5),
-    )
-    .expect("instance put");
-    assert!(st == 200 || st == 201, "instance PUT {st} {body}");
+    provision_web(&sock, &[]);
 
     let gw = spawn_gateway(root.path(), &sock, gw_port);
     assert!(wait_tcp(gw_port, Duration::from_secs(15)), "gateway http");
@@ -661,4 +635,48 @@ fn spawn_sse_collect(port: u16, session: &str) -> std::sync::mpsc::Receiver<Stri
         let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
     rx
+}
+
+/// D-1098: declares the web instance (and its complete binding set) on core's gate socket the
+/// way a gateway does before `hello`. Returns the binding ids core reports, per address.
+fn provision_web(sock: &Path, addresses: &[String]) -> Vec<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    let provisioned = loop {
+        let attempt = runtime.block_on(
+            opencrab_gate_client::provision::ProvisionClient::new(sock.to_path_buf()).provision(
+                &opencrab_gate_client::provision::ProvisionDesired {
+                    instance_id: INSTANCE,
+                    kind_id: "web",
+                    agent_id: AGENT,
+                    enabled: true,
+                    config_b64: CONFIG_B64,
+                    addresses,
+                },
+            ),
+        );
+        match attempt {
+            Ok(provisioned) => break provisioned,
+            Err(error) if start.elapsed() > Duration::from_secs(15) => {
+                panic!("provision: {error:#}")
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    assert_eq!(provisioned.revision, 1, "the placement says revision 1");
+    addresses
+        .iter()
+        .map(|address| {
+            provisioned
+                .bindings
+                .iter()
+                .find(|binding| &binding.address == address)
+                .expect("provisioned binding")
+                .binding_id
+                .clone()
+        })
+        .collect()
 }

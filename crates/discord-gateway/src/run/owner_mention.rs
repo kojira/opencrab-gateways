@@ -21,8 +21,9 @@ pub(crate) fn wants_channel(
         && access.owners.iter().any(|id| id == &msg.author.id)
 }
 
-/// The binding id for `address` of `instance_id`: core's provision rule, so the daemon's next
-/// provision keeps the binding the child created.
+/// The binding id the child asks for when `address` is new to this instance. Core may bind
+/// another id instead (D-1098: the instance's existing binding for the address is reused), so
+/// the id in core's `bind` is the one used afterwards.
 pub(crate) fn binding_id_for(instance_id: &str, address: &str) -> Option<String> {
     opencrab_gate_client::provision::binding_id_for(instance_id, address).ok()
 }
@@ -45,23 +46,27 @@ pub(crate) async fn enable_channel(
         .create_binding(&binding_id, address, BINDING_SESSION_THEME)
         .await
     {
-        tracing::warn!(%address, error = ?error, "owner mention: core refused the channel");
-        return false;
+        // Core may bind the instance's existing binding (another id) before this call resumes;
+        // the client then reports a conflict although core bound the channel.
+        if client.binding_for_address(address).await.is_none() {
+            tracing::warn!(%address, error = ?error, "owner mention: core refused the channel");
+            return false;
+        }
     }
-    let mut bound = false;
+    let mut bound = None;
     for _ in 0..300 {
-        if client.binding_for_address(address).await.is_some() {
-            bound = true;
+        bound = client.binding_for_address(address).await;
+        if bound.is_some() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    if !bound {
+    let Some(bound_id) = bound else {
         tracing::warn!(%address, "owner mention: core did not bind the channel in time");
         return false;
-    }
+    };
     if let Some(socket) = channel_socket {
-        if let Err(error) = crate::channel_request::request(socket, address, &binding_id).await {
+        if let Err(error) = crate::channel_request::request(socket, address, &bound_id).await {
             tracing::warn!(%address, error = %error, "owner mention: daemon did not record the channel");
         }
     }

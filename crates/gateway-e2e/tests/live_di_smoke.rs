@@ -18,9 +18,9 @@
 //! memory_sessions 保存件数/本文 ／ LLM 呼び出し回数・イテレーション数 ／
 //! 残留マーカー（NO_REPLY/継続）／ ゲート反応（🤐/❌）。
 //!
-//! QC core を汚さない: gate 経路は専用 instance/binding を毎回新規採番・agent は env で指定する
-//! 専用テスト bot。のすたろう/くらぶの session には触れない。gate の admission は agent の discord
-//! owner を said author（`LIVE_OWNER_ID`）に合わせ caller=Owner に解決させる。
+//! QC core を汚さない: gate 経路は専用 instance を毎回新規採番し、gate UDS の `provision`
+//! （資格情報なし・D-1098）で instance と binding を宣言する。agent は env で指定する専用テスト bot。
+//! のすたろう/くらぶの session には触れない。said は caller=Owner を明示して送る。
 //!
 //! 実在の識別子（agent id・owner id・snowflake 等）はソースに埋めない。すべて env で与える
 //! （既定値も置かない）。公開リポジトリの private-identifier 検査に通すため。
@@ -28,8 +28,7 @@
 //! `#[ignore]`（実 LLM 課金・稼働中 core 必須）。実行例:
 //!
 //! ```sh
-//! OPENCRAB_GATE_OPERATOR_TOKEN="$(cat .../secrets/qc-gate-operator-token)" \
-//!   LIVE_GATE_SOCK=".../runtime/gate.sock" \
+//! LIVE_GATE_SOCK=".../runtime/gate.sock" \
 //!   LIVE_AGENT_ID="<agent id>" LIVE_OWNER_ID="<owner id>" \
 //!   LIVE_MODE=gate LIVE_SCENARIO=reply3 \
 //!   cargo test -p opencrab-server --test live_di_smoke -- --ignored --nocapture
@@ -38,7 +37,6 @@
 //! env（識別子は既定値なしで**必須**。環境固有の絶対パスもソースに埋めない）:
 //! `LIVE_AGENT_ID`（対象 agent id・**必須**）、
 //! `LIVE_OWNER_ID`（said author / REST user_id・**必須**）、
-//! `OPENCRAB_GATE_OPERATOR_TOKEN`（gate admin Bearer・gate モードで**必須**）、
 //! `LIVE_GATE_SOCK`（gate UDS の絶対パス・gate モードで**必須**）、
 //! `LIVE_MODE`（gate | rest・既定 gate）、
 //! `LIVE_CORE_HTTP`（既定 http://127.0.0.1:18700）、
@@ -155,7 +153,6 @@ impl InvokeHandler for RecordingHandler {
 struct Http {
     client: reqwest::Client,
     base: String,
-    token: String,
 }
 
 impl Http {
@@ -175,7 +172,6 @@ impl Http {
         let resp = self
             .client
             .post(format!("{}{}", self.base, path))
-            .bearer_auth(&self.token)
             .json(&body)
             .send()
             .await
@@ -184,67 +180,6 @@ impl Http {
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         (status, body)
     }
-
-    /// admin API は Bearer 必須。REST（agents/*）は不要だが付けても無害。
-    async fn put_json(&self, path: &str, body: Value) -> (reqwest::StatusCode, String) {
-        let resp = self
-            .client
-            .put(format!("{}{}", self.base, path))
-            .bearer_auth(&self.token)
-            .json(&body)
-            .send()
-            .await
-            .expect("PUT 失敗");
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        (status, text)
-    }
-
-    async fn patch_json(&self, path: &str, body: Value) -> (reqwest::StatusCode, Value) {
-        let resp = self
-            .client
-            .patch(format!("{}{}", self.base, path))
-            .bearer_auth(&self.token)
-            .json(&body)
-            .send()
-            .await
-            .expect("PATCH 失敗");
-        let status = resp.status();
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
-        (status, body)
-    }
-}
-
-/// agent の discord owner を said author に合わせる。**config は enabled=false のまま owner だけ**
-/// 設定する（caller=Owner の解決は `inbound/binding.rs` load_origin_row が owner_discord_id だけを見るので
-/// enabled は不要）。実 Discord gateway が起動し得る enabled=true を残さないため、既存行は PATCH
-/// （enabled を触らない）、無ければ PUT（唯一の作成経路・一時的に enabled=true）で作った上で、
-/// 最後に必ず `discord/stop` で enabled=false へ落とす。QC は discord subsystem 未登録なので stop
-/// は DB フラグを false にするだけ（実 gateway 停止は no-op）。
-async fn set_discord_owner_disabled(http: &Http, agent: &str, owner: &str) {
-    // 既存 config があれば PATCH で owner だけ更新（enabled は保存値のまま）。
-    let (st, body) = http
-        .patch_json(
-            &format!("/api/agents/{agent}/discord"),
-            json!({ "owner_discord_id": owner }),
-        )
-        .await;
-    let patched = st.is_success() && body.get("ok").and_then(|v| v.as_bool()) != Some(false);
-    if !patched {
-        // config 未作成。PUT は enabled=true 固定だが、唯一の作成経路。直後の stop で false へ戻す。
-        let (pst, pbody) = http
-            .put_json(
-                &format!("/api/agents/{agent}/discord"),
-                json!({"bot_token": "placeholder-not-used-by-v3", "owner_discord_id": owner}),
-            )
-            .await;
-        assert!(pst.is_success(), "PUT discord config = {pst}: {pbody}");
-    }
-    // enabled=false を保証する（実 Discord gateway が起動し得る経路を残さない）。
-    let (sst, sbody) = http
-        .post_json(&format!("/api/agents/{agent}/discord/stop"), json!({}))
-        .await;
-    assert!(sst.is_success(), "POST discord/stop = {sst}: {sbody}");
 }
 
 /// agent の llm-logs の id 集合（直近 50 件）。ターン前後の差分で呼び出し回数を測る。
@@ -332,8 +267,6 @@ async fn live_di_smoke() {
     let agent = req_env("LIVE_AGENT_ID");
     let owner = req_env("LIVE_OWNER_ID");
     let scenario = scenario_for(&env_or("LIVE_SCENARIO", "reply3"));
-    // gate モードは admin Bearer 必須。rest モードは空でも可（REST は Bearer 不要）。
-    let token = std::env::var("OPENCRAB_GATE_OPERATOR_TOKEN").unwrap_or_default();
     let timeout_secs: u64 = std::env::var("LIVE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -351,7 +284,6 @@ async fn live_di_smoke() {
     let http = Http {
         client: reqwest::Client::new(),
         base: base.clone(),
-        token,
     };
 
     let obs = match mode.as_str() {
@@ -388,67 +320,33 @@ async fn run_gate(
         .ok()
         .filter(|v| !v.is_empty())
         .expect("gate モードは LIVE_GATE_SOCK（gate UDS の絶対パス）が必要（環境固有パスはソースに埋めない）");
-    assert!(
-        !http.token.is_empty(),
-        "gate モードは OPENCRAB_GATE_OPERATOR_TOKEN（admin Bearer）が必要"
-    );
-
-    // 1) agent → subject_id。
-    let (st, agent_json) = http.get_json(&format!("/api/agents/{agent}")).await;
-    assert!(st.is_success(), "GET /api/agents/{agent} = {st}");
-    let subject_id = agent_json["subject_id"]
-        .as_i64()
-        .unwrap_or_else(|| panic!("agent {agent} に subject_id が無い: {agent_json}"));
-
-    // 2) admission 用に agent の discord owner を said author に合わせる（config は enabled=false の
-    //    まま owner だけ設定・詳細は set_discord_owner_disabled の doc）。
-    set_discord_owner_disabled(http, agent, owner).await;
-
-    // 3) gate instance（kind=discord・delivery_mode=say）を新規採番して登録。
-    //    guild/channel/self_bot は**合成 fixture**（実 Discord の ID ではない・ルーティング用の
-    //    ダミー）。invoke は外部へ出ないので任意の合成値でよい。実在の識別子は使わない。
+    // 1) gate instance（kind=discord・中立 config）を新規採番し、gate UDS の `provision`
+    //    で instance と binding を宣言する（資格情報なし・D-1098）。guild/channel/self_bot は
+    //    **合成 fixture**（実 Discord の ID ではない・ルーティング用のダミー）。invoke は外部へ
+    //    出ないので任意の合成値でよい。実在の識別子は使わない。
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let binding_id = uuid::Uuid::new_v4().to_string();
     let guild = "500"; // 合成 fixture
     let channel = "600"; // 合成 fixture
     let self_bot_id = "111"; // 合成 fixture
     let address = format!("discord-{agent}-{guild}-{channel}");
-    let config_bytes = serde_json::to_vec(&json!({
-        "agent_id": agent,
-        "self_bot_id": self_bot_id,
-        "name": "di-smoke-harness",
-        "delivery_mode": "say",
-    }))
-    .unwrap();
-    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
-    let config_digest = opencrab_extgate::config_digest(&config_bytes);
+    let config_b64 = opencrab_extgate::encode_config_b64(br#"{"delivery_mode":"tool_driven"}"#);
+    let provisioned =
+        opencrab_gate_client::provision::ProvisionClient::new(std::path::PathBuf::from(&sock))
+            .provision(&opencrab_gate_client::provision::ProvisionDesired {
+                instance_id: &instance_id,
+                kind_id: "discord",
+                agent_id: agent,
+                enabled: true,
+                config_b64: &config_b64,
+                addresses: std::slice::from_ref(&address),
+            })
+            .await
+            .expect("provision（core 稼働・socket path・agent id を確認）");
 
-    let (st, body) = http
-        .put_json(
-            &format!("/api/gate-instances/{instance_id}"),
-            json!({
-                "kind_id": "discord",
-                "subject_id": subject_id,
-                "enabled": true,
-                "config_b64": config_b64,
-            }),
-        )
-        .await;
-    assert!(st.is_success(), "PUT gate-instance = {st}: {body}");
-
-    // 4) binding（instance → address）。
-    let (st, body) = http
-        .put_json(
-            &format!("/api/gate-bindings/{binding_id}"),
-            json!({"instance_id": instance_id, "address": address}),
-        )
-        .await;
-    assert!(st.is_success(), "PUT gate-binding = {st}: {body}");
-
-    // 5) LLM 呼び出し回数の基準（ターン前の llm-logs id 集合）。
+    // 2) LLM 呼び出し回数の基準（ターン前の llm-logs id 集合）。
     let before_ids = llm_log_ids(http, agent).await;
 
-    // 6) 偽ゲートを UDS 接続（discord 能力宣言つき）。invoke は記録して ok を返す。
+    // 3) 偽ゲートを UDS 接続（discord 能力宣言つき）。invoke は記録して ok を返す。
     let invokes = Arc::new(Mutex::new(Vec::<RecordedInvoke>::new()));
     let handler = Arc::new(RecordingHandler {
         invokes: invokes.clone(),
@@ -456,9 +354,9 @@ async fn run_gate(
     let client = InstanceClient::spawn_with_operations(
         std::path::PathBuf::from(&sock),
         instance_id.clone(),
-        1,
+        provisioned.revision,
         self_bot_id.to_string(),
-        config_digest,
+        provisioned.config_digest,
         SayPolicy::AcceptToLiveQueue,
         Some(opencrab_discord_gateway::ops::operation_declarations(false)),
         opencrab_gate_client::RuntimeCapabilities {
@@ -478,14 +376,32 @@ async fn run_gate(
     }
     assert!(
         bound,
-        "binding が ack されない（core 稼働・socket path・operator token を確認）"
+        "binding が ack されない（core 稼働・socket path を確認）"
     );
 
-    // 7) 「ユーザー発話」を 1 件送る。origin は毎回ユニーク（dedup 回避）。author=owner で caller=Owner。
+    // 4) 「ユーザー発話」を 1 件送る。origin は毎回ユニーク（dedup 回避）。caller=Owner を明示する。
     let origin = format!("discord:message:v1:{channel}:{}", now_millis());
     let no_attachments: Vec<Attachment> = Vec::new();
+    let context = opencrab_gate_client::wire::SaidContext {
+        caller: opencrab_gate_client::wire::SaidCaller::Owner,
+        start_turn: true,
+        system_context: None,
+        reply_target: None,
+        live_inbound_scope: opencrab_gate_client::wire::LiveInboundScope::All,
+        model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
+        agent_prelude: None,
+        provisional_id: None,
+    };
     let said = client
-        .post_said_with_author(&address, &origin, owner, prompt, &no_attachments)
+        .post_said_with_context(
+            &address,
+            &origin,
+            owner,
+            None,
+            &context,
+            prompt,
+            &no_attachments,
+        )
         .await
         .expect("post_said（binding not ready?）");
     match &said {
@@ -493,7 +409,7 @@ async fn run_gate(
         other => panic!("said が admit されない: {other:?}（owner 設定 / admission を確認）"),
     }
 
-    // 8) ターンを観測する。say は Message、reply/reaction は invoke（別記録）、ターン終了は
+    // 5) ターンを観測する。say は Message、reply/reaction は invoke（別記録）、ターン終了は
     //    activity ended、沈黙終端は CompletedNoReply、失敗は TurnFailed。
     let mut says: Vec<String> = Vec::new();
     let mut activities: Vec<String> = Vec::new();
@@ -556,13 +472,15 @@ async fn run_gate(
         }
     }
 
-    // 9) LLM 差分・memory_sessions 保存・残留対象を集める。
+    // 6) LLM 差分・memory_sessions 保存・残留対象を集める。
     let after_ids = llm_log_ids(http, agent).await;
     let llm_calls = after_ids
         .iter()
         .filter(|id| !before_ids.contains(*id))
         .count();
-    let session_id = opencrab_extgate::session_id_for_binding(&binding_id);
+    // The binding core reports for the address (it may be one the instance already had).
+    let binding_id = &provisioned.bindings[0].binding_id;
+    let session_id = opencrab_extgate::session_id_for_binding(binding_id);
     let saved = session_logs(http, &session_id).await;
 
     let ops: Vec<(String, String)> = invokes

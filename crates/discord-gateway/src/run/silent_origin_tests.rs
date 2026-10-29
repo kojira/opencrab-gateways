@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::TransportOutcome;
 use opencrab_gate_client::wire::{read_frame, write_json};
 use serde_json::json;
 use tokio::net::UnixListener;

@@ -211,7 +211,9 @@ impl Placement {
             if inst.revision == 0 {
                 anyhow::bail!("revision must be positive");
             }
-            if inst.addresses.is_empty() {
+            // D-1097: in daemon mode (a channel socket is given) the bot may start with no
+            // channel yet; an owner mention enables the first one. Instance mode keeps the rule.
+            if inst.addresses.is_empty() && self.channel_socket.is_none() {
                 anyhow::bail!("addresses must be nonempty");
             }
             if inst.addresses.iter().any(|a| a.is_empty()) {
@@ -432,6 +434,13 @@ mod tests {
             }],
         };
         assert!(p.validate().is_err());
+        // D-1097: a daemon-mode placement (it has a channel socket) may start with no channel;
+        // an owner mention enables the first one.
+        let daemon_mode = Placement {
+            channel_socket: Some("/tmp/x.ch".into()),
+            ..p
+        };
+        daemon_mode.validate().unwrap();
     }
 
     #[test]

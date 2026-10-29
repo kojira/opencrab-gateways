@@ -173,7 +173,8 @@ mod end_to_end {
         tokio::spawn(async move {
             let access = access();
             let mention = (&*client, "agent", BOT, &access);
-            super::super::owner_mention::maybe_enable(mention, Some(&socket), &line).await;
+            let enable = (Some(socket.as_path()), None);
+            super::super::owner_mention::maybe_enable(mention, enable, &line).await;
             crate::run::handle_incoming(&client, "agent", BOT, &access, &line, None, None).await;
         })
     }

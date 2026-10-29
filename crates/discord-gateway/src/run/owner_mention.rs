@@ -5,6 +5,10 @@
 use crate::config::AccessConfig;
 use crate::map::IncomingMessage;
 
+/// Starts the say consumer for a newly bound address (so answers, typing, reactions and
+/// activity reach the new channel like any configured one).
+pub(crate) type SayConsumers = std::sync::Arc<dyn Fn(String) + Send + Sync>;
+
 /// Whether `msg` should enable the message's channel.
 pub(crate) fn wants_channel(
     access: &AccessConfig,
@@ -71,7 +75,7 @@ pub(crate) async fn maybe_enable(
         &str,
         &AccessConfig,
     ),
-    channel_socket: Option<&std::path::Path>,
+    (channel_socket, say_consumers): (Option<&std::path::Path>, Option<&SayConsumers>),
     line: &str,
 ) {
     let Some(msg) = crate::map::parse_event_line(line) else {
@@ -79,7 +83,44 @@ pub(crate) async fn maybe_enable(
     };
     let address = crate::map::address_of(agent_id, &msg);
     let bound = client.binding_for_address(&address).await.is_some();
-    if wants_channel(access, self_bot_id, &msg, bound) {
-        enable_channel(client, channel_socket, &address).await;
+    if wants_channel(access, self_bot_id, &msg, bound)
+        && enable_channel(client, channel_socket, &address).await
+    {
+        if let Some(spawn) = say_consumers {
+            spawn(address);
+        }
     }
+}
+
+/// The [`SayConsumers`] of a running instance: each call starts the say consumer for one more
+/// address with the same transport, reactions, delivery targets, voice and activity.
+pub(crate) fn say_consumers(
+    client: &std::sync::Arc<opencrab_gate_client::client::InstanceClient>,
+    transport: &std::sync::Arc<dyn crate::transport::DiscordTransport>,
+    cfg: &crate::config::InstanceConfig,
+    delivery_targets: &crate::ops::BindingDeliveryTargets,
+    (voice, activity): (
+        &Option<std::sync::Arc<crate::voice::session::VoiceManager>>,
+        &Option<std::sync::Arc<crate::webhook::ActivityDelivery>>,
+    ),
+) -> SayConsumers {
+    let client = client.clone();
+    let transport = transport.clone();
+    let agent_id = cfg.agent_id.clone();
+    let reactions = cfg.system_reactions.clone();
+    let delivery_targets = delivery_targets.clone();
+    let voice = voice.clone();
+    let activity = activity.clone();
+    std::sync::Arc::new(move |address: String| {
+        super::spawn_say_consumer(
+            client.clone(),
+            address,
+            transport.clone(),
+            agent_id.clone(),
+            reactions.clone(),
+            std::sync::Arc::clone(&delivery_targets),
+            voice.clone(),
+            activity.clone(),
+        );
+    })
 }

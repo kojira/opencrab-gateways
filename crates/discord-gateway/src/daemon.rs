@@ -139,84 +139,7 @@ pub trait GateReconciler: Send + Sync {
     ) -> Result<VerifiedInstance>;
 }
 
-pub struct UdsGateReconciler {
-    client: opencrab_gate_client::admin::GateAdminClient,
-    kind_id: String,
-}
-
-impl UdsGateReconciler {
-    pub fn new(
-        client: opencrab_gate_client::admin::GateAdminClient,
-        kind_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            client,
-            kind_id: kind_id.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl GateReconciler for UdsGateReconciler {
-    async fn observe(
-        &self,
-        desired: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        use opencrab_process_supervisor::lifecycle::CoreObservation;
-        let Some(observed) = self.client.get_instance(&desired.instance_id).await? else {
-            return Ok(CoreObservation::Mismatch);
-        };
-        let mut bindings: Vec<_> = observed
-            .bindings
-            .into_iter()
-            .map(|value| value.binding_id)
-            .collect();
-        bindings.sort();
-        let mut expected = desired.core_bindings.clone();
-        expected.sort();
-        if observed.revision == desired.core_revision.unwrap_or(0)
-            && observed.config_digest == desired.core_digest.as_deref().unwrap_or_default()
-            && bindings == expected
-        {
-            Ok(if observed.enabled {
-                CoreObservation::ExactEnabled
-            } else {
-                CoreObservation::ExactDisabled
-            })
-        } else {
-            Ok(CoreObservation::Mismatch)
-        }
-    }
-
-    async fn reconcile(
-        &self,
-        desired: &InstanceRow,
-        subject_grant: Option<&str>,
-    ) -> Result<VerifiedInstance> {
-        let observed = self
-            .client
-            .reconcile(opencrab_gate_client::admin::ReconcileDesired {
-                instance_id: &desired.instance_id,
-                kind_id: &self.kind_id,
-                subject_id: desired.subject_id,
-                enabled: desired.enabled,
-                config_b64: &core_config_b64_for_runtime_config(&desired.config_b64)?,
-                subject_grant,
-                addresses: &desired.addresses,
-            })
-            .await?;
-        Ok(VerifiedInstance {
-            revision: observed.revision,
-            digest: observed.config_digest,
-            bindings: observed
-                .bindings
-                .into_iter()
-                .map(|binding| binding.binding_id)
-                .collect(),
-            enabled: observed.enabled,
-        })
-    }
-}
+pub use crate::core_provisioning::UdsGateReconciler;
 
 pub trait SpawnerFactory: Send + Sync {
     fn observe_process(
@@ -664,17 +587,15 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let mut raw = [0_u8; 32];
     raw.copy_from_slice(&key[..]);
     let store = DiscordStore::open(&config.database_path)?;
-    let client = opencrab_gate_client::admin::GateAdminClient::from_credential_file(
-        config.gate_admin_socket.clone(),
-        &config.gate_admin_credential,
-    )?;
+    // Everything that talks to core about instances and bindings comes from one module.
+    let core = crate::core_provisioning::CoreProvisioning::from_config(&config)?;
     if let Some(import) = &config.legacy_import {
-        run_legacy_import(&store, import, &client, &raw).await?;
+        run_legacy_import(&store, import, core.lookup.as_ref(), &raw).await?;
     }
     let daemon = Arc::new(DiscordDaemon::new(
         store,
         raw,
-        Arc::new(UdsGateReconciler::new(client, "discord")),
+        core.reconciler.clone(),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),
@@ -686,22 +607,12 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         }),
     )?);
     daemon.serve_channel_requests(Arc::new(DaemonChannels(Arc::downgrade(&daemon))));
-    let grants = config
-        .creation_namespace
-        .map(|_| {
-            crate::subject_grant::GateAdminGrants::from_credential_file(
-                config.gate_admin_socket.clone(),
-                &config.gate_admin_credential,
-            )
-            .map(|issuer| Arc::new(issuer) as Arc<dyn crate::subject_grant::SubjectGrantIssuer>)
-        })
-        .transpose()?;
     let _admin = crate::admin::spawn_with(
         config.admin_socket.clone(),
         crate::admin::AdminContext {
             scope: Arc::new(config.admin_instance_ids.iter().cloned().collect()),
             creation_namespace: config.creation_namespace,
-            grants,
+            grants: core.grants.clone(),
         },
         daemon.store(),
         Arc::new(raw),

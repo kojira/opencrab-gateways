@@ -46,16 +46,6 @@ pub trait SubjectLookup: Send + Sync {
     async fn core_instance(&self, instance_id: &str) -> Result<Option<(String, i64)>>;
 }
 
-#[async_trait::async_trait]
-impl SubjectLookup for opencrab_gate_client::admin::GateAdminClient {
-    async fn core_instance(&self, instance_id: &str) -> Result<Option<(String, i64)>> {
-        Ok(self
-            .get_instance(instance_id)
-            .await?
-            .map(|observed| (observed.kind_id, observed.subject_id)))
-    }
-}
-
 impl LegacyImport {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(

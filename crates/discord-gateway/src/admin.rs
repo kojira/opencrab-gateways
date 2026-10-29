@@ -41,6 +41,9 @@ struct Request {
     /// Discord by the caller. Stored together with the token so they never disagree.
     #[serde(default)]
     self_bot_id: Option<String>,
+    /// D-1097: the owners of a new bot (`create`).
+    #[serde(default)]
+    owners: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -55,18 +58,41 @@ struct Response {
 
 pub type AdminScope = Arc<std::collections::BTreeSet<String>>;
 
+/// What the admin socket may touch. `scope` is the fixed instance list; with a
+/// `creation_namespace` the instances under it are in scope too, and `create` may add one.
+#[derive(Clone)]
+pub struct AdminContext {
+    pub scope: AdminScope,
+    pub creation_namespace: Option<uuid::Uuid>,
+    pub grants: Option<Arc<dyn crate::subject_grant::SubjectGrantIssuer>>,
+}
+
 pub fn spawn(
     socket: PathBuf,
     scope: AdminScope,
     store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { serve(&socket, scope, store, master_key).await })
+    let context = AdminContext {
+        scope,
+        creation_namespace: None,
+        grants: None,
+    };
+    spawn_with(socket, context, store, master_key)
+}
+
+pub fn spawn_with(
+    socket: PathBuf,
+    context: AdminContext,
+    store: Arc<Mutex<DiscordStore>>,
+    master_key: Arc<[u8; 32]>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move { serve(&socket, context, store, master_key).await })
 }
 
 pub async fn serve(
     socket: &Path,
-    scope: AdminScope,
+    context: AdminContext,
     store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> Result<()> {
@@ -75,20 +101,36 @@ pub async fn serve(
     set_mode(socket)?;
     loop {
         let (stream, _) = listener.accept().await?;
-        let scope = scope.clone();
+        let context = context.clone();
         let store = store.clone();
         let key = master_key.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle(stream, scope, store, key).await {
+            if let Err(error) = handle(stream, context, store, key).await {
                 tracing::warn!(error = %error, "discord local admin request failed");
             }
         });
     }
 }
 
+impl AdminContext {
+    /// Whether `instance_id` may be touched: in the fixed list, or under the namespace.
+    fn allows(&self, store: &DiscordStore, instance_id: &str) -> Result<bool> {
+        if self.scope.contains(instance_id) {
+            return Ok(true);
+        }
+        let Some(namespace) = &self.creation_namespace else {
+            return Ok(false);
+        };
+        Ok(store.get(instance_id)?.is_some_and(|row| {
+            crate::subject_grant::instance_id_for(namespace, &row.agent_id).to_string()
+                == instance_id
+        }))
+    }
+}
+
 async fn handle(
     stream: UnixStream,
-    scope: AdminScope,
+    context: AdminContext,
     store: Arc<Mutex<DiscordStore>>,
     key: Arc<[u8; 32]>,
 ) -> Result<()> {
@@ -96,7 +138,11 @@ async fn handle(
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => apply(request, &scope, &store, &key),
+            Ok(request) if request.op == "create" => {
+                let id = request.id.clone();
+                respond(id, create(request, &context, &store, &key).await)
+            }
+            Ok(request) => apply(request, &context, &store, &key),
             Err(_) => Response {
                 id: String::new(),
                 ok: false,
@@ -111,28 +157,82 @@ async fn handle(
     Ok(())
 }
 
+/// `create`: a bot for an agent that has none. Checks the input first, then asks core for the
+/// agent's subject grant, then stores the pending instance (the daemon's reconcile creates it
+/// in core with that grant and starts the bot).
+async fn create(
+    request: Request,
+    context: &AdminContext,
+    store: &Mutex<DiscordStore>,
+    key: &[u8; 32],
+) -> Result<Value> {
+    let (Some(namespace), Some(grants)) = (&context.creation_namespace, &context.grants) else {
+        anyhow::bail!("create_unavailable");
+    };
+    let agent_id = request.agent_id.as_deref().context("agent_id required")?;
+    let plan = crate::admin_settings::plan_create(
+        agent_id,
+        request
+            .self_bot_id
+            .as_deref()
+            .context("self_bot_id required")?,
+        request.owners.as_deref().unwrap_or_default(),
+        request.addresses.as_deref().unwrap_or_default(),
+        request.credential.as_deref().unwrap_or_default(),
+    )?;
+    let instance_id = crate::subject_grant::instance_id_for(namespace, agent_id).to_string();
+    {
+        let store = store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+        anyhow::ensure!(
+            store.list()?.iter().all(|row| row.agent_id != agent_id),
+            "this agent already has a bot"
+        );
+    }
+    let grant = grants.issue(agent_id).await?;
+    let store = store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+    crate::admin_settings::store_create(&store, &instance_id, &plan, &grant, key)
+}
+
+fn respond(id: String, result: Result<Value>) -> Response {
+    match result {
+        Ok(value) => Response {
+            id,
+            ok: true,
+            result: Some(value),
+            error: None,
+        },
+        Err(error) => Response {
+            id,
+            ok: false,
+            result: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
 fn apply(
     request: Request,
-    scope: &std::collections::BTreeSet<String>,
+    context: &AdminContext,
     store: &Mutex<DiscordStore>,
     key: &[u8; 32],
 ) -> Response {
     let id = request.id.clone();
     let result = (|| -> Result<Value> {
-        if request.op == "list" {
-            let store = store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
-            return crate::admin_settings::list(&store, scope);
-        }
-        anyhow::ensure!(
-            request.scope_instance_id == request.instance_id
-                && scope.contains(&request.instance_id),
-            "scope_denied"
-        );
         let store = store
             .lock()
             .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+        if request.op == "list" {
+            return crate::admin_settings::list(&store, |id| context.allows(&store, id));
+        }
+        anyhow::ensure!(
+            request.scope_instance_id == request.instance_id
+                && context.allows(&store, &request.instance_id)?,
+            "scope_denied"
+        );
         match request.op.as_str() {
             "get" => Ok(store.get(&request.instance_id)?.map_or(Value::Null, |row| {
                 json!({
@@ -193,20 +293,7 @@ fn apply(
             _ => anyhow::bail!("unknown_operation"),
         }
     })();
-    match result {
-        Ok(value) => Response {
-            id,
-            ok: true,
-            result: Some(value),
-            error: None,
-        },
-        Err(error) => Response {
-            id,
-            ok: false,
-            result: None,
-            error: Some(error.to_string()),
-        },
-    }
+    respond(id, result)
 }
 
 fn prepare_socket(path: &Path) -> Result<()> {
@@ -336,3 +423,7 @@ mod tests {
 #[cfg(test)]
 #[path = "admin_settings_tests.rs"]
 mod settings_tests;
+
+#[cfg(test)]
+#[path = "admin_create_tests.rs"]
+mod create_tests;

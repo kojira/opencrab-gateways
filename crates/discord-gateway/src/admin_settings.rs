@@ -7,11 +7,11 @@ use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use serde_json::{json, Value};
 
-/// Every instance in `scope`, without any secret.
-pub fn list(store: &DiscordStore, scope: &std::collections::BTreeSet<String>) -> Result<Value> {
+/// Every instance `allowed`, without any secret.
+pub fn list(store: &DiscordStore, allowed: impl Fn(&str) -> Result<bool>) -> Result<Value> {
     let mut instances = Vec::new();
     for row in store.list()? {
-        if !scope.contains(&row.instance_id) {
+        if !allowed(&row.instance_id)? {
             continue;
         }
         let config = parse_instance_config(&decode_config_b64(&row.config_b64)?)?;
@@ -147,4 +147,67 @@ fn write(
         key,
     )?;
     Ok(json!({"desired_generation": generation, "state": "pending"}))
+}
+
+/// A checked request for a new bot (`create`), before core is asked for anything.
+pub struct CreatePlan {
+    pub agent_id: String,
+    pub config_b64: String,
+    pub addresses: Vec<String>,
+    pub credential: zeroize::Zeroizing<String>,
+}
+
+pub fn plan_create(
+    agent_id: &str,
+    self_bot_id: &str,
+    owners: &[String],
+    addresses: &[String],
+    credential: &str,
+) -> Result<CreatePlan> {
+    anyhow::ensure!(!owners.is_empty(), "a new bot needs at least one owner");
+    anyhow::ensure!(!credential.trim().is_empty(), "the bot token is empty");
+    let config = json!({"agent_id": agent_id, "self_bot_id": self_bot_id,
+        "access": {"owners": owners}});
+    let bytes = serde_json::to_vec(&config)?;
+    let parsed = parse_instance_config(&bytes)?;
+    for address in addresses {
+        anyhow::ensure!(
+            parse_address_owner(agent_id, address),
+            "address does not belong to this agent: {address}"
+        );
+    }
+    let mut unique = addresses.to_vec();
+    unique.sort();
+    unique.dedup();
+    Ok(CreatePlan {
+        agent_id: agent_id.to_string(),
+        config_b64: base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&parsed)?),
+        addresses: unique,
+        credential: zeroize::Zeroizing::new(credential.trim().to_string()),
+    })
+}
+
+pub fn store_create(
+    store: &DiscordStore,
+    instance_id: &str,
+    plan: &CreatePlan,
+    grant: &crate::subject_grant::SubjectGrant,
+    key: &[u8; 32],
+) -> Result<Value> {
+    anyhow::ensure!(
+        store.get(instance_id)?.is_none(),
+        "this agent already has a bot"
+    );
+    let generation = store.upsert_desired(
+        instance_id,
+        &plan.agent_id,
+        grant.subject_id,
+        &plan.config_b64,
+        &plan.addresses,
+        &plan.credential,
+        Some(&grant.grant),
+        true,
+        key,
+    )?;
+    Ok(json!({"instance_id": instance_id, "desired_generation": generation, "state": "pending"}))
 }

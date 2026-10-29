@@ -55,8 +55,6 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
         llm_router: opencrab_server::SharedLlmRouter::new(router),
         llm_config: Arc::new(toml::from_str("").unwrap()),
         subtask_auto_dispatch: true,
-        voice_config: Arc::new(Default::default()),
-        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir()
             .join("opencrab_discord_qc")
             .to_string_lossy()
@@ -94,7 +92,6 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
 pub(crate) struct Core {
     pub(crate) extgate: Arc<ExtgateState>,
     pub(crate) sock: PathBuf,
-    pub(crate) subject_id: i64,
     /// #915: execute_shell を実走させる tools_config 等を per-test で触れるよう AppState を保持。
     pub(crate) state: AppState,
     _dir: tempfile::TempDir,
@@ -117,8 +114,8 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     let conn = opencrab_db::init_memory().unwrap();
     let db = opencrab_db::Db::from_connection(conn);
     register_mock_pricing(&db);
-    let subject_id = upsert_test_agent(&db);
-    let extgate = Arc::new(ExtgateState::new_protected(db.clone()));
+    upsert_test_agent(&db);
+    let extgate = Arc::new(ExtgateState::new(db.clone()));
     let state = build_app_state(db.clone(), provider);
     // #925: 本番と同じ descriptor 登録（`register_production_descriptors`）＋ V3 heartbeat 受け口
     // （`ExtgateTimedFireSink`）を実型で配線する。これで scheduler seam（resolve_target →
@@ -152,153 +149,43 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     Core {
         extgate,
         sock,
-        subject_id,
         state,
         _dir: dir,
     }
 }
 
-pub(crate) async fn admin(core: &Core, req: Request<Body>) -> (StatusCode, Vec<u8>) {
-    let app = admin_router(Arc::clone(&core.extgate));
-    let res = app.oneshot(req).await.unwrap();
-    let status = res.status();
-    let body = res.into_body().collect().await.unwrap().to_bytes().to_vec();
-    (status, body)
-}
-
-fn database_backed_admin(core: &Core, instance_id: &str) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-    use sha2::{Digest, Sha256};
-
-    let salt = [0x3c_u8; 32];
-    let token = Sha256::digest(instance_id.as_bytes());
-    let principal_id = format!("discord-qc-{instance_id}");
-    let mut hasher = Sha256::new();
-    hasher.update(b"opencrab/gate-admin/bearer/v1\0");
-    hasher.update(salt);
-    hasher.update(token);
-    let hash = hasher.finalize().to_vec();
-    let conn = core.extgate.db.lock().unwrap();
-    let expires_at = 4_000_000_000_i64 * 1_000_000_000;
-    let exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM gate_admin_principals WHERE principal_id=?1)",
-            [&principal_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    if !exists {
-        conn.execute(
-            "INSERT INTO gate_admin_principals
-             (principal_id, credential_salt, credential_hash, scope_mode, created_at, expires_at,
-              revoked_at, sealed_at, predecessor_principal_id, overlap_deadline)
-             VALUES (?1, ?2, ?3, 'exact', 1, ?4,
-                     NULL, NULL, NULL, NULL)",
-            rusqlite::params![principal_id, salt.as_slice(), hash, expires_at],
-        )
-        .unwrap();
-        for operation in ["instance.put", "binding.put"] {
-            conn.execute(
-                "INSERT INTO gate_admin_principal_operations VALUES (?1, ?2)",
-                rusqlite::params![principal_id, operation],
-            )
-            .unwrap();
-        }
-        conn.execute(
-            "INSERT INTO gate_admin_principal_subjects VALUES (?1, ?2)",
-            rusqlite::params![principal_id, core.subject_id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO gate_admin_principal_instances VALUES (?1, ?2)",
-            rusqlite::params![principal_id, instance_id],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE gate_admin_principals SET sealed_at=2 WHERE principal_id=?1",
-            [&principal_id],
-        )
-        .unwrap();
-    }
-    format!("Bearer {}", URL_SAFE_NO_PAD.encode(token))
-}
-
-pub(crate) async fn put_instance(core: &Core, instance_id: &str, config_b64: &str) {
-    let authorization = database_backed_admin(core, instance_id);
-    let subject_grant = {
-        let mut conn = core.extgate.db.lock().unwrap();
-        opencrab_db::queries::issue_subject_association_grant(
-            &mut conn,
-            AGENT_ID,
-            core.subject_id,
-            i64::MAX,
-            100,
-        )
-        .unwrap()
-    };
-    let (st, body) = admin(
-        core,
-        Request::builder()
-            .method("PUT")
-            .uri(format!("/api/gate-instances/{instance_id}"))
-            .header(header::AUTHORIZATION, authorization)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "kind_id": "discord",
-                    "subject_id": core.subject_id,
-                    "enabled": true,
-                    "config_b64": config_b64,
-                    "subject_grant": subject_grant,
-                })
-                .to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert!(
-        st == StatusCode::CREATED || st == StatusCode::OK,
-        "put_instance {st}: {}",
-        String::from_utf8_lossy(&body)
-    );
-}
-
-pub(crate) async fn put_binding(core: &Core, binding_id: &str, instance_id: &str, address: &str) {
-    let authorization = database_backed_admin(core, instance_id);
-    let (session_id, title) = {
-        let conn = core.extgate.db.lock().unwrap();
-        match opencrab_db::queries::get_session(&conn, address).unwrap() {
-            Some(session) => (address.to_string(), session.theme),
-            None => (
-                opencrab_extgate::session_id_for_binding(binding_id),
-                address.to_string(),
-            ),
-        }
-    };
-    let (st, body) = admin(
-        core,
-        Request::builder()
-            .method("PUT")
-            .uri(format!("/api/gate-bindings/{binding_id}"))
-            .header(header::AUTHORIZATION, authorization)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "instance_id": instance_id,
-                    "address": address,
-                    "session": {"session_id": session_id, "title": title},
-                })
-                .to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert!(
-        st == StatusCode::CREATED || st == StatusCode::OK,
-        "put_binding {st}: {}",
-        String::from_utf8_lossy(&body)
-    );
+/// D-1098: declares the instance and its complete binding set on core's gate socket, the way a
+/// gateway does before `hello`. Returns the binding ids (UUIDv5(instance, address)).
+pub(crate) async fn provision(
+    core: &Core,
+    instance_id: &str,
+    kind_id: &str,
+    config_b64: &str,
+    addresses: &[String],
+) -> Vec<String> {
+    let provisioned = opencrab_gate_client::provision::ProvisionClient::new(core.sock.clone())
+        .provision(&opencrab_gate_client::provision::ProvisionDesired {
+            instance_id,
+            kind_id,
+            agent_id: AGENT_ID,
+            enabled: true,
+            config_b64,
+            addresses,
+        })
+        .await
+        .expect("provision");
+    addresses
+        .iter()
+        .map(|address| {
+            provisioned
+                .bindings
+                .iter()
+                .find(|binding| &binding.address == address)
+                .expect("provisioned binding")
+                .binding_id
+                .clone()
+        })
+        .collect()
 }
 
 pub(crate) fn discord_config() -> Vec<u8> {
@@ -315,19 +202,26 @@ pub(crate) fn discord_config() -> Vec<u8> {
 /// instance + binding を登録し、discord gateway（fake_events + dry_run）を起動して bind ack を待つ。
 pub(crate) async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<InstanceClient> {
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let binding_id = uuid::Uuid::new_v4().to_string();
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = address();
 
-    put_instance(core, &instance_id, &config_b64).await;
-    put_binding(core, &binding_id, &instance_id, &addr).await;
+    provision(
+        core,
+        &instance_id,
+        "discord",
+        &config_b64,
+        std::slice::from_ref(&addr),
+    )
+    .await;
 
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
         revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
+        core_config_b64: None,
+        channel_socket: None,
     };
     let overrides = HarnessOverrides {
         fake_events: Some(fixture.path.clone()),
@@ -364,19 +258,26 @@ pub(crate) async fn wire_instance_on_channel(
     channel: &str,
 ) -> Arc<InstanceClient> {
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let binding_id = uuid::Uuid::new_v4().to_string();
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
 
-    put_instance(core, &instance_id, &config_b64).await;
-    put_binding(core, &binding_id, &instance_id, &addr).await;
+    provision(
+        core,
+        &instance_id,
+        "discord",
+        &config_b64,
+        std::slice::from_ref(&addr),
+    )
+    .await;
 
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
         revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
+        core_config_b64: None,
+        channel_socket: None,
     };
     let overrides = HarnessOverrides {
         fake_events: Some(fixture.path.clone()),

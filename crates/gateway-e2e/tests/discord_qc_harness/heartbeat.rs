@@ -84,19 +84,21 @@ async fn fire_heartbeat_via_scheduler_seam(core: &Core, session_id: &str, messag
 /// 専用チャンネルで instance+binding を張り gateway を起動して ack を待つ（heartbeat 用・binding_id を返す）。
 async fn wire_hb(core: &Core, fixture: &Fixture, channel: &str) -> (Arc<InstanceClient>, String) {
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let binding_id = uuid::Uuid::new_v4().to_string();
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
 
-    put_instance(core, &instance_id, &config_b64).await;
-    put_binding(core, &binding_id, &instance_id, &addr).await;
+    let binding_id = provision(core, &instance_id, "discord", &config_b64, std::slice::from_ref(&addr))
+        .await
+        .remove(0);
 
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
         revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
+        core_config_b64: None,
+        channel_socket: None,
     };
     let overrides = HarnessOverrides {
         fake_events: Some(fixture.path.clone()),
@@ -120,12 +122,12 @@ async fn wire_hb(core: &Core, fixture: &Fixture, channel: &str) -> (Arc<Instance
 /// instance+binding を DB に置くが gateway は起動しない（H4: gateway 停止中＝binding 未接続）。
 async fn provision_hb_no_gateway(core: &Core, channel: &str) -> String {
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let binding_id = uuid::Uuid::new_v4().to_string();
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
-    put_instance(core, &instance_id, &config_b64).await;
-    put_binding(core, &binding_id, &instance_id, &addr).await;
+    let binding_id = provision(core, &instance_id, "discord", &config_b64, std::slice::from_ref(&addr))
+        .await
+        .remove(0);
     binding_id
 }
 

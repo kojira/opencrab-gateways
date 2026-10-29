@@ -26,10 +26,26 @@ pub struct Placement {
     /// keep the file mode 0600. The bot token itself is still env-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_env: Option<std::collections::BTreeMap<String, String>>,
+    /// D-1097: the VC settings file. The daemon writes the shared one here; absent = the
+    /// `voice/settings.json` next to the placement (instance mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_settings: Option<String>,
+    /// D-1097: this instance's channel-request socket (daemon mode). Absent = an owner mention
+    /// in an unknown channel is ignored, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_socket: Option<String>,
     pub instances: Vec<InstancePlacement>,
 }
 
 impl Placement {
+    /// The VC settings file for the placement at `placement_path`.
+    pub fn voice_settings_path(&self, placement_path: &std::path::Path) -> std::path::PathBuf {
+        match &self.voice_settings {
+            Some(path) => std::path::PathBuf::from(path),
+            None => crate::voice::settings::settings_path_for_placement(placement_path),
+        }
+    }
+
     /// D-1091: the declaration to put on this instance's hello. Absent placement entry = empty
     /// map = the previous frame (no `run_env` key at all).
     pub fn declared_run_env(&self) -> std::collections::BTreeMap<String, String> {
@@ -45,6 +61,22 @@ pub struct InstancePlacement {
     /// gateway はこれらの say を drain し bind を待つ。実受理は core の ack が正（binding_for_address）。
     pub addresses: Vec<String>,
     pub config_b64: String,
+    /// D-1097: the config core holds for this instance (fixed and neutral). The hello digest is
+    /// its digest. Absent = the digest of `config_b64` (placements written before D-1097).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_config_b64: Option<String>,
+    /// D-1097: the channel-request socket, copied from [`Placement::channel_socket`] for the
+    /// running instance. Not part of the instance entry on disk.
+    #[serde(skip)]
+    pub channel_socket: Option<std::path::PathBuf>,
+}
+
+impl InstancePlacement {
+    /// The `config_digest` this instance presents on hello.
+    pub fn hello_digest(&self) -> anyhow::Result<String> {
+        let core = self.core_config_b64.as_deref().unwrap_or(&self.config_b64);
+        Ok(config_digest(&decode_config_b64(core)?))
+    }
 }
 
 /// instance の非秘密 config。bot token は含めない（env 注入のみ）。
@@ -166,6 +198,11 @@ impl Placement {
                 anyhow::bail!("database_path must be an absolute path");
             }
         }
+        if let Some(path) = &self.voice_settings {
+            if !std::path::Path::new(path).is_absolute() {
+                anyhow::bail!("voice_settings must be an absolute path");
+            }
+        }
         if self.instances.len() != 1 {
             anyhow::bail!("discord-gateway requires exactly one instance per process");
         }
@@ -174,7 +211,9 @@ impl Placement {
             if inst.revision == 0 {
                 anyhow::bail!("revision must be positive");
             }
-            if inst.addresses.is_empty() {
+            // D-1097: in daemon mode (a channel socket is given) the bot may start with no
+            // channel yet; an owner mention enables the first one. Instance mode keeps the rule.
+            if inst.addresses.is_empty() && self.channel_socket.is_none() {
                 anyhow::bail!("addresses must be nonempty");
             }
             if inst.addresses.iter().any(|a| a.is_empty()) {
@@ -269,6 +308,11 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// D-1097: whether `address` is a channel address of `agent_id` (`discord-{agent}-{guild}-{channel}`).
+pub fn parse_address_owner(agent_id: &str, address: &str) -> bool {
+    crate::map::parse_address(agent_id, address).is_some()
+}
+
 /// 10進 snowflake（u64 に収まる非空数字列）。生 ID は会話へ出さないが config の妥当性検査には使う。
 pub fn is_snowflake(raw: &str) -> bool {
     !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) && raw.parse::<u64>().is_ok()
@@ -328,11 +372,15 @@ mod tests {
             attachment_outbox_root: None,
             database_path: None,
             run_env: None,
+            voice_settings: None,
+            channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
                 addresses: vec!["discord-agent-x-100-200".into()],
                 config_b64: encode(&sample_config()),
+                core_config_b64: None,
+                channel_socket: None,
             }],
         };
         p.validate().unwrap();
@@ -351,11 +399,15 @@ mod tests {
             attachment_outbox_root: Some(root.into()),
             database_path: None,
             run_env: None,
+            voice_settings: None,
+            channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
                 addresses: vec!["discord-agent-x-100-200".into()],
                 config_b64: encode(&sample_config()),
+                core_config_b64: None,
+                channel_socket: None,
             }],
         };
         place("/data/attachments/outbox").validate().unwrap();
@@ -370,14 +422,25 @@ mod tests {
             attachment_outbox_root: None,
             database_path: None,
             run_env: None,
+            voice_settings: None,
+            channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
                 addresses: vec![],
                 config_b64: encode(&sample_config()),
+                core_config_b64: None,
+                channel_socket: None,
             }],
         };
         assert!(p.validate().is_err());
+        // D-1097: a daemon-mode placement (it has a channel socket) may start with no channel;
+        // an owner mention enables the first one.
+        let daemon_mode = Placement {
+            channel_socket: Some("/tmp/x.ch".into()),
+            ..p
+        };
+        daemon_mode.validate().unwrap();
     }
 
     #[test]
@@ -413,11 +476,15 @@ mod tests {
             attachment_outbox_root: None,
             database_path: None,
             run_env: None,
+            voice_settings: None,
+            channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
                 revision: 1,
                 addresses: vec!["discord-agent-x--200".into()],
                 config_b64: encode(&sample_config()),
+                core_config_b64: None,
+                channel_socket: None,
             }],
         };
         p.validate().unwrap();
@@ -479,6 +546,8 @@ mod tests {
             revision: 1,
             addresses: vec!["discord-agent-x-100-200".into()],
             config_b64: encode(&sample_config()),
+            core_config_b64: None,
+            channel_socket: None,
         };
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
@@ -486,6 +555,8 @@ mod tests {
             attachment_outbox_root: None,
             database_path: None,
             run_env: None,
+            voice_settings: None,
+            channel_socket: None,
             instances: vec![
                 instance("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
                 instance("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
@@ -546,5 +617,45 @@ mod tests {
             let place: Placement = serde_json::from_value(value).unwrap();
             assert!(place.validate().is_err(), "{place:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod core_config_tests {
+    use super::*;
+
+    /// D-1097 D2: a placement without `core_config_b64` keeps the previous hello digest (the
+    /// digest of `config_b64`), so a placement written before the change still connects.
+    #[test]
+    fn d1097_hello_digest_falls_back_to_the_discord_config() {
+        use base64::Engine as _;
+        let config = base64::engine::general_purpose::STANDARD
+            .encode(br#"{"agent_id":"a","self_bot_id":"111111111111111111"}"#);
+        let place = InstancePlacement {
+            instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            revision: 1,
+            addresses: vec!["discord-a-1-2".into()],
+            config_b64: config.clone(),
+            core_config_b64: None,
+            channel_socket: None,
+        };
+        assert_eq!(
+            place.hello_digest().unwrap(),
+            config_digest(&decode_config_b64(&config).unwrap())
+        );
+        let neutral = base64::engine::general_purpose::STANDARD.encode(br#"{"kind":"x"}"#);
+        let place = InstancePlacement {
+            core_config_b64: Some(neutral.clone()),
+            ..place
+        };
+        assert_eq!(
+            place.hello_digest().unwrap(),
+            config_digest(&decode_config_b64(&neutral).unwrap())
+        );
+        let broken = InstancePlacement {
+            core_config_b64: Some("not base64".into()),
+            ..place
+        };
+        assert!(broken.hello_digest().is_err());
     }
 }

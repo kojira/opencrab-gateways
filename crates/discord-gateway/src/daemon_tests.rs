@@ -3,6 +3,10 @@ use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
+/// `{"agent_id":"agent","self_bot_id":"111111111111111111"}`: the smallest valid Discord config.
+const VALID_CONFIG_B64: &str =
+    "eyJhZ2VudF9pZCI6ImFnZW50Iiwic2VsZl9ib3RfaWQiOiIxMTExMTExMTExMTExMTExMTEifQ==";
+
 struct FakeGate;
 #[async_trait]
 impl GateReconciler for FakeGate {
@@ -17,12 +21,7 @@ impl GateReconciler for FakeGate {
         })
     }
 
-    async fn reconcile(
-        &self,
-        desired: &InstanceRow,
-        subject_grant: Option<&str>,
-    ) -> Result<VerifiedInstance> {
-        assert!(subject_grant.is_none() || subject_grant == Some("grant-secret"));
+    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
         Ok(VerifiedInstance {
             revision: 4,
             digest: "digest".into(),
@@ -42,7 +41,7 @@ impl GateReconciler for OfflineGate {
         Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Unavailable)
     }
 
-    async fn reconcile(&self, _: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
+    async fn reconcile(&self, _: &InstanceRow) -> Result<VerifiedInstance> {
         anyhow::bail!("core server is stopped")
     }
 }
@@ -57,7 +56,7 @@ impl GateReconciler for FailingGate {
         Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Mismatch)
     }
 
-    async fn reconcile(&self, _: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
+    async fn reconcile(&self, _: &InstanceRow) -> Result<VerifiedInstance> {
         anyhow::bail!("core unavailable")
     }
 }
@@ -72,7 +71,7 @@ impl GateReconciler for RecoveryGate {
         Ok(self.0)
     }
 
-    async fn reconcile(&self, _: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
+    async fn reconcile(&self, _: &InstanceRow) -> Result<VerifiedInstance> {
         anyhow::bail!("reconciliation not expected during startup matrix")
     }
 }
@@ -192,11 +191,9 @@ fn daemon(
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "agent",
-            7,
             "e30=",
             &["opaque-address".into()],
             "token-secret",
-            Some("grant-secret"),
             enabled,
             &[9; 32],
         )
@@ -305,11 +302,9 @@ async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "agent",
-            7,
             "e30=",
             &["opaque-address".into()],
             "token-secret",
-            Some("grant-secret"),
             true,
             &[9; 32],
         )
@@ -370,17 +365,7 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observa
         let enabled = state != LifecycleState::Disabled;
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let generation = store
-            .upsert_desired(
-                id,
-                "agent",
-                7,
-                "e30=",
-                &[],
-                "token",
-                None,
-                enabled,
-                &[9; 32],
-            )
+            .upsert_desired(id, "agent", "e30=", &[], "token", enabled, &[9; 32])
             .unwrap();
         if !matches!(state, LifecycleState::Pending) {
             store.mark_provisioning(id, generation).unwrap();
@@ -464,7 +449,7 @@ async fn s5_discord_running_loss_and_stale_process_are_reaped_to_durable_error()
         let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let generation = store
-            .upsert_desired(id, "agent", 7, "e30=", &[], "token", None, true, &[9; 32])
+            .upsert_desired(id, "agent", "e30=", &[], "token", true, &[9; 32])
             .unwrap();
         store.mark_provisioning(id, generation).unwrap();
         store
@@ -511,11 +496,9 @@ async fn s5_discord_reconciliation_failure_is_durable_and_does_not_kill_daemon()
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "agent",
-            7,
             "e30=",
             &[],
             "token-secret",
-            Some("grant-secret"),
             true,
             &[9; 32],
         )
@@ -555,11 +538,9 @@ async fn s5_discord_malformed_readiness_reaps_child_and_persists_retry() {
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "agent",
-            7,
             "e30=",
             &[],
             "token-secret",
-            None,
             true,
             &[9; 32],
         )
@@ -623,17 +604,7 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
     std::fs::write(&control, b"owned").unwrap();
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     let generation = store
-        .upsert_desired(
-            instance_id,
-            "agent",
-            7,
-            "e30=",
-            &[],
-            "token",
-            None,
-            false,
-            &[9; 32],
-        )
+        .upsert_desired(instance_id, "agent", "e30=", &[], "token", false, &[9; 32])
         .unwrap();
     store.mark_provisioning(instance_id, generation).unwrap();
     store
@@ -650,6 +621,7 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
             attachment_spool_root: None,
             attachment_outbox_root: None,
             database_path: temp.path().join("owner.db"),
+            voice_settings: temp.path().join("voice/settings.json"),
         }),
     )
     .unwrap();
@@ -683,14 +655,12 @@ async fn s5_discord_disabled_and_nonready_instances_never_spawn() {
 fn s5_discord_runtime_config_rejects_core_and_legacy_database_paths() {
     let value = serde_json::json!({
         "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
-        "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
         "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place",
         "core_database_path":"/tmp/core.db"
     });
     assert!(serde_json::from_value::<DaemonConfig>(value).is_err());
     let legacy = serde_json::json!({
         "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
-        "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
         "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place",
         "legacy_database_path":"/tmp/core.db"
     });
@@ -708,6 +678,7 @@ fn d1079_production_placement_carries_attachment_outbox_root() {
         attachment_spool_root: Some(temp.path().join("inbox")),
         attachment_outbox_root: Some(temp.path().join("outbox")),
         database_path: temp.path().join("owner.db"),
+        voice_settings: temp.path().join("voice/settings.json"),
     };
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -715,11 +686,9 @@ fn d1079_production_placement_carries_attachment_outbox_root() {
         .upsert_desired(
             instance_id,
             "agent",
-            7,
-            "e30=",
+            VALID_CONFIG_B64,
             &[],
             "token",
-            None,
             true,
             &[9; 32],
         )
@@ -747,7 +716,6 @@ fn d1079_daemon_config_requires_absolute_attachment_outbox_root() {
     let config = |root: &str| {
         serde_json::from_value::<DaemonConfig>(serde_json::json!({
             "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
-            "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
             "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place",
             "attachment_outbox_root": root
         }))

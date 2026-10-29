@@ -21,6 +21,9 @@ pub struct IncomingMessage {
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<IncomingAttachment>,
+    /// D-1097: user ids the message @mentions (Discord-resolved, not parsed from the text).
+    #[serde(default)]
+    pub mentions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -211,6 +214,7 @@ mod tests {
             },
             content: content.into(),
             attachments: Vec::new(),
+            mentions: Vec::new(),
         }
     }
 

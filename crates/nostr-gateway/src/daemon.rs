@@ -18,10 +18,7 @@ use std::sync::{Arc, Mutex};
 pub struct DaemonConfig {
     pub database_path: PathBuf,
     pub admin_socket: PathBuf,
-    #[serde(default)]
-    pub admin_instance_ids: Vec<String>,
-    pub gate_admin_socket: PathBuf,
-    pub gate_admin_credential: PathBuf,
+    /// Core's gate socket: the daemon provisions instances on it and the children connect to it.
     pub core_socket: PathBuf,
     pub child_binary: PathBuf,
     pub placement_dir: PathBuf,
@@ -71,8 +68,6 @@ impl DaemonConfig {
         for (name, path) in [
             ("database_path", &self.database_path),
             ("admin_socket", &self.admin_socket),
-            ("gate_admin_socket", &self.gate_admin_socket),
-            ("gate_admin_credential", &self.gate_admin_credential),
             ("core_socket", &self.core_socket),
             ("child_binary", &self.child_binary),
             ("placement_dir", &self.placement_dir),
@@ -103,89 +98,59 @@ pub trait GateReconciler: Send + Sync {
         desired: &InstanceRow,
     ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation>;
 
-    async fn reconcile(
-        &self,
-        desired: &InstanceRow,
-        subject_grant: Option<&str>,
-    ) -> Result<VerifiedInstance>;
+    /// Makes core hold `desired` and returns what the child's `hello` must carry.
+    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance>;
 }
 
-pub struct UdsGateReconciler {
-    client: opencrab_gate_client::admin::GateAdminClient,
+/// D-1098: provisions an instance on core's gate socket (credential-less `provision` frame,
+/// before the child's `hello`). Core gets the fixed neutral config and the instance's address.
+pub struct ProvisionReconciler {
+    client: opencrab_gate_client::provision::ProvisionClient,
     kind_id: String,
 }
 
-impl UdsGateReconciler {
-    pub fn new(
-        client: opencrab_gate_client::admin::GateAdminClient,
-        kind_id: impl Into<String>,
-    ) -> Self {
+impl ProvisionReconciler {
+    pub fn new(core_socket: PathBuf, kind_id: impl Into<String>) -> Self {
         Self {
-            client,
+            client: opencrab_gate_client::provision::ProvisionClient::new(core_socket),
             kind_id: kind_id.into(),
         }
     }
 }
 
 #[async_trait]
-impl GateReconciler for UdsGateReconciler {
+impl GateReconciler for ProvisionReconciler {
+    /// Core has no read side for gateways; startup decides from the process alone and the next
+    /// provision converges core.
     async fn observe(
         &self,
-        desired: &InstanceRow,
+        _desired: &InstanceRow,
     ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        use opencrab_process_supervisor::lifecycle::CoreObservation;
-        let Some(observed) = self.client.get_instance(&desired.instance_id).await? else {
-            return Ok(CoreObservation::Mismatch);
-        };
-        let mut bindings: Vec<_> = observed
-            .bindings
-            .into_iter()
-            .map(|value| value.binding_id)
-            .collect();
-        bindings.sort();
-        let mut expected = desired.core_bindings.clone();
-        expected.sort();
-        if observed.revision == desired.core_revision.unwrap_or(0)
-            && observed.config_digest == desired.core_digest.as_deref().unwrap_or_default()
-            && bindings == expected
-        {
-            Ok(if observed.enabled {
-                CoreObservation::ExactEnabled
-            } else {
-                CoreObservation::ExactDisabled
-            })
-        } else {
-            Ok(CoreObservation::Mismatch)
-        }
+        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Unavailable)
     }
 
-    async fn reconcile(
-        &self,
-        desired: &InstanceRow,
-        subject_grant: Option<&str>,
-    ) -> Result<VerifiedInstance> {
+    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
         let core_config_b64 = core_config_b64_for_runtime_config(&desired.config_b64)?;
-        let observed = self
+        let provisioned = self
             .client
-            .reconcile(opencrab_gate_client::admin::ReconcileDesired {
+            .provision(&opencrab_gate_client::provision::ProvisionDesired {
                 instance_id: &desired.instance_id,
                 kind_id: &self.kind_id,
-                subject_id: desired.subject_id,
+                agent_id: &desired.agent_id,
                 enabled: desired.enabled,
                 config_b64: &core_config_b64,
-                subject_grant,
                 addresses: &desired.addresses,
             })
             .await?;
         Ok(VerifiedInstance {
-            revision: observed.revision,
-            digest: observed.config_digest,
-            bindings: observed
+            revision: provisioned.revision,
+            digest: provisioned.config_digest,
+            bindings: provisioned
                 .bindings
                 .into_iter()
                 .map(|binding| binding.binding_id)
                 .collect(),
-            enabled: observed.enabled,
+            enabled: provisioned.enabled,
         })
     }
 }
@@ -380,18 +345,7 @@ where
                     {
                         continue;
                     }
-                    let grant = self
-                        .store
-                        .lock()
-                        .unwrap()
-                        .decrypt_subject_grant(&row.instance_id, &self.key)?;
-                    let grant_text = grant
-                        .as_ref()
-                        .map(|value| {
-                            std::str::from_utf8(value).context("subject grant is not UTF-8")
-                        })
-                        .transpose()?;
-                    let verified = match self.reconciler.reconcile(&row, grant_text).await {
+                    let verified = match self.reconciler.reconcile(&row).await {
                         Ok(value) => value,
                         Err(error) => {
                             self.factory.cleanup_artifacts(&row)?;
@@ -416,10 +370,6 @@ where
                         )?,
                         "stale lifecycle verification commit"
                     );
-                    self.store
-                        .lock()
-                        .unwrap()
-                        .clear_subject_grant(&row.instance_id, row.desired_generation)?;
                     if verified.enabled {
                         if let Err(error) = self.start_ready(&row.instance_id).await {
                             self.factory.cleanup_artifacts(&row)?;
@@ -602,12 +552,13 @@ async fn wait_for_child_readiness<F: SpawnerFactory + 'static>(
     }
 }
 
-struct ProductionFactory {
-    child_binary: PathBuf,
-    core_socket: PathBuf,
-    placement_dir: PathBuf,
-    nostaro_bin: PathBuf,
-    attachment_outbox_root: Option<PathBuf>,
+/// The production child spawner: writes the daemon-owned child placement and starts the child.
+pub struct ProductionFactory {
+    pub child_binary: PathBuf,
+    pub core_socket: PathBuf,
+    pub placement_dir: PathBuf,
+    pub nostaro_bin: PathBuf,
+    pub attachment_outbox_root: Option<PathBuf>,
 }
 
 impl SpawnerFactory for ProductionFactory {
@@ -752,14 +703,13 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let mut raw = [0_u8; 32];
     raw.copy_from_slice(&key[..]);
     let store = NostrStore::open(&config.database_path)?;
-    let client = opencrab_gate_client::admin::GateAdminClient::from_credential_file(
-        config.gate_admin_socket.clone(),
-        &config.gate_admin_credential,
-    )?;
     let daemon = NostrDaemon::new(
         store,
         raw,
-        Arc::new(UdsGateReconciler::new(client, "nostr")),
+        Arc::new(ProvisionReconciler::new(
+            config.core_socket.clone(),
+            "nostr",
+        )),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),
@@ -768,12 +718,13 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             attachment_outbox_root: config.attachment_outbox_root.clone(),
         }),
     )?;
-    let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());
     let _admin = crate::admin::spawn(
         config.admin_socket.clone(),
-        admin_scope,
-        daemon.store(),
-        Arc::new(raw),
+        crate::admin::AdminContext {
+            store: daemon.store(),
+            master_key: Arc::new(raw),
+            nostaro_bin: config.nostaro_bin.clone(),
+        },
     );
     let mut interval =
         tokio::time::interval(std::time::Duration::from_millis(config.reconcile_millis));
@@ -786,3 +737,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "daemon_settings_tests.rs"]
+mod settings_tests;

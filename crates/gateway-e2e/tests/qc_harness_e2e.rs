@@ -25,3 +25,4 @@ include!("qc_harness_e2e/audit_899.rs");
 include!("qc_harness_e2e/audit_900_and_s13.rs");
 include!("qc_harness_e2e/heartbeat_925.rs");
 include!("qc_harness_e2e/attachments.rs");
+include!("qc_harness_e2e/daemon_provision.rs");

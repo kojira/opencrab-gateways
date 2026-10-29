@@ -13,8 +13,6 @@ const AGENT: &str = "e2eagent";
 const AUTHOR: &str = "e2e-owner";
 const LOGICAL: &str = "web-e2eagent-c1";
 const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
-const BINDING: &str = "22222222-2222-4222-8222-222222222222";
-const TOKEN: &str = "e2e-operator-token";
 const CLIENT_MSG: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const REPLY: &str = "e2e-reply-from-mock";
 const CONFIG_B64: &str = "eyJhdXRob3JfaWQiOiJlMmUtb3duZXIifQ==";
@@ -349,7 +347,6 @@ fn spawn_sse(port: u16, session: &str) -> std::sync::mpsc::Receiver<String> {
 }
 
 #[test]
-#[ignore = "gate_admin dependency is being removed; keep out of default CI (#1033)"]
 fn send_said_turn_say_sse_over_real_processes() {
     let mock = spawn_mock_llm();
     let root = tempfile::tempdir().unwrap();
@@ -398,7 +395,6 @@ fn send_said_turn_say_sse_over_real_processes() {
     let core = Proc(
         Command::new(server_bin())
             .current_dir(root.path())
-            .env("OPENCRAB_GATE_OPERATOR_TOKEN", TOKEN)
             .env(
                 "RUST_LOG",
                 "opencrab=debug,opencrab_server=debug,opencrab_extgate=debug,opencrab_core=debug",
@@ -437,44 +433,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     .expect("model pricing");
     assert_eq!(st, 200, "model-pricing {body}");
 
-    let (_, agent_json) = http(
-        core_port,
-        "GET",
-        &format!("/api/agents/{AGENT}"),
-        None,
-        None,
-        Duration::from_secs(5),
-    )
-    .expect("get agent");
-    let agent_v: serde_json::Value = serde_json::from_str(agent_json.trim()).expect("agent json");
-    let subject = agent_v["subject_id"].as_i64().expect("subject_id");
-    assert!(subject > 0, "{agent_json}");
-
-    let inst_body = format!(
-        r#"{{"kind_id":"web","subject_id":{subject},"enabled":true,"config_b64":"{CONFIG_B64}"}}"#
-    );
-    let (st, body) = http(
-        core_port,
-        "PUT",
-        &format!("/api/gate-instances/{INSTANCE}"),
-        Some(TOKEN),
-        Some(&inst_body),
-        Duration::from_secs(5),
-    )
-    .expect("instance put");
-    assert!(st == 200 || st == 201, "instance PUT {st} {body}");
-
-    let bind_body = format!(r#"{{"instance_id":"{INSTANCE}","address":"{LOGICAL}"}}"#);
-    let (st, body) = http(
-        core_port,
-        "PUT",
-        &format!("/api/gate-bindings/{BINDING}"),
-        Some(TOKEN),
-        Some(&bind_body),
-        Duration::from_secs(5),
-    )
-    .expect("binding put");
-    assert!(st == 200 || st == 201, "binding PUT {st} {body}");
+    let binding = provision_web(&sock, &[LOGICAL.to_string()]).remove(0);
 
     let placement = root.path().join("placement.json");
     std::fs::write(
@@ -609,7 +568,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     let origins: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM external_origins WHERE binding_id = ?1 AND origin = ?2",
-            [BINDING, &format!("web:{CLIENT_MSG}")],
+            [binding.as_str(), &format!("web:{CLIENT_MSG}")],
             |r| r.get(0),
         )
         .unwrap();
@@ -617,7 +576,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     let inbound: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1 AND content = 'hello from e2e'",
-            [format!("extgate-{BINDING}")],
+            [format!("extgate-{binding}")],
             |r| r.get(0),
         )
         .unwrap();
@@ -625,7 +584,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     let reply: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1 AND content = ?2",
-            [format!("extgate-{BINDING}"), REPLY.to_string()],
+            [format!("extgate-{binding}"), REPLY.to_string()],
             |r| r.get(0),
         )
         .unwrap();
@@ -641,7 +600,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     let sources: Vec<String> = conn
         .prepare("SELECT metadata_json FROM memory_sessions WHERE session_id = ?1")
         .unwrap()
-        .query_map([format!("extgate-{BINDING}")], |r| {
+        .query_map([format!("extgate-{binding}")], |r| {
             r.get::<_, Option<String>>(0)
         })
         .unwrap()
@@ -660,4 +619,48 @@ fn send_said_turn_say_sse_over_real_processes() {
         "reply source: {sources:?}"
     );
     let _ = std::fs::remove_file(&sock);
+}
+
+/// D-1098: declares the web instance (and its complete binding set) on core's gate socket the
+/// way a gateway does before `hello`. Returns the binding ids core reports, per address.
+fn provision_web(sock: &Path, addresses: &[String]) -> Vec<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let start = Instant::now();
+    let provisioned = loop {
+        let attempt = runtime.block_on(
+            opencrab_gate_client::provision::ProvisionClient::new(sock.to_path_buf()).provision(
+                &opencrab_gate_client::provision::ProvisionDesired {
+                    instance_id: INSTANCE,
+                    kind_id: "web",
+                    agent_id: AGENT,
+                    enabled: true,
+                    config_b64: CONFIG_B64,
+                    addresses,
+                },
+            ),
+        );
+        match attempt {
+            Ok(provisioned) => break provisioned,
+            Err(error) if start.elapsed() > Duration::from_secs(15) => {
+                panic!("provision: {error:#}")
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    assert_eq!(provisioned.revision, 1, "the placement says revision 1");
+    addresses
+        .iter()
+        .map(|address| {
+            provisioned
+                .bindings
+                .iter()
+                .find(|binding| &binding.address == address)
+                .expect("provisioned binding")
+                .binding_id
+                .clone()
+        })
+        .collect()
 }

@@ -22,7 +22,7 @@ use serde_json::json;
 use super::clients;
 use super::settings::{load_settings, save_settings, VoiceSettings};
 
-const PAGE: &str = include_str!("settings_page.html");
+pub const PAGE: &str = include_str!("settings_page.html");
 const STT_TEST_TEXT: &str = "音声認識のテストです";
 
 struct AppState {
@@ -41,19 +41,26 @@ pub async fn run(path: PathBuf, port: u16) -> anyhow::Result<()> {
 }
 
 pub async fn serve_on(listener: tokio::net::TcpListener, path: PathBuf) -> anyhow::Result<()> {
+    let app = Router::new()
+        .route("/", get(|| async { Html(PAGE) }))
+        .merge(api_router(path));
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// The `/api/voice-settings*` routes for the settings file at `path`. The Discord settings page
+/// (D-1097) serves them too, so both pages share one implementation.
+pub fn api_router(path: PathBuf) -> Router {
     let state = Arc::new(AppState {
         path,
         http: clients::http_client(),
     });
-    let app = Router::new()
-        .route("/", get(|| async { Html(PAGE) }))
+    Router::new()
         .route("/api/voice-settings", get(get_settings).put(put_settings))
         .route("/api/voice-settings/speakers", get(get_speakers))
         .route("/api/voice-settings/test-tts", post(test_tts))
         .route("/api/voice-settings/test-stt", post(test_stt))
-        .with_state(state);
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 fn error(status: StatusCode, message: impl ToString) -> Response {

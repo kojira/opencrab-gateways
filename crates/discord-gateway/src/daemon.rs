@@ -15,10 +15,7 @@ use std::sync::{Arc, Mutex};
 pub struct DaemonConfig {
     pub database_path: PathBuf,
     pub admin_socket: PathBuf,
-    #[serde(default)]
-    pub admin_instance_ids: Vec<String>,
-    pub gate_admin_socket: PathBuf,
-    pub gate_admin_credential: PathBuf,
+    /// Core's gate socket: the daemon provisions instances on it and the children connect to it.
     pub core_socket: PathBuf,
     pub child_binary: PathBuf,
     pub placement_dir: PathBuf,
@@ -29,10 +26,30 @@ pub struct DaemonConfig {
     pub attachment_outbox_root: Option<PathBuf>,
     #[serde(default = "default_reconcile_millis")]
     pub reconcile_millis: u64,
+    /// D-1097 D3: instance-mode placements and token files to import while the store is empty.
+    #[serde(default)]
+    pub legacy_import: Option<crate::legacy_import::LegacyImport>,
+    /// D-1097: the VC settings file (see [`DaemonConfig::voice_settings_path`]).
+    #[serde(default)]
+    pub voice_settings: Option<PathBuf>,
+    /// D-1097: core's public HTTP API, read by the settings page for the agent list
+    /// (for example `http://127.0.0.1:8080`).
+    #[serde(default)]
+    pub core_api: Option<String>,
 }
 
 fn default_reconcile_millis() -> u64 {
     1_000
+}
+
+/// D-1097 D2: the one config core holds for every Discord instance.
+pub const DEFAULT_CORE_CONFIG_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==";
+
+/// The config to register in core for an instance whose Discord config is `config_b64`. The
+/// Discord config is only validated here; core never sees it.
+pub fn core_config_b64_for_runtime_config(config_b64: &str) -> Result<String> {
+    crate::config::parse_instance_config(&crate::config::decode_config_b64(config_b64)?)?;
+    Ok(DEFAULT_CORE_CONFIG_B64.to_string())
 }
 
 fn retry_deadline(row: &InstanceRow) -> i64 {
@@ -48,12 +65,22 @@ impl DaemonConfig {
         Ok(value)
     }
 
+    /// D-1097: the VC settings file the children and the settings page share. Optional in the
+    /// daemon config; absent = `voice/settings.json` next to the store.
+    pub fn voice_settings_path(&self) -> PathBuf {
+        self.voice_settings.clone().unwrap_or_else(|| {
+            self.database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .join("voice")
+                .join("settings.json")
+        })
+    }
+
     pub fn validate(&self) -> Result<()> {
         for (name, path) in [
             ("database_path", &self.database_path),
             ("admin_socket", &self.admin_socket),
-            ("gate_admin_socket", &self.gate_admin_socket),
-            ("gate_admin_credential", &self.gate_admin_credential),
             ("core_socket", &self.core_socket),
             ("child_binary", &self.child_binary),
             ("placement_dir", &self.placement_dir),
@@ -65,6 +92,12 @@ impl DaemonConfig {
                 path.is_absolute(),
                 "attachment_outbox_root must be absolute"
             );
+        }
+        if let Some(import) = &self.legacy_import {
+            import.validate()?;
+        }
+        if let Some(path) = &self.voice_settings {
+            anyhow::ensure!(path.is_absolute(), "voice_settings must be absolute");
         }
         anyhow::ensure!(
             self.reconcile_millis > 0,
@@ -89,91 +122,12 @@ pub trait GateReconciler: Send + Sync {
         desired: &InstanceRow,
     ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation>;
 
-    async fn reconcile(
-        &self,
-        desired: &InstanceRow,
-        subject_grant: Option<&str>,
-    ) -> Result<VerifiedInstance>;
+    /// Makes core hold `desired` (instance and complete binding set) and returns what the
+    /// child's `hello` must carry.
+    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance>;
 }
 
-pub struct UdsGateReconciler {
-    client: opencrab_gate_client::admin::GateAdminClient,
-    kind_id: String,
-}
-
-impl UdsGateReconciler {
-    pub fn new(
-        client: opencrab_gate_client::admin::GateAdminClient,
-        kind_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            client,
-            kind_id: kind_id.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl GateReconciler for UdsGateReconciler {
-    async fn observe(
-        &self,
-        desired: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        use opencrab_process_supervisor::lifecycle::CoreObservation;
-        let Some(observed) = self.client.get_instance(&desired.instance_id).await? else {
-            return Ok(CoreObservation::Mismatch);
-        };
-        let mut bindings: Vec<_> = observed
-            .bindings
-            .into_iter()
-            .map(|value| value.binding_id)
-            .collect();
-        bindings.sort();
-        let mut expected = desired.core_bindings.clone();
-        expected.sort();
-        if observed.revision == desired.core_revision.unwrap_or(0)
-            && observed.config_digest == desired.core_digest.as_deref().unwrap_or_default()
-            && bindings == expected
-        {
-            Ok(if observed.enabled {
-                CoreObservation::ExactEnabled
-            } else {
-                CoreObservation::ExactDisabled
-            })
-        } else {
-            Ok(CoreObservation::Mismatch)
-        }
-    }
-
-    async fn reconcile(
-        &self,
-        desired: &InstanceRow,
-        subject_grant: Option<&str>,
-    ) -> Result<VerifiedInstance> {
-        let observed = self
-            .client
-            .reconcile(opencrab_gate_client::admin::ReconcileDesired {
-                instance_id: &desired.instance_id,
-                kind_id: &self.kind_id,
-                subject_id: desired.subject_id,
-                enabled: desired.enabled,
-                config_b64: &desired.config_b64,
-                subject_grant,
-                addresses: &desired.addresses,
-            })
-            .await?;
-        Ok(VerifiedInstance {
-            revision: observed.revision,
-            digest: observed.config_digest,
-            bindings: observed
-                .bindings
-                .into_iter()
-                .map(|binding| binding.binding_id)
-                .collect(),
-            enabled: observed.enabled,
-        })
-    }
-}
+pub use crate::core_provisioning::ProvisionReconciler;
 
 pub trait SpawnerFactory: Send + Sync {
     fn observe_process(
@@ -195,6 +149,10 @@ pub trait SpawnerFactory: Send + Sync {
         Ok(None)
     }
     fn control_socket(&self, _row: &InstanceRow, _start_nonce: &str) -> Option<PathBuf> {
+        None
+    }
+    /// D-1097: where this instance's child asks for one more channel. `None` = not offered.
+    fn channel_socket(&self, _row: &InstanceRow) -> Option<PathBuf> {
         None
     }
     fn for_instance(
@@ -248,6 +206,10 @@ pub struct DiscordDaemon<R, F> {
     factory: Arc<F>,
     supervisors: Arc<ProcessSupervisorSet>,
     startup_recovered: std::sync::atomic::AtomicBool,
+    /// D-1097: one channel-request listener per started child, stopped with the child.
+    channel_tasks: Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<Result<()>>>>,
+    /// Set by [`DiscordDaemon::serve_channel_requests`]; `None` = no listeners are started.
+    channel_binder: Mutex<Option<Arc<dyn crate::channel_request::ChannelBinder>>>,
 }
 
 impl<R, F> DiscordDaemon<R, F>
@@ -268,6 +230,8 @@ where
             factory,
             supervisors: ProcessSupervisorSet::new(SupervisorConfig::daemon_owned()),
             startup_recovered: std::sync::atomic::AtomicBool::new(false),
+            channel_tasks: Mutex::new(std::collections::HashMap::new()),
+            channel_binder: Mutex::new(None),
         })
     }
 
@@ -355,6 +319,7 @@ where
             match row.lifecycle_state {
                 opencrab_process_supervisor::lifecycle::LifecycleState::Pending => {
                     self.supervisors.stop(&row.instance_id).await;
+                    self.stop_channel_listener(&row.instance_id);
                     self.factory.reap_stale(&row)?;
                     self.factory.cleanup_artifacts(&row)?;
                     if !self
@@ -365,18 +330,7 @@ where
                     {
                         continue;
                     }
-                    let grant = self
-                        .store
-                        .lock()
-                        .unwrap()
-                        .decrypt_subject_grant(&row.instance_id, &self.key)?;
-                    let grant_text = grant
-                        .as_ref()
-                        .map(|value| {
-                            std::str::from_utf8(value).context("subject grant is not UTF-8")
-                        })
-                        .transpose()?;
-                    let verified = match self.reconciler.reconcile(&row, grant_text).await {
+                    let verified = match self.reconciler.reconcile(&row).await {
                         Ok(value) => value,
                         Err(error) => {
                             self.factory.cleanup_artifacts(&row)?;
@@ -401,10 +355,6 @@ where
                         )?,
                         "stale lifecycle verification commit"
                     );
-                    self.store
-                        .lock()
-                        .unwrap()
-                        .clear_subject_grant(&row.instance_id, row.desired_generation)?;
                     if verified.enabled {
                         if let Err(error) = self.start_ready(&row.instance_id).await {
                             self.factory.cleanup_artifacts(&row)?;
@@ -435,11 +385,13 @@ where
                 opencrab_process_supervisor::lifecycle::LifecycleState::Disabled
                 | opencrab_process_supervisor::lifecycle::LifecycleState::Provisioning => {
                     self.supervisors.stop(&row.instance_id).await;
+                    self.stop_channel_listener(&row.instance_id);
                     self.factory.reap_stale(&row)?;
                     self.factory.cleanup_artifacts(&row)?;
                 }
                 opencrab_process_supervisor::lifecycle::LifecycleState::Error => {
                     self.supervisors.stop(&row.instance_id).await;
+                    self.stop_channel_listener(&row.instance_id);
                     self.factory.reap_stale(&row)?;
                     self.factory.cleanup_artifacts(&row)?;
                     let _ = self.store.lock().unwrap().retry_due_error(
@@ -474,6 +426,7 @@ where
             Some(path) => Some(prepare_readiness_listener(&path)?),
             None => None,
         };
+        self.start_channel_listener(&row);
         let spawner = self.factory.for_instance(&row, credential, &nonce)?;
         let observer = Arc::new(StoreObserver {
             store: self.store.clone(),
@@ -514,6 +467,9 @@ where
     }
 
     pub async fn shutdown(&self) {
+        for (_, task) in self.channel_tasks.lock().unwrap().drain() {
+            task.abort();
+        }
         self.supervisors.shutdown_all().await;
     }
 }
@@ -590,143 +546,9 @@ async fn wait_for_child_readiness<F: SpawnerFactory + 'static>(
     }
 }
 
-struct ProductionFactory {
-    child_binary: PathBuf,
-    core_socket: PathBuf,
-    placement_dir: PathBuf,
-    attachment_spool_root: Option<PathBuf>,
-    attachment_outbox_root: Option<PathBuf>,
-    /// Gateway store DB. The instance opens it for the per-session activity webhook routes
-    /// (D-1087); the daemon owns the schema and the master key.
-    database_path: PathBuf,
-}
-
-impl SpawnerFactory for ProductionFactory {
-    fn observe_process(
-        &self,
-        row: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::ProcessObservation> {
-        use opencrab_process_supervisor::lifecycle::ProcessObservation;
-        let Some(pid) = row.process_id else {
-            return Ok(ProcessObservation::Missing);
-        };
-        let result = unsafe { libc::kill(pid as i32, 0) };
-        if result == 0 {
-            let placement = self.placement_dir.join(format!("{}.json", row.instance_id));
-            let exact_nonce = std::fs::read(&placement)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| {
-                    value
-                        .get("start_nonce")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .is_some_and(|nonce| Some(nonce.as_str()) == row.process_nonce.as_deref());
-            return Ok(if exact_nonce {
-                ProcessObservation::ExactLive
-            } else {
-                ProcessObservation::StaleLive
-            });
-        }
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::ESRCH) => Ok(ProcessObservation::Missing),
-            _ => Ok(ProcessObservation::Unknown),
-        }
-    }
-
-    fn reap_stale(&self, row: &InstanceRow) -> Result<()> {
-        let placement = self.placement_dir.join(format!("{}.json", row.instance_id));
-        let owned = std::fs::read(&placement)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| {
-                value
-                    .get("start_nonce")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .is_some_and(|nonce| Some(nonce.as_str()) == row.process_nonce.as_deref());
-        if owned {
-            if let Some(pid) = row.process_id {
-                if unsafe { libc::kill(pid as i32, 0) } == 0 {
-                    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn adopted_child(
-        &self,
-        row: &InstanceRow,
-    ) -> Result<Option<Box<dyn opencrab_process_supervisor::SupervisedChild>>> {
-        Ok(row.process_id.map(|pid| {
-            Box::new(opencrab_process_supervisor::AdoptedPidChild::new(pid))
-                as Box<dyn opencrab_process_supervisor::SupervisedChild>
-        }))
-    }
-
-    fn cleanup_artifacts(&self, row: &InstanceRow) -> Result<()> {
-        for path in [
-            self.placement_dir.join(format!("{}.json", row.instance_id)),
-            self.placement_dir
-                .join(format!("{}.control.sock", row.instance_id)),
-        ] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(())
-    }
-
-    fn control_socket(&self, row: &InstanceRow, _: &str) -> Option<PathBuf> {
-        Some(
-            self.placement_dir
-                .join(format!("{}.control.sock", row.instance_id)),
-        )
-    }
-
-    fn for_instance(
-        &self,
-        row: &InstanceRow,
-        credential: zeroize::Zeroizing<Vec<u8>>,
-        start_nonce: &str,
-    ) -> Result<Arc<dyn ChildSpawner>> {
-        let revision = row.core_revision.context("verified revision missing")?;
-        std::fs::create_dir_all(&self.placement_dir)?;
-        let path = self.placement_dir.join(format!("{}.json", row.instance_id));
-        let control_socket = self
-            .control_socket(row, "")
-            .expect("production control socket");
-        let value = serde_json::json!({
-            "core_socket": self.core_socket,
-            "attachment_spool_root": self.attachment_spool_root,
-            "attachment_outbox_root": self.attachment_outbox_root,
-            "database_path": self.database_path,
-            "control_socket": control_socket,
-            "start_nonce": start_nonce,
-            "instances": [{"instance_id":row.instance_id,"revision":revision,
-                "addresses":row.addresses,"config_b64":row.config_b64}]
-        });
-        let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
-        std::fs::rename(temporary, &path)?;
-        let secret = String::from_utf8(credential.to_vec()).context("credential is not UTF-8")?;
-        Ok(Arc::new(
-            opencrab_process_supervisor::ExternalProcessSpawner::with_secret_env(
-                self.child_binary.clone(),
-                path,
-                secret,
-                crate::secret::TOKEN_ENV,
-                "discord-adapter",
-                row.instance_id.clone(),
-            ),
-        ))
-    }
-}
+#[path = "daemon_production.rs"]
+mod production;
+pub use production::ProductionFactory;
 
 pub async fn run(config: DaemonConfig) -> Result<()> {
     config.validate()?;
@@ -738,14 +560,18 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let mut raw = [0_u8; 32];
     raw.copy_from_slice(&key[..]);
     let store = DiscordStore::open(&config.database_path)?;
-    let client = opencrab_gate_client::admin::GateAdminClient::from_credential_file(
-        config.gate_admin_socket.clone(),
-        &config.gate_admin_credential,
-    )?;
-    let daemon = DiscordDaemon::new(
+    if let Some(import) = &config.legacy_import {
+        let outcome = crate::legacy_import::import_legacy(&store, import, &raw)
+            .context("discord legacy import failed")?;
+        tracing::info!(?outcome, "discord legacy import");
+    }
+    let daemon = Arc::new(DiscordDaemon::new(
         store,
         raw,
-        Arc::new(UdsGateReconciler::new(client, "discord")),
+        Arc::new(ProvisionReconciler::new(
+            config.core_socket.clone(),
+            "discord",
+        )),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),
@@ -753,15 +579,11 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             attachment_spool_root: config.attachment_spool_root.clone(),
             attachment_outbox_root: config.attachment_outbox_root.clone(),
             database_path: config.database_path.clone(),
+            voice_settings: config.voice_settings_path(),
         }),
-    )?;
-    let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());
-    let _admin = crate::admin::spawn(
-        config.admin_socket.clone(),
-        admin_scope,
-        daemon.store(),
-        Arc::new(raw),
-    );
+    )?);
+    daemon.serve_channel_requests(Arc::new(DaemonChannels(Arc::downgrade(&daemon))));
+    let _admin = crate::admin::spawn(config.admin_socket.clone(), daemon.store(), Arc::new(raw));
     let mut interval =
         tokio::time::interval(std::time::Duration::from_millis(config.reconcile_millis));
     loop {
@@ -770,6 +592,14 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     }
 }
 
+#[path = "daemon_channels.rs"]
+mod channels;
+pub use channels::DaemonChannels;
+
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "daemon_settings_tests.rs"]
+mod settings_tests;

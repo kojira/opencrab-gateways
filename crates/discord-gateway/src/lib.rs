@@ -10,10 +10,14 @@
 //! オフライン E2E（[`harness`]）で実配線を回す（Nostr の偽watch 相当）。
 
 pub mod admin;
+pub mod admin_settings;
 pub mod attachment;
+pub mod channel_request;
 pub mod config;
+pub mod core_provisioning;
 pub mod daemon;
 pub mod harness;
+pub mod legacy_import;
 pub mod map;
 pub mod model;
 pub mod ops;
@@ -23,6 +27,7 @@ mod reply_files;
 pub mod run;
 pub mod secret;
 pub mod secret_store;
+pub mod settings_http;
 pub mod store;
 pub mod thinking;
 pub mod transport;

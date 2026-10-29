@@ -14,13 +14,10 @@ use opencrab_gate_client::{InvokeHandler, SayPolicy};
 
 use crate::attachment::AttachmentSpool;
 use crate::config::{
-    config_digest, parse_instance_config, AccessConfig, InstanceConfig, InstancePlacement,
-    SystemReactions,
+    parse_instance_config, AccessConfig, InstanceConfig, InstancePlacement, SystemReactions,
 };
 use crate::harness::HarnessOverrides;
-use crate::map::{
-    address_for, address_of, map_message, parse_address, parse_event_line, parse_origin,
-};
+use crate::map::{address_for, address_of, map_message, parse_address, parse_event_line};
 use crate::model::{InteractionAction, ModelInteractionEvent, COMMAND_TIMEOUT};
 use crate::ops::{
     operation_declarations, targets_for, BindingDeliveryTargets, DiscordInvokeHandler,
@@ -31,7 +28,7 @@ use crate::run::model_command::{
     edit_model_response, handle_model_interaction, model_command_address,
     resolve_model_command_transport,
 };
-use crate::transport::{DiscordTransport, DryRunTransport, SerenityTransport, TransportOutcome};
+use crate::transport::{DiscordTransport, DryRunTransport, SerenityTransport};
 use crate::voice::session::{VoiceManager, VoiceManagerConfig};
 use crate::voice::songbird_player::{songbird_config, SongbirdPlayer};
 
@@ -84,7 +81,8 @@ pub fn spawn_instance_with_voice(
         );
     }
     let cfg = parse_instance_config(config_bytes)?;
-    let digest = config_digest(config_bytes);
+    // D-1097 D2: the digest of what core holds (`InstancePlacement::hello_digest`).
+    let digest = place.hello_digest()?;
 
     // transport: dry-run（REST を叩かずログ）か production（serenity REST・token 保持）。
     // say も invoke も同一 transport を通すので dry-run 分岐は 1 箇所。
@@ -173,6 +171,7 @@ pub fn spawn_instance_with_voice(
     supervise(Supervision {
         client: client.clone(),
         addresses: place.addresses.clone(),
+        channel_socket: place.channel_socket.clone(),
         cfg,
         transport,
         token,
@@ -190,6 +189,7 @@ pub fn spawn_instance_with_voice(
 struct Supervision {
     client: Arc<InstanceClient>,
     addresses: Vec<String>,
+    channel_socket: Option<PathBuf>,
     cfg: InstanceConfig,
     transport: Arc<dyn DiscordTransport>,
     token: Option<Arc<String>>,
@@ -206,6 +206,7 @@ fn supervise(supervision: Supervision) {
     let Supervision {
         client,
         addresses,
+        channel_socket,
         cfg,
         transport,
         token,
@@ -217,6 +218,18 @@ fn supervise(supervision: Supervision) {
         voice,
         activity_store,
     } = supervision;
+    // D-1087: 活動の配送口（宛先は gateway の DB、core は知らない）。
+    let activity = activity_store
+        .clone()
+        .map(|store| Arc::new(crate::webhook::ActivityDelivery::new(store)));
+    // say consumer の起動口（設定済み address と、オーナーのメンションで有効にした address）。
+    let start_say = owner_mention::say_consumers(
+        &client,
+        &transport,
+        &cfg,
+        &delivery_targets,
+        (&voice, &activity),
+    );
     // 受信ループ（1 本）: fixture か serenity。ack 済み binding の channel だけ said にする。
     // 👀 は受信時ではなく say consumer 側（activity started）で付けるので、受信は transport/
     // reactions を持たない（R2）。
@@ -229,7 +242,11 @@ fn supervise(supervision: Supervision) {
         attachment_spool,
         serenity_http,
         voice.clone(),
-        activity_store.clone(),
+        (
+            activity_store.clone(),
+            channel_socket,
+            Some(start_say.clone()),
+        ),
     );
     tokio::spawn(async move {
         if let Some(fixture) = overrides.fake_events {
@@ -245,24 +262,18 @@ fn supervise(supervision: Supervision) {
         }
     });
 
-    // D-1087: 活動の配送口。core の `tool_activity` / `subtask_lifecycle` を受信ループが
-    // ここへ渡し、宛先があるときだけ送る（宛先は gateway の DB、core は知らない）。
-    let activity =
-        activity_store.map(|store| Arc::new(crate::webhook::ActivityDelivery::new(store)));
     // say consumer（address ごと）: core の say を channel の通常投稿として配送する。
     for address in addresses {
-        spawn_say_consumer(
-            client.clone(),
-            address,
-            transport.clone(),
-            cfg.agent_id.clone(),
-            cfg.system_reactions.clone(),
-            Arc::clone(&delivery_targets),
-            voice.clone(),
-            activity.clone(),
-        );
+        start_say(address);
     }
 }
+
+/// Activity store, channel-request socket and say-consumer starter of one instance.
+type ChannelParts = (
+    Option<crate::webhook::RouteStore>,
+    Option<PathBuf>,
+    Option<owner_mention::SayConsumers>,
+);
 
 #[allow(clippy::too_many_arguments)]
 fn build_on_line(
@@ -274,7 +285,7 @@ fn build_on_line(
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
     voice: Option<Arc<VoiceManager>>,
-    activity_store: Option<crate::webhook::RouteStore>,
+    (activity_store, channel_socket, say_consumers): ChannelParts,
 ) -> OnLine {
     let model_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     Arc::new(move |line: String| {
@@ -288,6 +299,8 @@ fn build_on_line(
         let model_cache = model_cache.clone();
         let voice = voice.clone();
         let activity_store = activity_store.clone();
+        let channel_socket = channel_socket.clone();
+        let say_consumers = say_consumers.clone();
         tokio::spawn(async move {
             let gate = (
                 &*client,
@@ -325,6 +338,9 @@ fn build_on_line(
                     return;
                 }
             }
+            let mention = (&*client, agent_id.as_str(), self_bot_id.as_str(), &access);
+            let enable = (channel_socket.as_deref(), say_consumers.as_ref());
+            owner_mention::maybe_enable(mention, enable, &line).await;
             handle_incoming(
                 &client,
                 &agent_id,
@@ -339,70 +355,9 @@ fn build_on_line(
     })
 }
 
-/// system reaction を発端メッセージ（origin anchor）へ best-effort で付ける。👀（受理）と
-/// ❌（配送失敗）はこちら——発端に付けるのが正（照合: 旧 message_loop も同じ側）。
-async fn react_system(transport: &Arc<dyn DiscordTransport>, origin: &str, emoji: &str) {
-    let Some((channel, message)) = parse_origin(origin) else {
-        tracing::debug!(%origin, "skip system reaction: origin not a discord anchor");
-        return;
-    };
-    react_system_on(transport, &channel, &message, emoji).await;
-}
+use reactions::{react_no_reply, react_system, react_system_on};
 
-async fn react_no_reply(
-    transport: &Arc<dyn DiscordTransport>,
-    reply_origin: Option<&str>,
-    emoji: &str,
-) {
-    if let Some(origin) = reply_origin {
-        react_system(transport, origin, emoji).await;
-    }
-}
-
-/// (channel, message) を直接指定して system reaction を付ける（失敗は warn のみ・非致命）。
-/// 🏁（完了）は activity ended で core が指定した**最終生成の最後の投稿**へ付けるため、
-/// 発話 id の対応表から得た自分の message id をここへ渡す。
-/// legacy `add_reaction_non_fatal` と同じく、付与失敗が turn 処理を巻き込まないようにする。
-async fn react_system_on(
-    transport: &Arc<dyn DiscordTransport>,
-    channel: &str,
-    message: &str,
-    emoji: &str,
-) {
-    match transport.add_system_reaction(channel, message, emoji).await {
-        TransportOutcome::Ok(_) => {}
-        TransportOutcome::Rejected => {
-            tracing::warn!(
-                channel,
-                message,
-                emoji,
-                "system reaction rejected (non-fatal)"
-            )
-        }
-        TransportOutcome::Indeterminate => {
-            tracing::warn!(
-                channel,
-                message,
-                emoji,
-                "system reaction outcome unknown (non-fatal)"
-            )
-        }
-    }
-}
-
-pub(crate) fn caller_for(access: &AccessConfig, author_id: &str) -> SaidCaller {
-    if access.owners.iter().any(|id| id == author_id) {
-        SaidCaller::Owner
-    } else if let Some(agent_id) = access.co_agents.get(author_id) {
-        SaidCaller::CoAgent {
-            agent_id: agent_id.clone(),
-        }
-    } else if access.trusted_users.iter().any(|id| id == author_id) {
-        SaidCaller::TrustedUser
-    } else {
-        SaidCaller::Agent
-    }
-}
+pub(crate) use caller::caller_for;
 
 /// 受信 1 件を said へ。自分の投稿と非 ack channel は core へ送らない（§4.3・§5.1）。
 /// 受理された人間の発言者は VC 参加の呼びかけ手として `voice` に覚えさせる（D-1072）。
@@ -782,7 +737,10 @@ pub(crate) fn spawn_say_consumer(
     })
 }
 
+mod caller;
 mod model_command;
+mod owner_mention;
+mod reactions;
 #[cfg(test)]
 mod silent_origin_tests;
 mod thinking_command;
@@ -790,6 +748,9 @@ mod webhook_command;
 
 #[cfg(test)]
 mod caller_tests;
+
+#[cfg(test)]
+mod owner_mention_tests;
 
 #[cfg(test)]
 #[path = "run/webhook_command_tests.rs"]

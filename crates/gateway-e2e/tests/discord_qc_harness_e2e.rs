@@ -16,4 +16,8 @@ include!("discord_qc_harness/folding.rs");
 include!("discord_qc_harness/heartbeat.rs");
 include!("discord_qc_harness/holding_resume.rs");
 include!("discord_qc_harness/no_reply.rs");
+include!("discord_qc_harness/owner_mention.rs");
+include!("discord_qc_harness/daemon_world.rs");
+include!("discord_qc_harness/daemon_e2e.rs");
+include!("discord_qc_harness/daemon_bindings.rs");
 include!("discord_qc_harness/read_reactions.rs");

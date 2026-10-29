@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Discord gateway 設定</title>
+<style>
+body { font-family: sans-serif; max-width: 820px; margin: 2em auto; padding: 0 1em; }
+fieldset { margin-bottom: 1em; }
+label { display: block; margin: .5em 0; }
+input, select, textarea { width: 100%; box-sizing: border-box; padding: .3em; }
+textarea { font-family: monospace; min-height: 4em; }
+.row { display: flex; gap: .5em; align-items: center; }
+.row > * { flex: 1; }
+.status { white-space: pre-wrap; margin: .5em 0; color: #333; }
+nav button.active { font-weight: bold; }
+iframe { width: 100%; border: 1px solid #ccc; height: 900px; }
+</style>
+</head>
+<body>
+<h1>Discord gateway 設定</h1>
+<p>保存すると数秒で反映されます（そのエージェントの bot だけつなぎ直します）。bot トークンは表示しません。</p>
+<nav id="tabs"></nav>
+<div id="panel"></div>
+<fieldset id="create"><legend>新しいエージェントの bot</legend>
+  <p>bot をまだ持っていないエージェントに bot を付けます。トークンは Discord に確認して bot ID を自動で入れます（表示はしません）。</p>
+  <label>エージェント<select id="c-agent"></select></label>
+  <label>bot トークン<input id="c-token" type="password" autocomplete="off"></label>
+  <label>オーナー（Discord ユーザー ID。改行区切り）<textarea id="c-owners"></textarea></label>
+  <div class="row">
+    <label>サーバー ID（DM は空欄）<input id="c-guild"></label>
+    <label>チャンネル ID<input id="c-channel"></label>
+  </div>
+  <button id="c-save">bot を作る</button>
+  <div class="status" id="c-status"></div>
+</fieldset>
+<script>
+const api = "api/instances";
+let instances = [];
+let current = null;
+
+function lines(text) { return text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean); }
+async function errorText(res) {
+  try { return (await res.json()).error || res.statusText; } catch { return res.statusText; }
+}
+async function put(path, body, status) {
+  status.textContent = "保存しています…";
+  const res = await fetch(`${api}/${current.instance_id}/${path}`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  status.textContent = res.ok ? "保存しました。数秒で反映されます。" : `保存できません: ${await errorText(res)}`;
+  if (res.ok) await load(current.instance_id);
+}
+
+function tabs() {
+  const nav = document.getElementById("tabs");
+  nav.innerHTML = "";
+  for (const inst of instances) {
+    const b = document.createElement("button");
+    b.textContent = inst.config.name || inst.agent_id;
+    b.className = current && current.instance_id === inst.instance_id ? "active" : "";
+    b.onclick = () => { current = inst; render(); };
+    nav.appendChild(b);
+  }
+  const v = document.createElement("button");
+  v.textContent = "VC 設定（全エージェント共通）";
+  v.className = current === "voice" ? "active" : "";
+  v.onclick = () => { current = "voice"; render(); };
+  nav.appendChild(v);
+}
+
+function field(label, value, name, multi) {
+  const id = `f-${name}`;
+  const input = multi ? `<textarea id="${id}">${value}</textarea>` : `<input id="${id}" value="${value}">`;
+  return `<label>${label}${input}</label>`;
+}
+
+function render() {
+  tabs();
+  const panel = document.getElementById("panel");
+  if (current === "voice") {
+    // The embedded page calls api/voice-settings relative to voice/.
+    panel.innerHTML = `<iframe src="voice/"></iframe>`;
+    return;
+  }
+  const c = current.config;
+  const access = c.access || {};
+  const coAgents = Object.entries(access.co_agents || {}).map(([u, a]) => `${u}=${a}`).join("\n");
+  const reactions = c.system_reactions || {};
+  panel.innerHTML = `
+<p>エージェント ${current.agent_id} ／ 状態: ${current.lifecycle_state}${current.last_exit ? `（直近: ${current.last_exit}）` : ""}</p>
+<fieldset><legend>起動・停止</legend>
+  <div class="row"><span>${current.enabled ? "起動中（有効）" : "停止中（無効）"}</span>
+  <button id="toggle">${current.enabled ? "停止する" : "起動する"}</button></div>
+  <div class="status" id="s-enabled"></div>
+</fieldset>
+<fieldset><legend>bot トークン</legend>
+  <p>${current.credential_configured ? "設定済み" : "未設定"}（表示しません。差し替えるときだけ入力。Discord に確認して bot ID も合わせます）</p>
+  <p>bot ID: ${c.self_bot_id}</p>
+  <input id="f-token" type="password" autocomplete="off" placeholder="新しいトークン">
+  <button id="save-token">トークンを差し替える</button>
+  <div class="status" id="s-token"></div>
+</fieldset>
+<fieldset><legend>基本とアクセス</legend>
+  ${field("表示名", c.name || "", "name")}
+  ${field("オーナー（Discord ユーザー ID。改行区切り）", (access.owners || []).join("\n"), "owners", true)}
+  ${field("信頼済みユーザー（Discord ユーザー ID。改行区切り）", (access.trusted_users || []).join("\n"), "trusted", true)}
+  ${field("co-agent（Discord ユーザー ID=エージェント ID。改行区切り）", coAgents, "co", true)}
+  <label>配送モード<select id="f-mode">
+    <option value="tool_driven">tool_driven</option><option value="say">say</option></select></label>
+  <div class="row">
+    ${field("受理", reactions.accepted || "👀", "r-accepted")}
+    ${field("完了", reactions.completed || "🏁", "r-completed")}
+    ${field("失敗", reactions.failed || "❌", "r-failed")}
+    ${field("無返信", reactions.no_reply || "🤐", "r-no_reply")}
+  </div>
+  <button id="save-config">保存</button>
+  <div class="status" id="s-config"></div>
+</fieldset>
+<fieldset><legend>チャンネルを追加</legend>
+  <div class="row">${field("サーバー ID（DM は空欄）", "", "guild")}${field("チャンネル ID", "", "channel")}</div>
+  <button id="add-channel">このチャンネルで話せるようにする</button>
+</fieldset>
+<fieldset><legend>チャンネル（会話できるチャンネルの address。改行区切り）</legend>
+  <p>形式: discord-${current.agent_id}-&lt;サーバー ID&gt;-&lt;チャンネル ID&gt;（DM はサーバー ID を空に）</p>
+  <textarea id="f-addresses">${current.addresses.join("\n")}</textarea>
+  <button id="save-addresses">保存</button>
+  <div class="status" id="s-addresses"></div>
+</fieldset>`;
+  document.getElementById("f-mode").value = c.delivery_mode || "tool_driven";
+  document.getElementById("toggle").onclick = () =>
+    put("enabled", { enabled: !current.enabled }, document.getElementById("s-enabled"));
+  document.getElementById("save-token").onclick = () => {
+    const token = document.getElementById("f-token").value.trim();
+    document.getElementById("f-token").value = "";
+    // The page checks the token with Discord and sets the bot id from it.
+    put("credential", { credential: token }, document.getElementById("s-token"));
+  };
+  document.getElementById("add-channel").onclick = async () => {
+    const status = document.getElementById("s-addresses");
+    status.textContent = "追加しています…";
+    const res = await fetch(`${api}/${current.instance_id}/channels`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ guild_id: document.getElementById("f-guild").value.trim(),
+        channel_id: document.getElementById("f-channel").value.trim() }),
+    });
+    status.textContent = res.ok ? "追加しました。数秒でそのチャンネルで話せます。" : `追加できません: ${await errorText(res)}`;
+    if (res.ok) await load(current.instance_id);
+  };
+  document.getElementById("save-addresses").onclick = () =>
+    put("addresses", { addresses: lines(document.getElementById("f-addresses").value) },
+      document.getElementById("s-addresses"));
+  document.getElementById("save-config").onclick = () => {
+    const co = {};
+    for (const line of document.getElementById("f-co").value.split("\n")) {
+      const [user, agent] = line.split("=").map(s => (s || "").trim());
+      if (user && agent) co[user] = agent;
+    }
+    const next = { ...c };
+    const name = document.getElementById("f-name").value.trim();
+    if (name) next.name = name; else delete next.name;
+    next.access = {
+      owners: lines(document.getElementById("f-owners").value),
+      trusted_users: lines(document.getElementById("f-trusted").value),
+      co_agents: co,
+    };
+    next.delivery_mode = document.getElementById("f-mode").value;
+    next.system_reactions = {
+      accepted: document.getElementById("f-r-accepted").value.trim(),
+      completed: document.getElementById("f-r-completed").value.trim(),
+      failed: document.getElementById("f-r-failed").value.trim(),
+      no_reply: document.getElementById("f-r-no_reply").value.trim(),
+    };
+    put("config", next, document.getElementById("s-config"));
+  };
+}
+
+async function loadAgents() {
+  const select = document.getElementById("c-agent");
+  const res = await fetch("api/agents");
+  if (!res.ok) { document.getElementById("c-status").textContent = `エージェント一覧を読めません: ${await errorText(res)}`; return; }
+  const { agents } = await res.json();
+  select.innerHTML = "";
+  for (const a of agents.filter(a => !a.has_bot)) {
+    const opt = document.createElement("option");
+    opt.value = a.id; opt.textContent = `${a.name || a.id}（${a.id}）`;
+    select.appendChild(opt);
+  }
+  if (!select.options.length) document.getElementById("c-status").textContent = "bot を持っていないエージェントはいません。";
+}
+
+document.getElementById("c-save").onclick = async () => {
+  const status = document.getElementById("c-status");
+  const token = document.getElementById("c-token").value.trim();
+  document.getElementById("c-token").value = "";
+  status.textContent = "Discord にトークンを確認して作っています…";
+  const res = await fetch(api, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      agent_id: document.getElementById("c-agent").value,
+      credential: token,
+      owners: lines(document.getElementById("c-owners").value),
+      guild_id: document.getElementById("c-guild").value.trim(),
+      channel_id: document.getElementById("c-channel").value.trim(),
+    }),
+  });
+  if (!res.ok) { status.textContent = `作れません: ${await errorText(res)}`; return; }
+  const body = await res.json();
+  status.textContent = `作りました（bot ID ${body.self_bot_id}）。数秒でつながります。`;
+  await load(body.instance_id);
+  await loadAgents();
+};
+
+async function load(keep) {
+  const res = await fetch(api);
+  if (!res.ok) { document.getElementById("panel").textContent = `読み込めません: ${await errorText(res)}`; return; }
+  instances = (await res.json()).instances;
+  current = instances.find(i => i.instance_id === keep) || (current === "voice" ? "voice" : instances[0]) || "voice";
+  render();
+}
+
+load();
+loadAgents();
+</script>
+</body>
+</html>

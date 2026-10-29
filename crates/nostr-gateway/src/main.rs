@@ -1,4 +1,5 @@
-//! nostr-gateway 独立 binary。watch JSONL ⇄ V3 UDS。HTTP listen しない。
+//! nostr-gateway 独立 binary。watch JSONL ⇄ V3 UDS。daemon と instance は HTTP を listen しない
+//! （設定画面は `settings` サブコマンドの別プロセス）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,14 +34,15 @@ async fn run() -> anyhow::Result<()> {
     let first = args
         .next()
         .context(
-            "usage: nostr-gateway daemon <config.json> | instance <placement.json> | watch-settings <placement.json> <port>",
+            "usage: nostr-gateway daemon <config.json> | instance <placement.json> | settings <daemon-config.json> <bind>",
         )?;
-    // D-1092: watch 設定画面。127.0.0.1 だけに bind する別プロセス（instance は HTTP を listen しない）。
-    if first == "watch-settings" {
-        let usage = "usage: nostr-gateway watch-settings <placement.json> <port>";
+    // D-1097: gateway settings page, a separate process. It reads the daemon config for the
+    // admin socket and the watch store directory, and binds where it is told (e.g. 0.0.0.0:8794).
+    if first == "settings" {
+        let usage = "usage: nostr-gateway settings <daemon-config.json> <bind>";
         let path = args.next().map(PathBuf::from).context(usage)?;
-        let port = args.next().context(usage)?.parse::<u16>().context(usage)?;
-        return opencrab_nostr_gateway::watch_settings::run(path, port).await;
+        let bind = args.next().context(usage)?;
+        return opencrab_nostr_gateway::settings_http::run(path, bind).await;
     }
     if first == "daemon" {
         let path = args

@@ -39,10 +39,10 @@ async fn nostr_workspace_files_project_dispatch_metadata_and_cleanup() {
             .set_workspace_base(workspace.to_str().unwrap().into());
         core.extgate.set_attachment_outbox_root(outbox.clone());
         let instance = uuid::Uuid::new_v4().to_string();
-        let binding = uuid::Uuid::new_v4().to_string();
         let config = opencrab_extgate::encode_config_b64(b"{}");
-        put_instance(&core, &instance, &config).await;
-        put_binding(&core, &binding, &instance, "attachment-test").await;
+        let binding = provision(&core, &instance, "nostr", &config, &["attachment-test".to_string()])
+            .await
+            .remove(0);
         let payload = Arc::new(Mutex::new(None));
         let release = Arc::new(tokio::sync::Notify::new());
         let client = InstanceClient::spawn_with_operations(

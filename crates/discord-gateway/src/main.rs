@@ -9,7 +9,6 @@ use opencrab_discord_gateway::config::{decode_config_b64, Placement};
 use opencrab_discord_gateway::harness::HarnessOverrides;
 use opencrab_discord_gateway::run::spawn_instance_with_voice;
 use opencrab_discord_gateway::secret::take_bot_token;
-use opencrab_discord_gateway::voice::settings::settings_path_for_placement;
 
 fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -31,7 +30,16 @@ async fn run() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let first = args
         .next()
-        .context("usage: discord-gateway daemon <config.json> | instance <placement.json> | voice-settings <settings.json> <port>")?;
+        .context("usage: discord-gateway daemon <config.json> | instance <placement.json> | settings <daemon-config.json> <host:port> | voice-settings <settings.json> <port>")?;
+    if first == "settings" {
+        // D-1097 D4: talks to the daemon's admin socket only; holds no key and no token.
+        let usage = "usage: discord-gateway settings <daemon-config.json> <host:port>";
+        let path = args.next().map(PathBuf::from).context(usage)?;
+        let bind =
+            opencrab_discord_gateway::settings_http::parse_bind(&args.next().context(usage)?)?;
+        let config = opencrab_discord_gateway::daemon::DaemonConfig::load(&path)?;
+        return opencrab_discord_gateway::settings_http::run(config, bind).await;
+    }
     if first == "voice-settings" {
         let usage = "usage: discord-gateway voice-settings <settings.json> <port>";
         let path = args.next().map(PathBuf::from).context(usage)?;
@@ -79,16 +87,19 @@ async fn run() -> anyhow::Result<()> {
         anyhow::bail!("DISCORD_BOT_TOKEN が未設定（production は token 必須・dry-run 以外）");
     }
 
-    let inst = place
+    let mut inst = place
         .instances
         .first()
+        .cloned()
         .context("validated placement has no instance")?;
+    inst.channel_socket = place.channel_socket.as_deref().map(PathBuf::from);
     let bytes = decode_config_b64(&inst.config_b64)?;
-    // VC 設定は placement の隣の voice/settings.json（無ければ VC は「未設定」を返す）。
-    let voice_settings = settings_path_for_placement(&path);
+    // VC 設定は placement が示す共有ファイル（daemon 配下）か、無ければ placement の隣の
+    // voice/settings.json（instance モード）。無ければ VC は「未設定」を返す。
+    let voice_settings = place.voice_settings_path(&path);
     let client = spawn_instance_with_voice(
         socket,
-        inst,
+        &inst,
         &bytes,
         token,
         overrides,

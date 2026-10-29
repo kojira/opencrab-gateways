@@ -84,12 +84,11 @@ pub fn spawn_instance_with_voice(
         );
     }
     let cfg = parse_instance_config(config_bytes)?;
-    // D-1097 D2: the digest of what core holds (the fixed neutral config), not of the Discord
-    // config this child runs with. Placements written before D-1097 fall back to the latter.
-    let digest = match place.core_config_b64.as_deref() {
-        Some(core) => config_digest(&crate::config::decode_config_b64(core)?),
-        None => config_digest(config_bytes),
-    };
+    // D-1097 D2: the digest of what core holds (`InstancePlacement::hello_digest`).
+    let digest = place
+        .core_config_b64
+        .as_ref()
+        .map_or_else(|| Ok(config_digest(config_bytes)), |_| place.hello_digest())?;
 
     // transport: dry-run（REST を叩かずログ）か production（serenity REST・token 保持）。
     // say も invoke も同一 transport を通すので dry-run 分岐は 1 箇所。
@@ -395,19 +394,7 @@ async fn react_system_on(
     }
 }
 
-pub(crate) fn caller_for(access: &AccessConfig, author_id: &str) -> SaidCaller {
-    if access.owners.iter().any(|id| id == author_id) {
-        SaidCaller::Owner
-    } else if let Some(agent_id) = access.co_agents.get(author_id) {
-        SaidCaller::CoAgent {
-            agent_id: agent_id.clone(),
-        }
-    } else if access.trusted_users.iter().any(|id| id == author_id) {
-        SaidCaller::TrustedUser
-    } else {
-        SaidCaller::Agent
-    }
-}
+pub(crate) use caller::caller_for;
 
 /// 受信 1 件を said へ。自分の投稿と非 ack channel は core へ送らない（§4.3・§5.1）。
 /// 受理された人間の発言者は VC 参加の呼びかけ手として `voice` に覚えさせる（D-1072）。
@@ -787,6 +774,7 @@ pub(crate) fn spawn_say_consumer(
     })
 }
 
+mod caller;
 mod model_command;
 #[cfg(test)]
 mod silent_origin_tests;

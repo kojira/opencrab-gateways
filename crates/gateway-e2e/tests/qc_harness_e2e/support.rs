@@ -423,8 +423,6 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
         llm_router: opencrab_server::SharedLlmRouter::new(router),
         llm_config: Arc::new(toml::from_str("").unwrap()),
         subtask_auto_dispatch: true,
-        voice_config: Arc::new(Default::default()),
-        voice_runtime: Arc::new(std::sync::Mutex::new(None)),
         workspace_base: std::env::temp_dir()
             .join("opencrab_qc_harness")
             .to_string_lossy()

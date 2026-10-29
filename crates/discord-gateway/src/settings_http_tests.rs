@@ -164,19 +164,6 @@ async fn d1097_page_writes_go_through_the_admin_socket() {
     );
 
     let put = http
-        .put(url("credential"))
-        .json(&serde_json::json!({"credential":"new-token"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(put.status(), 200);
-    assert!(!put.text().await.unwrap().contains("new-token"));
-    assert_eq!(
-        &*f.store.lock().unwrap().decrypt_credential(A, &KEY).unwrap(),
-        b"new-token"
-    );
-
-    let put = http
         .put(url("enabled"))
         .json(&serde_json::json!({"enabled":false}))
         .send()
@@ -223,4 +210,165 @@ async fn d1097_the_embedded_voice_page_and_its_api_resolve_under_voice() {
         .await
         .unwrap();
     assert_eq!(api.status(), 404, "unconfigured, served by the VC router");
+}
+
+/// A fake Discord `GET /users/@me`: returns the bot id for the one token it knows.
+async fn fake_discord(known: &'static str, id: &'static str) -> String {
+    use axum::http::HeaderMap;
+    let app = axum::Router::new().route(
+        "/users/@me",
+        axum::routing::get(move |headers: HeaderMap| async move {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            if auth == format!("Bot {known}") {
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({"id": id, "bot": true})),
+                )
+            } else {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({"message":"401: Unauthorized"})),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    base
+}
+
+async fn fixture_with_discord(discord: String) -> Fixture {
+    let mut f = fixture().await;
+    for task in f.tasks.drain(1..) {
+        task.abort();
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    f.base = format!("http://{}", listener.local_addr().unwrap());
+    let socket = f.temp.path().join("admin.sock");
+    let voice = f.temp.path().join("voice").join("settings.json");
+    f.tasks.push(tokio::spawn(serve_with(
+        listener,
+        socket,
+        voice,
+        DiscordApi::new(discord),
+    )));
+    f
+}
+
+/// Slice 1: replacing the token checks it with Discord and stores the bot id it belongs to, so
+/// a token for another bot can never run under the old id. The token never comes back.
+#[tokio::test]
+async fn d1097_token_is_checked_with_discord_and_sets_the_bot_id() {
+    let discord = fake_discord("good-token", "999999999999999999").await;
+    let f = fixture_with_discord(discord).await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/api/instances/{A}/credential", f.base);
+
+    let bad = http
+        .put(&url)
+        .json(&serde_json::json!({"credential":"wrong-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    let text = bad.text().await.unwrap();
+    assert!(!text.contains("wrong-token"), "{text}");
+    assert_eq!(
+        &*f.store.lock().unwrap().decrypt_credential(A, &KEY).unwrap(),
+        b"token-secret",
+        "a rejected token is not stored"
+    );
+
+    let good = http
+        .put(&url)
+        .json(&serde_json::json!({"credential":"good-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(good.status(), 200);
+    let body = good.text().await.unwrap();
+    assert!(!body.contains("good-token"), "{body}");
+    let row = f.store.lock().unwrap().get(A).unwrap().unwrap();
+    assert_eq!(
+        &*f.store.lock().unwrap().decrypt_credential(A, &KEY).unwrap(),
+        b"good-token"
+    );
+    let cfg = crate::config::parse_instance_config(
+        &crate::config::decode_config_b64(&row.config_b64).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cfg.self_bot_id, "999999999999999999");
+}
+
+/// Slice 1: the channel field takes a server id and a channel id and adds that channel.
+#[tokio::test]
+async fn d1097_channel_field_adds_the_channel_address() {
+    let f = fixture().await;
+    let http = reqwest::Client::new();
+    let add = http
+        .post(format!("{}/api/instances/{A}/channels", f.base))
+        .json(&serde_json::json!({"guild_id":"100","channel_id":"200"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(add.status(), 200, "{}", add.text().await.unwrap());
+    assert_eq!(
+        f.store.lock().unwrap().get(A).unwrap().unwrap().addresses,
+        vec!["discord-agent-a-1-2", "discord-agent-a-100-200"]
+    );
+    let dm = http
+        .post(format!("{}/api/instances/{A}/channels", f.base))
+        .json(&serde_json::json!({"guild_id":"","channel_id":"300"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dm.status(), 200);
+    for bad in [
+        serde_json::json!({"guild_id":"x","channel_id":"200"}),
+        serde_json::json!({"guild_id":"100","channel_id":""}),
+    ] {
+        let response = http
+            .post(format!("{}/api/instances/{A}/channels", f.base))
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{bad}");
+    }
+    assert_eq!(
+        f.store
+            .lock()
+            .unwrap()
+            .get(A)
+            .unwrap()
+            .unwrap()
+            .addresses
+            .len(),
+        3
+    );
+}
+
+/// Slice 1: the page says plainly that a new agent's bot needs an operator step for now.
+#[tokio::test]
+async fn d1097_page_says_new_agents_need_an_operator_grant() {
+    let f = fixture().await;
+    let html = reqwest::get(format!("{}/", f.base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("新しいエージェントの bot"),
+        "create section present"
+    );
+    assert!(
+        html.contains("まだこの画面からは作れません"),
+        "explains it is not available yet"
+    );
 }

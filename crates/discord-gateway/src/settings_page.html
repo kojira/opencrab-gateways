@@ -21,6 +21,10 @@ iframe { width: 100%; border: 1px solid #ccc; height: 900px; }
 <p>保存すると数秒で反映されます（そのエージェントの bot だけつなぎ直します）。bot トークンは表示しません。</p>
 <nav id="tabs"></nav>
 <div id="panel"></div>
+<fieldset id="create"><legend>新しいエージェントの bot</legend>
+  <p>まだこの画面からは作れません。bot を持っていないエージェントに新しく bot を付けるには、いまは運用側の作業（gate-admin の付与）が必要です。
+  bot を持っているエージェントは、上のタブからトークン・オーナー・チャンネル・起動停止を変えられます。</p>
+</fieldset>
 <script>
 const api = "api/instances";
 let instances = [];
@@ -82,7 +86,8 @@ function render() {
   <div class="status" id="s-enabled"></div>
 </fieldset>
 <fieldset><legend>bot トークン</legend>
-  <p>${current.credential_configured ? "設定済み" : "未設定"}（表示しません。差し替えるときだけ入力）</p>
+  <p>${current.credential_configured ? "設定済み" : "未設定"}（表示しません。差し替えるときだけ入力。Discord に確認して bot ID も合わせます）</p>
+  <p>bot ID: ${c.self_bot_id}</p>
   <input id="f-token" type="password" autocomplete="off" placeholder="新しいトークン">
   <button id="save-token">トークンを差し替える</button>
   <div class="status" id="s-token"></div>
@@ -103,6 +108,10 @@ function render() {
   <button id="save-config">保存</button>
   <div class="status" id="s-config"></div>
 </fieldset>
+<fieldset><legend>チャンネルを追加</legend>
+  <div class="row">${field("サーバー ID（DM は空欄）", "", "guild")}${field("チャンネル ID", "", "channel")}</div>
+  <button id="add-channel">このチャンネルで話せるようにする</button>
+</fieldset>
 <fieldset><legend>チャンネル（会話できるチャンネルの address。改行区切り）</legend>
   <p>形式: discord-${current.agent_id}-&lt;サーバー ID&gt;-&lt;チャンネル ID&gt;（DM はサーバー ID を空に）</p>
   <textarea id="f-addresses">${current.addresses.join("\n")}</textarea>
@@ -115,7 +124,19 @@ function render() {
   document.getElementById("save-token").onclick = () => {
     const token = document.getElementById("f-token").value.trim();
     document.getElementById("f-token").value = "";
+    // The page checks the token with Discord and sets the bot id from it.
     put("credential", { credential: token }, document.getElementById("s-token"));
+  };
+  document.getElementById("add-channel").onclick = async () => {
+    const status = document.getElementById("s-addresses");
+    status.textContent = "追加しています…";
+    const res = await fetch(`${api}/${current.instance_id}/channels`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ guild_id: document.getElementById("f-guild").value.trim(),
+        channel_id: document.getElementById("f-channel").value.trim() }),
+    });
+    status.textContent = res.ok ? "追加しました。数秒でそのチャンネルで話せます。" : `追加できません: ${await errorText(res)}`;
+    if (res.ok) await load(current.instance_id);
   };
   document.getElementById("save-addresses").onclick = () =>
     put("addresses", { addresses: lines(document.getElementById("f-addresses").value) },

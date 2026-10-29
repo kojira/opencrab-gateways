@@ -37,6 +37,10 @@ struct Request {
     /// D-1097: the whole Discord instance config as JSON (`set_config`).
     #[serde(default)]
     config: Option<Value>,
+    /// D-1097: the bot id the new credential belongs to (`set_credential`), as checked against
+    /// Discord by the caller. Stored together with the token so they never disagree.
+    #[serde(default)]
+    self_bot_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -177,6 +181,7 @@ fn apply(
                 &store,
                 &request.instance_id,
                 request.credential.as_deref().unwrap_or_default(),
+                request.self_bot_id.as_deref(),
                 key,
             ),
             "set_enabled" => crate::admin_settings::set_enabled(

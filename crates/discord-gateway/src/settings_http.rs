@@ -22,7 +22,7 @@ use anyhow::Context as _;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -31,6 +31,8 @@ const PAGE: &str = include_str!("settings_page.html");
 
 struct AppState {
     admin_socket: PathBuf,
+    discord: DiscordApi,
+    http: reqwest::Client,
 }
 
 type Shared = State<Arc<AppState>>;
@@ -49,15 +51,87 @@ pub async fn run(config: crate::daemon::DaemonConfig, bind: SocketAddr) -> anyho
     serve_on(listener, config.admin_socket, voice).await
 }
 
+/// How the page asks Discord which bot a token belongs to.
+#[derive(Clone)]
+pub struct DiscordApi {
+    pub base_url: String,
+}
+
+impl DiscordApi {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+        }
+    }
+}
+
+/// Discord's real API.
+pub const DISCORD_API: &str = "https://discord.com/api/v10";
+
+impl DiscordApi {
+    /// The bot user id the token authenticates as (`GET /users/@me`). The token is sent only
+    /// to Discord and never logged.
+    async fn bot_id(&self, http: &reqwest::Client, token: &str) -> Result<String, String> {
+        let response = http
+            .get(format!("{}/users/@me", self.base_url))
+            .header("authorization", format!("Bot {token}"))
+            .header(
+                "user-agent",
+                "DiscordBot (https://github.com/kojira/opencrab, 1.0)",
+            )
+            .send()
+            .await
+            .map_err(|e| {
+                format!(
+                    "Discord could not be reached: {}",
+                    crate::secret::redact_token(&e.to_string())
+                )
+            })?;
+        if !response.status().is_success() {
+            return Err(format!("Discord refused the token ({})", response.status()));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|_| "Discord returned an unreadable response".to_string())?;
+        let id = body["id"].as_str().unwrap_or_default().to_string();
+        if !crate::config::is_snowflake(&id) || body["bot"] != true {
+            return Err("the token is not a bot token".into());
+        }
+        Ok(id)
+    }
+}
+
 pub async fn serve_on(
     listener: tokio::net::TcpListener,
     admin_socket: PathBuf,
     voice_settings: PathBuf,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(AppState { admin_socket });
+    serve_with(
+        listener,
+        admin_socket,
+        voice_settings,
+        DiscordApi::new(DISCORD_API),
+    )
+    .await
+}
+
+pub async fn serve_with(
+    listener: tokio::net::TcpListener,
+    admin_socket: PathBuf,
+    voice_settings: PathBuf,
+    discord: DiscordApi,
+) -> anyhow::Result<()> {
+    let state = Arc::new(AppState {
+        admin_socket,
+        discord,
+        http: reqwest::Client::new(),
+    });
     let app = Router::new()
         .route("/", get(|| async { Html(PAGE) }))
         .route("/api/instances", get(list))
+        .route("/api/instances/{id}/credential", put(set_credential))
+        .route("/api/instances/{id}/channels", post(add_channel))
         .route("/api/instances/{id}/{field}", put(update))
         .with_state(state)
         // The VC page is embedded as-is; its relative `api/voice-settings` calls resolve under
@@ -95,7 +169,6 @@ async fn update(
     let (op, key) = match field.as_str() {
         "config" => ("set_config", "config"),
         "addresses" => ("set_addresses", "addresses"),
-        "credential" => ("set_credential", "credential"),
         "enabled" => ("set_enabled", "enabled"),
         _ => return error(StatusCode::NOT_FOUND, "unknown setting"),
     };
@@ -105,6 +178,88 @@ async fn update(
     } else {
         body.get(key).cloned().unwrap_or(Value::Null)
     };
+    match admin(&state, request).await {
+        Ok(value) => Json(value).into_response(),
+        Err(AdminError::Rejected(message)) => error(StatusCode::BAD_REQUEST, message),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// Checks the token with Discord first, then stores it together with the bot id it belongs to.
+async fn set_credential(
+    State(state): Shared,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let token = body["credential"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "the bot token is empty");
+    }
+    let bot_id = match state.discord.bot_id(&state.http, &token).await {
+        Ok(id) => id,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let request = json!({"id":"settings","op":"set_credential","scope_instance_id":id,
+        "instance_id":id,"credential":token,"self_bot_id":bot_id});
+    match admin(&state, request).await {
+        Ok(mut value) => {
+            value["self_bot_id"] = json!(bot_id);
+            Json(value).into_response()
+        }
+        Err(AdminError::Rejected(message)) => error(StatusCode::BAD_REQUEST, message),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// Adds one channel (`guild_id` empty for a DM) to the bot's channels.
+async fn add_channel(
+    State(state): Shared,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let guild = body["guild_id"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let channel = body["channel_id"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if !crate::config::is_snowflake(&channel)
+        || !(guild.is_empty() || crate::config::is_snowflake(&guild))
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "server and channel ids must be Discord ids",
+        );
+    }
+    let listed = match admin(&state, json!({"id":"settings","op":"list"})).await {
+        Ok(value) => value,
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    };
+    let Some(instance) = listed["instances"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["instance_id"] == id.as_str()))
+    else {
+        return error(StatusCode::BAD_REQUEST, "instance_unknown");
+    };
+    let agent = instance["agent_id"].as_str().unwrap_or_default();
+    let mut addresses: Vec<Value> = instance["addresses"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let address = crate::map::address_for(agent, &guild, &channel);
+    if !addresses.iter().any(|a| a == address.as_str()) {
+        addresses.push(json!(address));
+    }
+    let request = json!({"id":"settings","op":"set_addresses","scope_instance_id":id,
+        "instance_id":id,"addresses":addresses});
     match admin(&state, request).await {
         Ok(value) => Json(value).into_response(),
         Err(AdminError::Rejected(message)) => error(StatusCode::BAD_REQUEST, message),

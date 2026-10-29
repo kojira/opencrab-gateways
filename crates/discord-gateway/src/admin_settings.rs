@@ -71,18 +71,31 @@ pub fn set_addresses(
     write(store, &row, &row.config_b64, &unique, "", row.enabled, key)
 }
 
+/// Replaces the bot token. `self_bot_id`, when given, is the bot the token belongs to and
+/// replaces the config's `self_bot_id` in the same write.
 pub fn set_credential(
     store: &DiscordStore,
     instance_id: &str,
     credential: &str,
+    self_bot_id: Option<&str>,
     key: &[u8; 32],
 ) -> Result<Value> {
     let row = existing(store, instance_id)?;
     anyhow::ensure!(!credential.trim().is_empty(), "credential must be nonempty");
+    let config_b64 = match self_bot_id {
+        Some(id) => {
+            let mut config = parse_instance_config(&decode_config_b64(&row.config_b64)?)?;
+            config.self_bot_id = id.to_string();
+            let bytes = serde_json::to_vec(&config)?;
+            parse_instance_config(&bytes)?;
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        }
+        None => row.config_b64.clone(),
+    };
     write(
         store,
         &row,
-        &row.config_b64,
+        &config_b64,
         &row.addresses,
         credential.trim(),
         row.enabled,

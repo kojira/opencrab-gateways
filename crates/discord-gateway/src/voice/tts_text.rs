@@ -22,14 +22,7 @@ pub fn clean_for_tts(text: &str) -> String {
     }
     let mut cleaned = String::with_capacity(out.len());
     for line in out.lines() {
-        for word in line.split(' ') {
-            if word.starts_with("http://") || word.starts_with("https://") {
-                cleaned.push_str("リンク");
-            } else {
-                cleaned.push_str(word);
-            }
-            cleaned.push(' ');
-        }
+        cleaned.push_str(&replace_urls(line));
         cleaned.push('\n');
     }
     let mut result = String::with_capacity(cleaned.len());
@@ -67,6 +60,36 @@ pub fn clean_for_tts(text: &str) -> String {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `http://` / `https://` で始まる URL を「リンク」に置き換える。日本語の文では URL が前後の文字に
+/// 空白なしで続くので、語頭だけでなく文中のどこでも探す。URL は空白か、URL に使えない文字
+/// （ASCII 以外の文字・全角記号）の直前で終わる。末尾の `)` `]` `>` `"` `'` は文の記号として残す。
+fn replace_urls(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = find_scheme(rest) {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let mut end = tail
+            .char_indices()
+            .find(|&(_, c)| c.is_whitespace() || !c.is_ascii())
+            .map_or(tail.len(), |(i, _)| i);
+        while end > 0 && matches!(tail.as_bytes()[end - 1], b')' | b']' | b'>' | b'"' | b'\'') {
+            end -= 1;
+        }
+        out.push_str("リンク");
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn find_scheme(text: &str) -> Option<usize> {
+    match (text.find("http://"), text.find("https://")) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 /// 読み上げ本文を文単位に分ける。「。！？!?」と改行で区切り、終止記号は直前の文に付ける

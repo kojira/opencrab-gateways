@@ -12,6 +12,59 @@ fn strips_code_blocks_and_replaces_urls() {
 }
 
 #[test]
+fn replaces_url_glued_to_preceding_text() {
+    let out = clean_for_tts("公式第1話：https://comic-days.com/episode/123 です");
+    assert!(!out.contains("http"), "{out}");
+    assert_eq!(out, "公式第1話：リンク です");
+}
+
+#[test]
+fn replaces_url_after_sentence_end_without_space() {
+    assert_eq!(
+        clean_for_tts("載ってた。https://jules.google/docs/changelog/ ただ"),
+        "載ってた。リンク ただ"
+    );
+}
+
+#[test]
+fn url_ends_at_full_width_punctuation() {
+    assert_eq!(clean_for_tts("（https://a.example/x）"), "（リンク）");
+    assert_eq!(
+        clean_for_tts("見て→https://a.example/x、続き"),
+        "見て→リンク、続き"
+    );
+}
+
+#[test]
+fn url_ends_at_cjk_text() {
+    assert_eq!(
+        clean_for_tts("https://a.example/xを見てね"),
+        "リンクを見てね"
+    );
+}
+
+#[test]
+fn url_drops_trailing_ascii_closers() {
+    assert_eq!(
+        clean_for_tts("詳しくは(https://a.example/x)と\"https://b.example/y\"へ"),
+        "詳しくは(リンク)と\"リンク\"へ"
+    );
+}
+
+#[test]
+fn replaces_two_urls_on_one_line() {
+    assert_eq!(
+        clean_for_tts("Aは:https://a.example/1、Bはhttp://b.example/2です"),
+        "Aは:リンク、Bはリンクです"
+    );
+}
+
+#[test]
+fn bare_domain_without_scheme_is_kept() {
+    assert_eq!(clean_for_tts("agents.md を見て"), "agents.md を見て");
+}
+
+#[test]
 fn strips_mentions_and_custom_emoji() {
     let out = clean_for_tts("<@123456> さん、<#987> を見て <:smile:42>");
     assert_eq!(out, "さん、 を見て");

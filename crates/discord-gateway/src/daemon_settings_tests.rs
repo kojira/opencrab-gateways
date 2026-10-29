@@ -4,6 +4,7 @@
 use super::*;
 use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// `{"agent_id":"agent","self_bot_id":"111111111111111111"}`: the smallest valid Discord config.
 const VALID_CONFIG_B64: &str =
@@ -41,26 +42,29 @@ impl GateReconciler for RecordingGate {
 #[derive(Default)]
 struct CountingFactory {
     starts: Mutex<BTreeMap<String, usize>>,
+    kills: Arc<AtomicUsize>,
 }
 
-struct Child;
+struct Child(Arc<AtomicUsize>);
 #[async_trait]
 impl SupervisedChild for Child {
     async fn wait_exit(&mut self) -> String {
         std::future::pending::<()>().await;
         String::new()
     }
-    async fn kill(&mut self) {}
+    async fn kill(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
     fn pid(&self) -> Option<u32> {
         Some(4242)
     }
 }
 
-struct Spawner(String);
+struct Spawner(String, Arc<AtomicUsize>);
 #[async_trait]
 impl ChildSpawner for Spawner {
     async fn spawn(&self) -> std::io::Result<Box<dyn SupervisedChild>> {
-        Ok(Box::new(Child))
+        Ok(Box::new(Child(self.1.clone())))
     }
     fn target_id(&self) -> &str {
         &self.0
@@ -83,7 +87,10 @@ impl SpawnerFactory for CountingFactory {
             .unwrap()
             .entry(row.instance_id.clone())
             .or_default() += 1;
-        Ok(Arc::new(Spawner(row.instance_id.clone())))
+        Ok(Arc::new(Spawner(
+            row.instance_id.clone(),
+            self.kills.clone(),
+        )))
     }
 }
 
@@ -432,4 +439,73 @@ fn d1097_child_placement_points_at_the_shared_voice_settings() {
         old.voice_settings_path(&legacy),
         temp.path().join("gate/discord/voice/settings.json")
     );
+}
+
+/// D-1097 D5: the page's start / stop is `enabled`; disabling stops the running bot, and
+/// enabling starts it again.
+#[tokio::test]
+async fn d1097_disabling_stops_the_running_bot_and_enabling_restarts_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    store
+        .upsert_desired(
+            A,
+            "agent",
+            7,
+            &config(&[]),
+            &["discord-agent-1-2".into()],
+            "t",
+            None,
+            true,
+            &KEY,
+        )
+        .unwrap();
+    let factory = Arc::new(CountingFactory::default());
+    let daemon = DiscordDaemon::new(
+        store,
+        KEY,
+        Arc::new(RecordingGate::default()),
+        factory.clone(),
+    )
+    .unwrap();
+    daemon.reconcile_once().await.unwrap();
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(factory.starts.lock().unwrap().get(A), Some(&1));
+
+    crate::admin_settings::set_enabled(&daemon.store().lock().unwrap(), A, false, &KEY).unwrap();
+    daemon.reconcile_once().await.unwrap();
+    daemon.reconcile_once().await.unwrap();
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        factory.kills.load(Ordering::SeqCst),
+        1,
+        "the running bot is stopped"
+    );
+    assert_eq!(
+        daemon
+            .store()
+            .lock()
+            .unwrap()
+            .get(A)
+            .unwrap()
+            .unwrap()
+            .lifecycle_state,
+        opencrab_process_supervisor::lifecycle::LifecycleState::Disabled
+    );
+
+    crate::admin_settings::set_enabled(&daemon.store().lock().unwrap(), A, true, &KEY).unwrap();
+    daemon.reconcile_once().await.unwrap();
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        factory.starts.lock().unwrap().get(A),
+        Some(&2),
+        "enabling starts it again"
+    );
+    daemon.shutdown().await;
 }

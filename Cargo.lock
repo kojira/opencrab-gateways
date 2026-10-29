@@ -2786,6 +2786,7 @@ dependencies = [
  "base64",
  "dashmap 6.1.0",
  "http-body-util",
+ "libc",
  "opencrab-actions",
  "opencrab-db",
  "opencrab-discord-gateway",
@@ -2794,6 +2795,7 @@ dependencies = [
  "opencrab-gateway",
  "opencrab-llm",
  "opencrab-nostr-gateway",
+ "opencrab-process-supervisor",
  "opencrab-server",
  "reqwest",
  "rusqlite",
@@ -2806,6 +2808,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

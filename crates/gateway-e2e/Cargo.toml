@@ -37,3 +37,7 @@ opencrab-gate-client.workspace = true
 opencrab-nostr-gateway.workspace = true
 opencrab-discord-gateway.workspace = true
 opencrab-gateway.workspace = true
+# D-1097: the Discord create e2e drives the real daemon with a stand-in child.
+opencrab-process-supervisor.workspace = true
+libc.workspace = true
+zeroize = "1"

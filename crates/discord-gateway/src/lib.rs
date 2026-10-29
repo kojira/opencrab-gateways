@@ -29,7 +29,6 @@ pub mod secret;
 pub mod secret_store;
 pub mod settings_http;
 pub mod store;
-pub mod subject_grant;
 pub mod thinking;
 pub mod transport;
 pub mod typing;

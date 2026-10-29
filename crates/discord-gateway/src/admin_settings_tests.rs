@@ -34,21 +34,10 @@ async fn fixture() -> Fixture {
     let socket = temp.path().join("admin.sock");
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     store
-        .upsert_desired(
-            ID,
-            "agent",
-            7,
-            &config(base_config()),
-            &["discord-agent-1-2".into()],
-            "token-secret",
-            None,
-            true,
-            &KEY,
-        )
+        .upsert_desired(ID, "agent", &config(base_config()), &["discord-agent-1-2".into()], "token-secret", true, &KEY)
         .unwrap();
     let store = Arc::new(Mutex::new(store));
-    let scope = Arc::new(std::collections::BTreeSet::from([ID.to_string()]));
-    let task = spawn(socket.clone(), scope, store.clone(), Arc::new(KEY));
+    let task = spawn(socket.clone(), store.clone(), Arc::new(KEY));
     while !socket.exists() {
         tokio::task::yield_now().await;
     }
@@ -119,7 +108,7 @@ async fn d1097_set_config_validates_bumps_generation_and_keeps_the_credential() 
     wanted["system_reactions"] = json!({"accepted":"✅"});
     let response = call(
         &f.socket,
-        json!({"id":"2","op":"set_config","scope_instance_id":ID,"instance_id":ID,"config":wanted}),
+        json!({"id":"2","op":"set_config","instance_id":ID,"config":wanted}),
     )
     .await;
     assert_eq!(response["ok"], true, "{response}");
@@ -154,7 +143,7 @@ async fn d1097_set_config_validates_bumps_generation_and_keeps_the_credential() 
     ] {
         let response = call(
             &f.socket,
-            json!({"id":"3","op":"set_config","scope_instance_id":ID,"instance_id":ID,"config":invalid}),
+            json!({"id":"3","op":"set_config","instance_id":ID,"config":invalid}),
         )
         .await;
         assert_eq!(response["ok"], false, "{response}");
@@ -172,7 +161,7 @@ async fn d1097_set_addresses_credential_and_enabled() {
     let f = fixture().await;
     let response = call(
         &f.socket,
-        json!({"id":"4","op":"set_addresses","scope_instance_id":ID,"instance_id":ID,
+        json!({"id":"4","op":"set_addresses","instance_id":ID,
             "addresses":["discord-agent-1-2","discord-agent-1-3"]}),
     )
     .await;
@@ -188,7 +177,7 @@ async fn d1097_set_addresses_credential_and_enabled() {
     ] {
         let response = call(
             &f.socket,
-            json!({"id":"5","op":"set_addresses","scope_instance_id":ID,"instance_id":ID,"addresses":bad}),
+            json!({"id":"5","op":"set_addresses","instance_id":ID,"addresses":bad}),
         )
         .await;
         assert_eq!(response["ok"], false, "{bad}: {response}");
@@ -196,7 +185,7 @@ async fn d1097_set_addresses_credential_and_enabled() {
 
     let response = call(
         &f.socket,
-        json!({"id":"6","op":"set_credential","scope_instance_id":ID,"instance_id":ID,
+        json!({"id":"6","op":"set_credential","instance_id":ID,
             "credential":"replacement-secret"}),
     )
     .await;
@@ -212,14 +201,14 @@ async fn d1097_set_addresses_credential_and_enabled() {
     );
     let response = call(
         &f.socket,
-        json!({"id":"7","op":"set_credential","scope_instance_id":ID,"instance_id":ID,"credential":""}),
+        json!({"id":"7","op":"set_credential","instance_id":ID,"credential":""}),
     )
     .await;
     assert_eq!(response["ok"], false, "an empty token is not a token");
 
     let response = call(
         &f.socket,
-        json!({"id":"8","op":"set_enabled","scope_instance_id":ID,"instance_id":ID,"enabled":false}),
+        json!({"id":"8","op":"set_enabled","instance_id":ID,"enabled":false}),
     )
     .await;
     assert_eq!(response["ok"], true, "{response}");
@@ -227,14 +216,12 @@ async fn d1097_set_addresses_credential_and_enabled() {
 }
 
 #[tokio::test]
-async fn d1097_settings_operations_are_scoped() {
+async fn d1097_an_unknown_instance_is_refused() {
     let f = fixture().await;
-    for request in [
-        json!({"id":"9","op":"set_enabled","scope_instance_id":OTHER,"instance_id":OTHER,"enabled":false}),
-        json!({"id":"10","op":"set_enabled","scope_instance_id":ID,"instance_id":OTHER,"enabled":false}),
-        json!({"id":"11","op":"set_credential","scope_instance_id":OTHER,"instance_id":OTHER,"credential":"x"}),
-    ] {
-        let response = call(&f.socket, request).await;
-        assert_eq!(response["error"], "scope_denied", "{response}");
-    }
+    let response = call(
+        &f.socket,
+        json!({"id":"9","op":"set_enabled","instance_id":OTHER,"enabled":false}),
+    )
+    .await;
+    assert_eq!(response["ok"], false, "{response}");
 }

@@ -15,10 +15,7 @@ use std::sync::{Arc, Mutex};
 pub struct DaemonConfig {
     pub database_path: PathBuf,
     pub admin_socket: PathBuf,
-    #[serde(default)]
-    pub admin_instance_ids: Vec<String>,
-    pub gate_admin_socket: PathBuf,
-    pub gate_admin_credential: PathBuf,
+    /// Core's gate socket: the daemon provisions instances on it and the children connect to it.
     pub core_socket: PathBuf,
     pub child_binary: PathBuf,
     pub placement_dir: PathBuf,
@@ -35,11 +32,6 @@ pub struct DaemonConfig {
     /// D-1097: the VC settings file (see [`DaemonConfig::voice_settings_path`]).
     #[serde(default)]
     pub voice_settings: Option<PathBuf>,
-    /// D-1097: the gate-admin principal's creation namespace. When set, the admin socket may
-    /// create a bot for an agent that has none (instance id = core's namespace rule), and
-    /// instances under it are in admin scope without listing them in `admin_instance_ids`.
-    #[serde(default)]
-    pub creation_namespace: Option<uuid::Uuid>,
     /// D-1097: core's public HTTP API, read by the settings page for the agent list
     /// (for example `http://127.0.0.1:8080`).
     #[serde(default)]
@@ -89,8 +81,6 @@ impl DaemonConfig {
         for (name, path) in [
             ("database_path", &self.database_path),
             ("admin_socket", &self.admin_socket),
-            ("gate_admin_socket", &self.gate_admin_socket),
-            ("gate_admin_credential", &self.gate_admin_credential),
             ("core_socket", &self.core_socket),
             ("child_binary", &self.child_binary),
             ("placement_dir", &self.placement_dir),
@@ -132,14 +122,12 @@ pub trait GateReconciler: Send + Sync {
         desired: &InstanceRow,
     ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation>;
 
-    async fn reconcile(
-        &self,
-        desired: &InstanceRow,
-        subject_grant: Option<&str>,
-    ) -> Result<VerifiedInstance>;
+    /// Makes core hold `desired` (instance and complete binding set) and returns what the
+    /// child's `hello` must carry.
+    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance>;
 }
 
-pub use crate::core_provisioning::UdsGateReconciler;
+pub use crate::core_provisioning::ProvisionReconciler;
 
 pub trait SpawnerFactory: Send + Sync {
     fn observe_process(
@@ -342,18 +330,7 @@ where
                     {
                         continue;
                     }
-                    let grant = self
-                        .store
-                        .lock()
-                        .unwrap()
-                        .decrypt_subject_grant(&row.instance_id, &self.key)?;
-                    let grant_text = grant
-                        .as_ref()
-                        .map(|value| {
-                            std::str::from_utf8(value).context("subject grant is not UTF-8")
-                        })
-                        .transpose()?;
-                    let verified = match self.reconciler.reconcile(&row, grant_text).await {
+                    let verified = match self.reconciler.reconcile(&row).await {
                         Ok(value) => value,
                         Err(error) => {
                             self.factory.cleanup_artifacts(&row)?;
@@ -378,10 +355,6 @@ where
                         )?,
                         "stale lifecycle verification commit"
                     );
-                    self.store
-                        .lock()
-                        .unwrap()
-                        .clear_subject_grant(&row.instance_id, row.desired_generation)?;
                     if verified.enabled {
                         if let Err(error) = self.start_ready(&row.instance_id).await {
                             self.factory.cleanup_artifacts(&row)?;
@@ -587,15 +560,18 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let mut raw = [0_u8; 32];
     raw.copy_from_slice(&key[..]);
     let store = DiscordStore::open(&config.database_path)?;
-    // Everything that talks to core about instances and bindings comes from one module.
-    let core = crate::core_provisioning::CoreProvisioning::from_config(&config)?;
     if let Some(import) = &config.legacy_import {
-        run_legacy_import(&store, import, core.lookup.as_ref(), &raw).await?;
+        let outcome = crate::legacy_import::import_legacy(&store, import, &raw)
+            .context("discord legacy import failed")?;
+        tracing::info!(?outcome, "discord legacy import");
     }
     let daemon = Arc::new(DiscordDaemon::new(
         store,
         raw,
-        core.reconciler.clone(),
+        Arc::new(ProvisionReconciler::new(
+            config.core_socket.clone(),
+            "discord",
+        )),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),
@@ -607,44 +583,12 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         }),
     )?);
     daemon.serve_channel_requests(Arc::new(DaemonChannels(Arc::downgrade(&daemon))));
-    let _admin = crate::admin::spawn_with(
-        config.admin_socket.clone(),
-        crate::admin::AdminContext {
-            scope: Arc::new(config.admin_instance_ids.iter().cloned().collect()),
-            creation_namespace: config.creation_namespace,
-            grants: core.grants.clone(),
-        },
-        daemon.store(),
-        Arc::new(raw),
-    );
+    let _admin = crate::admin::spawn(config.admin_socket.clone(), daemon.store(), Arc::new(raw));
     let mut interval =
         tokio::time::interval(std::time::Duration::from_millis(config.reconcile_millis));
     loop {
         interval.tick().await;
         daemon.reconcile_once().await?;
-    }
-}
-
-/// D-1097 D3: import the instance-mode setup once. Core may still be starting, so a core that
-/// cannot be reached is retried; any other error stops the daemon.
-async fn run_legacy_import(
-    store: &DiscordStore,
-    import: &crate::legacy_import::LegacyImport,
-    core: &dyn crate::legacy_import::SubjectLookup,
-    key: &[u8; 32],
-) -> Result<()> {
-    loop {
-        match crate::legacy_import::import_legacy(store, import, core, key).await {
-            Ok(outcome) => {
-                tracing::info!(?outcome, "discord legacy import");
-                return Ok(());
-            }
-            Err(error) if error.is::<crate::legacy_import::CoreUnavailable>() => {
-                tracing::warn!(error = %error, "discord legacy import waiting for core");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-            Err(error) => return Err(error.context("discord legacy import failed")),
-        }
     }
 }
 

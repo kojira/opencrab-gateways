@@ -15,23 +15,17 @@ use tokio::net::{UnixListener, UnixStream};
 struct Request {
     id: String,
     op: String,
-    /// Absent only for `list`, which covers every instance in scope.
-    #[serde(default)]
-    scope_instance_id: String,
+    /// Absent only for `list` and `create`.
     #[serde(default)]
     instance_id: String,
     #[serde(default)]
     agent_id: Option<String>,
-    #[serde(default)]
-    subject_id: Option<i64>,
     #[serde(default)]
     config_b64: Option<String>,
     #[serde(default)]
     addresses: Option<Vec<String>>,
     #[serde(default)]
     credential: Option<String>,
-    #[serde(default)]
-    subject_grant: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
     /// D-1097: the whole Discord instance config as JSON (`set_config`).
@@ -56,43 +50,18 @@ struct Response {
     error: Option<String>,
 }
 
-pub type AdminScope = Arc<std::collections::BTreeSet<String>>;
-
-/// What the admin socket may touch. `scope` is the fixed instance list; with a
-/// `creation_namespace` the instances under it are in scope too, and `create` may add one.
-#[derive(Clone)]
-pub struct AdminContext {
-    pub scope: AdminScope,
-    pub creation_namespace: Option<uuid::Uuid>,
-    pub grants: Option<Arc<dyn crate::subject_grant::SubjectGrantIssuer>>,
-}
-
 pub fn spawn(
     socket: PathBuf,
-    scope: AdminScope,
     store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> tokio::task::JoinHandle<Result<()>> {
-    let context = AdminContext {
-        scope,
-        creation_namespace: None,
-        grants: None,
-    };
-    spawn_with(socket, context, store, master_key)
+    tokio::spawn(async move { serve(&socket, store, master_key).await })
 }
 
-pub fn spawn_with(
-    socket: PathBuf,
-    context: AdminContext,
-    store: Arc<Mutex<DiscordStore>>,
-    master_key: Arc<[u8; 32]>,
-) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { serve(&socket, context, store, master_key).await })
-}
-
+/// Every instance in this gateway's store is this gateway's own; the socket (mode 0600) is the
+/// boundary, so there is no further per-instance scope.
 pub async fn serve(
     socket: &Path,
-    context: AdminContext,
     store: Arc<Mutex<DiscordStore>>,
     master_key: Arc<[u8; 32]>,
 ) -> Result<()> {
@@ -101,36 +70,18 @@ pub async fn serve(
     set_mode(socket)?;
     loop {
         let (stream, _) = listener.accept().await?;
-        let context = context.clone();
         let store = store.clone();
         let key = master_key.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle(stream, context, store, key).await {
+            if let Err(error) = handle(stream, store, key).await {
                 tracing::warn!(error = %error, "discord local admin request failed");
             }
         });
     }
 }
 
-impl AdminContext {
-    /// Whether `instance_id` may be touched: in the fixed list, or under the namespace.
-    fn allows(&self, store: &DiscordStore, instance_id: &str) -> Result<bool> {
-        if self.scope.contains(instance_id) {
-            return Ok(true);
-        }
-        let Some(namespace) = &self.creation_namespace else {
-            return Ok(false);
-        };
-        Ok(store.get(instance_id)?.is_some_and(|row| {
-            crate::subject_grant::instance_id_for(namespace, &row.agent_id).to_string()
-                == instance_id
-        }))
-    }
-}
-
 async fn handle(
     stream: UnixStream,
-    context: AdminContext,
     store: Arc<Mutex<DiscordStore>>,
     key: Arc<[u8; 32]>,
 ) -> Result<()> {
@@ -138,11 +89,7 @@ async fn handle(
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) if request.op == "create" => {
-                let id = request.id.clone();
-                respond(id, create(request, &context, &store, &key).await)
-            }
-            Ok(request) => apply(request, &context, &store, &key),
+            Ok(request) => apply(request, &store, &key),
             Err(_) => Response {
                 id: String::new(),
                 ok: false,
@@ -157,18 +104,9 @@ async fn handle(
     Ok(())
 }
 
-/// `create`: a bot for an agent that has none. Checks the input first, then asks core for the
-/// agent's subject grant, then stores the pending instance (the daemon's reconcile creates it
-/// in core with that grant and starts the bot).
-async fn create(
-    request: Request,
-    context: &AdminContext,
-    store: &Mutex<DiscordStore>,
-    key: &[u8; 32],
-) -> Result<Value> {
-    let (Some(namespace), Some(grants)) = (&context.creation_namespace, &context.grants) else {
-        anyhow::bail!("create_unavailable");
-    };
+/// `create`: a bot for an agent that has none, under a fresh instance id. The daemon's next
+/// reconcile provisions it in core and starts the bot.
+fn create(request: &Request, store: &DiscordStore, key: &[u8; 32]) -> Result<Value> {
     let agent_id = request.agent_id.as_deref().context("agent_id required")?;
     let plan = crate::admin_settings::plan_create(
         agent_id,
@@ -180,21 +118,12 @@ async fn create(
         request.addresses.as_deref().unwrap_or_default(),
         request.credential.as_deref().unwrap_or_default(),
     )?;
-    let instance_id = crate::subject_grant::instance_id_for(namespace, agent_id).to_string();
-    {
-        let store = store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
-        anyhow::ensure!(
-            store.list()?.iter().all(|row| row.agent_id != agent_id),
-            "this agent already has a bot"
-        );
-    }
-    let grant = grants.issue(agent_id).await?;
-    let store = store
-        .lock()
-        .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
-    crate::admin_settings::store_create(&store, &instance_id, &plan, &grant, key)
+    anyhow::ensure!(
+        store.list()?.iter().all(|row| row.agent_id != agent_id),
+        "this agent already has a bot"
+    );
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    crate::admin_settings::store_create(store, &instance_id, &plan, key)
 }
 
 fn respond(id: String, result: Result<Value>) -> Response {
@@ -214,31 +143,22 @@ fn respond(id: String, result: Result<Value>) -> Response {
     }
 }
 
-fn apply(
-    request: Request,
-    context: &AdminContext,
-    store: &Mutex<DiscordStore>,
-    key: &[u8; 32],
-) -> Response {
+fn apply(request: Request, store: &Mutex<DiscordStore>, key: &[u8; 32]) -> Response {
     let id = request.id.clone();
     let result = (|| -> Result<Value> {
         let store = store
             .lock()
             .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
-        if request.op == "list" {
-            return crate::admin_settings::list(&store, |id| context.allows(&store, id));
+        match request.op.as_str() {
+            "list" => return crate::admin_settings::list(&store, |_| Ok(true)),
+            "create" => return create(&request, &store, key),
+            _ => {}
         }
-        anyhow::ensure!(
-            request.scope_instance_id == request.instance_id
-                && context.allows(&store, &request.instance_id)?,
-            "scope_denied"
-        );
         match request.op.as_str() {
             "get" => Ok(store.get(&request.instance_id)?.map_or(Value::Null, |row| {
                 json!({
                     "instance_id": row.instance_id,
                     "agent_id": row.agent_id,
-                    "subject_id": row.subject_id,
                     "enabled": row.enabled,
                     "desired_generation": row.desired_generation,
                     "lifecycle_state": row.lifecycle_state,
@@ -255,11 +175,9 @@ fn apply(
                 let generation = store.upsert_desired(
                     &request.instance_id,
                     request.agent_id.as_deref().context("agent_id required")?,
-                    request.subject_id.context("subject_id required")?,
                     &canonical_config,
                     request.addresses.as_deref().unwrap_or_default(),
                     request.credential.as_deref().unwrap_or_default(),
-                    request.subject_grant.as_deref(),
                     request.enabled.context("enabled required")?,
                     key,
                 )?;
@@ -331,17 +249,14 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[tokio::test]
-    async fn s5_discord_admin_is_exact_scoped_mode_0600_and_redacts_secret() {
+    async fn s5_discord_admin_is_mode_0600_and_redacts_secret() {
         let temp = tempfile::tempdir().unwrap();
         let socket = temp.path().join("admin.sock");
         let store = Arc::new(Mutex::new(
             DiscordStore::open(&temp.path().join("owner.db")).unwrap(),
         ));
         let inspect = store.clone();
-        let scope = Arc::new(std::collections::BTreeSet::from([
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
-        ]));
-        let task = spawn(socket.clone(), scope, store, Arc::new([4; 32]));
+        let task = spawn(socket.clone(), store, Arc::new([4; 32]));
         while !socket.exists() {
             tokio::task::yield_now().await;
         }
@@ -349,40 +264,14 @@ mod tests {
             std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let mut stream = UnixStream::connect(&socket).await.unwrap();
-        let request = json!({"id":"1","op":"upsert","scope_instance_id":"other",
-            "instance_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","agent_id":"a","subject_id":1,
-            "config_b64":"e30=","addresses":[],"credential":"super-secret","enabled":true});
-        stream
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).await.unwrap();
-        assert!(line.contains("scope_denied"));
-        assert!(!line.contains("super-secret"));
-
-        let unauthorized = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-        let mut stream = UnixStream::connect(&socket).await.unwrap();
-        let request = json!({"id":"forged","op":"upsert","scope_instance_id":unauthorized,
-            "instance_id":unauthorized,"agent_id":"b","subject_id":2,
-            "config_b64":"e30=","addresses":[],"credential":"forged-secret","enabled":true});
-        stream
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).await.unwrap();
-        assert!(line.contains("scope_denied"));
-
         let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let secret_config = base64::engine::general_purpose::STANDARD.encode(
             br#"{"agent_id":"a","self_bot_id":"123456789012345678","token":"config-leak"}"#,
         );
         let mut stream = UnixStream::connect(&socket).await.unwrap();
-        let request = json!({"id":"secret-config","op":"upsert","scope_instance_id":instance_id,
-            "instance_id":instance_id,"agent_id":"a","subject_id":1,
-            "config_b64":secret_config,"addresses":[],"credential":"super-secret","enabled":true});
+        let request = json!({"id":"secret-config","op":"upsert","instance_id":instance_id,
+            "agent_id":"a","config_b64":secret_config,"addresses":[],"credential":"super-secret",
+            "enabled":true});
         stream
             .write_all(format!("{request}\n").as_bytes())
             .await
@@ -395,8 +284,7 @@ mod tests {
         let config = base64::engine::general_purpose::STANDARD
             .encode(br#"{"agent_id":"a","self_bot_id":"123456789012345678"}"#);
         let mut stream = UnixStream::connect(&socket).await.unwrap();
-        let request = json!({"id":"2","op":"upsert","scope_instance_id":instance_id,
-            "instance_id":instance_id,"agent_id":"a","subject_id":1,
+        let request = json!({"id":"2","op":"upsert","instance_id":instance_id,"agent_id":"a",
             "config_b64":config,"addresses":[],"credential":"super-secret","enabled":true});
         stream
             .write_all(format!("{request}\n").as_bytes())
@@ -419,11 +307,3 @@ mod tests {
         task.abort();
     }
 }
-
-#[cfg(test)]
-#[path = "admin_settings_tests.rs"]
-mod settings_tests;
-
-#[cfg(test)]
-#[path = "admin_create_tests.rs"]
-mod create_tests;

@@ -12,11 +12,9 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS instances (
   instance_id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL UNIQUE,
-  subject_id INTEGER NOT NULL CHECK(subject_id > 0),
   config_b64 TEXT NOT NULL,
   addresses_json TEXT NOT NULL,
   credential_envelope TEXT NOT NULL,
-  subject_grant_envelope TEXT,
   enabled INTEGER NOT NULL,
   desired_generation INTEGER NOT NULL,
   applied_generation INTEGER,
@@ -66,11 +64,9 @@ CREATE TABLE IF NOT EXISTS legacy_identity_sources (
 pub struct InstanceRow {
     pub instance_id: String,
     pub agent_id: String,
-    pub subject_id: i64,
     pub config_b64: String,
     pub addresses: Vec<String>,
     pub credential_envelope: String,
-    pub subject_grant_envelope: Option<String>,
     pub enabled: bool,
     pub desired_generation: u64,
     pub applied_generation: Option<u64>,
@@ -139,15 +135,12 @@ impl DiscordStore {
         &self,
         instance_id: &str,
         agent_id: &str,
-        subject_id: i64,
         config_b64: &str,
         addresses: &[String],
         credential: &str,
-        subject_grant: Option<&str>,
         enabled: bool,
         key: &[u8; secret_store::MASTER_KEY_LEN],
     ) -> Result<u64> {
-        anyhow::ensure!(subject_id > 0, "subject_id must be positive");
         let existing = self.get(instance_id)?;
         let generation = existing
             .as_ref()
@@ -160,60 +153,60 @@ impl DiscordStore {
         } else {
             secret_store::encrypt(credential.as_bytes(), key)?
         };
-        let grant_envelope = match subject_grant {
-            Some(grant) if !grant.is_empty() => Some(secret_store::encrypt(grant.as_bytes(), key)?),
-            _ => existing
-                .as_ref()
-                .and_then(|row| row.subject_grant_envelope.clone()),
-        };
         self.conn.execute(
             "INSERT INTO instances
-             (instance_id, agent_id, subject_id, config_b64, addresses_json, credential_envelope,
-              subject_grant_envelope, enabled, desired_generation, applied_generation, lifecycle_state, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,'pending',?10)
+             (instance_id, agent_id, config_b64, addresses_json, credential_envelope,
+              enabled, desired_generation, applied_generation, lifecycle_state, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,NULL,'pending',?8)
              ON CONFLICT(instance_id) DO UPDATE SET
-               agent_id=excluded.agent_id, subject_id=excluded.subject_id,
+               agent_id=excluded.agent_id,
                config_b64=excluded.config_b64, addresses_json=excluded.addresses_json,
-               credential_envelope=excluded.credential_envelope,
-               subject_grant_envelope=excluded.subject_grant_envelope, enabled=excluded.enabled,
+               credential_envelope=excluded.credential_envelope, enabled=excluded.enabled,
                desired_generation=excluded.desired_generation, lifecycle_state='pending',
                process_id=NULL, process_nonce=NULL, retry_at_unix_ms=NULL,
                updated_at=excluded.updated_at",
-            params![instance_id, agent_id, subject_id, config_b64,
-                serde_json::to_string(addresses)?, envelope, grant_envelope, enabled, generation,
-                chrono::Utc::now().to_rfc3339()],
+            params![
+                instance_id,
+                agent_id,
+                config_b64,
+                serde_json::to_string(addresses)?,
+                envelope,
+                enabled,
+                generation,
+                chrono::Utc::now().to_rfc3339()
+            ],
         )?;
         Ok(generation)
     }
 
     pub fn get(&self, instance_id: &str) -> Result<Option<InstanceRow>> {
         self.conn.query_row(
-            "SELECT instance_id,agent_id,subject_id,config_b64,addresses_json,credential_envelope,
-                    subject_grant_envelope,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,
+            "SELECT instance_id,agent_id,config_b64,addresses_json,credential_envelope,
+                    enabled,desired_generation,applied_generation,lifecycle_state,core_revision,
                     core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms
              FROM instances WHERE instance_id=?1",
             params![instance_id],
             |row| {
-                let state: String = row.get(10)?;
-                let desired: i64 = row.get(8)?;
-                let applied: Option<i64> = row.get(9)?;
-                let revision: Option<i64> = row.get(11)?;
-                let failures: i64 = row.get(16)?;
+                let state: String = row.get(8)?;
+                let desired: i64 = row.get(6)?;
+                let applied: Option<i64> = row.get(7)?;
+                let revision: Option<i64> = row.get(9)?;
+                let failures: i64 = row.get(14)?;
                 Ok(InstanceRow {
-                    instance_id: row.get(0)?, agent_id: row.get(1)?, subject_id: row.get(2)?,
-                    config_b64: row.get(3)?,
-                    addresses: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
-                    credential_envelope: row.get(5)?, subject_grant_envelope: row.get(6)?, enabled: row.get(7)?,
+                    instance_id: row.get(0)?, agent_id: row.get(1)?,
+                    config_b64: row.get(2)?,
+                    addresses: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                    credential_envelope: row.get(4)?, enabled: row.get(5)?,
                     desired_generation: u64::try_from(desired).unwrap_or(0),
                     applied_generation: applied.and_then(|v| u64::try_from(v).ok()),
                     lifecycle_state: LifecycleState::from_str(&state).unwrap_or(LifecycleState::Error),
                     core_revision: revision.and_then(|v| u64::try_from(v).ok()),
-                    core_digest: row.get(12)?,
-                    core_bindings: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
-                    process_id: row.get::<_, Option<i64>>(14)?.and_then(|value| u32::try_from(value).ok()),
-                    process_nonce: row.get(15)?,
+                    core_digest: row.get(10)?,
+                    core_bindings: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+                    process_id: row.get::<_, Option<i64>>(12)?.and_then(|value| u32::try_from(value).ok()),
+                    process_nonce: row.get(13)?,
                     failure_count: u32::try_from(failures).unwrap_or(u32::MAX),
-                    retry_at_unix_ms: row.get(17)?,
+                    retry_at_unix_ms: row.get(15)?,
                 })
             },
         ).optional().map_err(Into::into)
@@ -260,6 +253,14 @@ impl DiscordStore {
             )
             .optional()?
             .flatten())
+    }
+
+    /// The instance of `agent_id`, if this gateway has one.
+    pub fn get_by_agent(&self, agent_id: &str) -> Result<Option<InstanceRow>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|row| row.agent_id == agent_id))
     }
 
     pub fn retry_due_error(
@@ -403,25 +404,6 @@ impl DiscordStore {
         secret_store::decrypt(&row.credential_envelope, key)
     }
 
-    pub fn decrypt_subject_grant(
-        &self,
-        instance_id: &str,
-        key: &[u8; 32],
-    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
-        let row = self.get(instance_id)?.context("instance unknown")?;
-        row.subject_grant_envelope
-            .as_deref()
-            .map(|value| secret_store::decrypt(value, key))
-            .transpose()
-    }
-
-    pub fn clear_subject_grant(&self, instance_id: &str, generation: u64) -> Result<bool> {
-        Ok(self.conn.execute(
-            "UPDATE instances SET subject_grant_envelope=NULL WHERE instance_id=?1 AND desired_generation=?2",
-            params![instance_id, generation],
-        )? == 1)
-    }
-
     fn transition(&self, id: &str, generation: u64, from: &str, to: &str) -> Result<bool> {
         Ok(self.conn.execute(
             "UPDATE instances SET lifecycle_state=?4,updated_at=?5
@@ -445,11 +427,9 @@ mod tests {
             .upsert_desired(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 "agent",
-                7,
                 "Y29uZmln",
                 &["opaque-address".into()],
                 "token-secret",
-                Some("grant-secret-at-rest"),
                 true,
                 &key,
             )
@@ -501,11 +481,9 @@ mod tests {
             .upsert_desired(
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 "agent",
-                7,
                 "Y29uZmln",
                 &[],
                 "token",
-                None,
                 false,
                 &[8; 32],
             )

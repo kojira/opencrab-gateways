@@ -43,22 +43,16 @@ async fn fixture() -> Fixture {
             .upsert_desired(
                 id,
                 agent,
-                7,
                 &config(agent),
                 &[format!("discord-{agent}-1-2")],
                 "token-secret",
-                None,
                 true,
                 &KEY,
             )
             .unwrap();
     }
     let store = Arc::new(Mutex::new(store));
-    let scope = Arc::new(std::collections::BTreeSet::from([
-        A.to_string(),
-        B.to_string(),
-    ]));
-    let admin = crate::admin::spawn(socket.clone(), scope, store.clone(), Arc::new(KEY));
+    let admin = crate::admin::spawn(socket.clone(), store.clone(), Arc::new(KEY));
     while !socket.exists() {
         tokio::task::yield_now().await;
     }
@@ -417,16 +411,31 @@ async fn d1097_create_route_checks_the_token_and_forwards_to_the_daemon() {
         .await
         .unwrap();
     assert_eq!(bad.status(), 400);
-    assert!(!bad.text().await.unwrap().contains("create_unavailable"));
+    assert!(f
+        .store
+        .lock()
+        .unwrap()
+        .get_by_agent("agent-new")
+        .unwrap()
+        .is_none());
     let good = http
         .post(format!("{}/api/instances", f.base))
         .json(&body("good-token"))
         .send()
         .await
         .unwrap();
-    // The fixture's daemon has no creation namespace, so the daemon refuses: the route reached it.
-    assert_eq!(good.status(), 400);
+    assert_eq!(good.status(), 200);
     let text = good.text().await.unwrap();
-    assert!(text.contains("create_unavailable"), "{text}");
     assert!(!text.contains("good-token"));
+    let created: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(created["self_bot_id"], "999999999999999999");
+    let row = f
+        .store
+        .lock()
+        .unwrap()
+        .get(created["instance_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.agent_id, "agent-new");
+    assert_eq!(row.addresses, vec!["discord-agent-new-100-200"]);
 }

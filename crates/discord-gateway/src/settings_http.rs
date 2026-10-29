@@ -181,7 +181,7 @@ async fn update(
     Path((id, field)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> Response {
-    let mut request = json!({"id":"settings","scope_instance_id":id,"instance_id":id});
+    let mut request = json!({"id":"settings","instance_id":id});
     let (op, key) = match field.as_str() {
         "config" => ("set_config", "config"),
         "addresses" => ("set_addresses", "addresses"),
@@ -219,7 +219,7 @@ async fn set_credential(
         Ok(id) => id,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    let request = json!({"id":"settings","op":"set_credential","scope_instance_id":id,
+    let request = json!({"id":"settings","op":"set_credential",
         "instance_id":id,"credential":token,"self_bot_id":bot_id});
     match admin(&state, request).await {
         Ok(mut value) => {
@@ -274,7 +274,7 @@ async fn add_channel(
     if !addresses.iter().any(|a| a == address.as_str()) {
         addresses.push(json!(address));
     }
-    let request = json!({"id":"settings","op":"set_addresses","scope_instance_id":id,
+    let request = json!({"id":"settings","op":"set_addresses",
         "instance_id":id,"addresses":addresses});
     match admin(&state, request).await {
         Ok(value) => Json(value).into_response(),

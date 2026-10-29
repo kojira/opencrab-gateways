@@ -21,11 +21,10 @@ pub(crate) fn wants_channel(
         && access.owners.iter().any(|id| id == &msg.author.id)
 }
 
-/// The binding id for `address` of `instance_id`: the same rule as the daemon's gate-admin
-/// reconcile, so both sides name the same binding.
+/// The binding id for `address` of `instance_id`: core's provision rule, so the daemon's next
+/// provision keeps the binding the child created.
 pub(crate) fn binding_id_for(instance_id: &str, address: &str) -> Option<String> {
-    let namespace = uuid::Uuid::parse_str(instance_id).ok()?;
-    Some(uuid::Uuid::new_v5(&namespace, address.as_bytes()).to_string())
+    opencrab_gate_client::provision::binding_id_for(instance_id, address).ok()
 }
 
 /// Creates the binding on this child's own core connection, waits for core's bind, then tells

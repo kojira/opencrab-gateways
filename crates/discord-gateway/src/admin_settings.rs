@@ -138,11 +138,9 @@ fn write(
     let generation = store.upsert_desired(
         &row.instance_id,
         &row.agent_id,
-        row.subject_id,
         config_b64,
         addresses,
         credential,
-        None,
         enabled,
         key,
     )?;
@@ -191,7 +189,6 @@ pub fn store_create(
     store: &DiscordStore,
     instance_id: &str,
     plan: &CreatePlan,
-    grant: &crate::subject_grant::SubjectGrant,
     key: &[u8; 32],
 ) -> Result<Value> {
     anyhow::ensure!(
@@ -201,11 +198,9 @@ pub fn store_create(
     let generation = store.upsert_desired(
         instance_id,
         &plan.agent_id,
-        grant.subject_id,
         &plan.config_b64,
         &plan.addresses,
         &plan.credential,
-        Some(&grant.grant),
         true,
         key,
     )?;

@@ -3,7 +3,7 @@
 //! | op | input | effect |
 //! |---|---|---|
 //! | `list` | – | scoped instances (id, agent, enabled, state, credential_configured) |
-//! | `get` | instance | adds `settings` (relays, name, filter, self_pubkey) and `access` |
+//! | `get` | instance | adds `settings` (relays, name, filter, self_pubkey, watch seed) and `access` |
 //! | `set_config` | `settings{relays,name,filter}` | replaces runtime config; self_pubkey kept |
 //! | `set_access` | `settings{owner,trusted_users,followees,co_agents}` | replaces access |
 //! | `set_key` | `credential` (nsec or hex) | replaces the key and self_pubkey |
@@ -65,6 +65,8 @@ pub(crate) fn get(row: &InstanceRow) -> Result<Value> {
         "name": pick("name"),
         "self_pubkey": pick("self_pubkey"),
         "filter": config.get("filter").cloned().unwrap_or_else(|| json!({})),
+        // Seed for the watch store (no secrets). After the first start the store is the authority.
+        "watches": config.get("watches").cloned().unwrap_or_else(|| json!([])),
     });
     value["access"] = serde_json::to_value(&row.access)?;
     Ok(value)

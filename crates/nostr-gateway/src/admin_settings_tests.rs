@@ -28,6 +28,7 @@ fn config_b64(relays: &[&str]) -> String {
             "self_pubkey": "a".repeat(64),
             "name": "bot",
             "filter": {"keywords": ["crab"]},
+            "watches": [{"id": 4, "interval_secs": 1800, "filter": {"authors": ["x"], "kinds": [1]}}],
         }))
         .unwrap(),
     )
@@ -122,6 +123,12 @@ async fn get_shows_settings_and_access_but_not_the_key() {
     assert_eq!(result["settings"]["relays"], json!(["wss://old.example"]));
     assert_eq!(result["settings"]["name"], json!("bot"));
     assert_eq!(result["settings"]["filter"]["keywords"], json!(["crab"]));
+    // The settings page seeds the watch store from these, exactly like the child does.
+    assert_eq!(result["settings"]["watches"][0]["id"], json!(4));
+    assert_eq!(
+        result["settings"]["watches"][0]["interval_secs"],
+        json!(1800)
+    );
     assert_eq!(result["access"]["owner"], json!(["11".repeat(32)]));
     assert_eq!(result["credential_configured"], json!(true));
 }

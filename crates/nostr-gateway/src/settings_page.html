@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nostr gateway 設定</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1em; line-height: 1.6; }
+  h1 { font-size: 1.3em; }
+  h2 { font-size: 1.05em; margin-top: 1.6em; border-bottom: 1px solid #8884; }
+  label { display: block; margin: 0.4em 0; }
+  input[type=text], input[type=number], input[type=password], textarea, select { width: 100%; box-sizing: border-box; padding: 0.3em; font: inherit; }
+  textarea { min-height: 4.5em; }
+  table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.95em; }
+  th, td { border: 1px solid #8884; padding: 0.3em 0.5em; text-align: left; vertical-align: top; word-break: break-all; }
+  button { padding: 0.35em 0.9em; margin: 0.2em 0.4em 0.2em 0; }
+  .row { display: grid; grid-template-columns: 1fr 1fr 2fr 2fr 1fr; gap: 0.5em; align-items: end; }
+  .muted { color: #888; font-size: 0.9em; }
+  #msg { position: sticky; top: 0; padding: 0.4em 0; min-height: 1.4em; background: Canvas; }
+  #msg.err { color: #c00; }
+</style>
+</head>
+<body>
+<h1>Nostr gateway 設定</h1>
+<p class="muted">このゲートウェイの設定です。保存すると数秒で反映されます（再起動は不要）。秘密鍵は表示しません。</p>
+<div id="msg"></div>
+
+<label>エージェント<select id="instance"></select></label>
+<p class="muted" id="state"></p>
+
+<h2>起動・停止</h2>
+<p><span id="enabled-label"></span>
+  <button id="enable">起動</button><button id="disable">停止</button></p>
+
+<h2>基本（relays・name・filter）</h2>
+<label>relays（1 行に 1 つ、ws:// か wss://）<textarea id="relays"></textarea></label>
+<label>name（エージェントの表示名。メンションの検出に使う）<input id="name" type="text"></label>
+<label>filter.authors（カンマ区切り）<input id="filter-authors" type="text"></label>
+<label>filter.keywords（カンマ区切り）<input id="filter-keywords" type="text"></label>
+<label>filter.kinds（カンマ区切り）<input id="filter-kinds" type="text"></label>
+<p class="muted">自分の公開鍵: <span id="self-pubkey"></span></p>
+<button id="save-config">基本を保存</button>
+
+<h2>アクセス（owner・trusted_users・followees・co_agents）</h2>
+<p class="muted">hex か npub を 1 行に 1 つ。co_agents は「公開鍵 エージェントID」を 1 行に 1 つ。</p>
+<label>owner<textarea id="owner"></textarea></label>
+<label>trusted_users<textarea id="trusted_users"></textarea></label>
+<label>followees（固定。フォローリストは自動で足されます）<textarea id="followees"></textarea></label>
+<label>co_agents<textarea id="co_agents"></textarea></label>
+<button id="save-access">アクセスを保存</button>
+
+<h2>秘密鍵</h2>
+<p>状態: <span id="key-state"></span></p>
+<label>nsec（書き込み専用。保存後も表示しません）<input id="nsec" type="password" autocomplete="off"></label>
+<button id="save-key">秘密鍵を保存</button>
+<label>vanity prefix（npub1 の後に続く文字。空ならランダム）<input id="prefix" type="text"></label>
+<button id="generate">新しい鍵を generate（今の鍵は上書き・停止状態になります）</button>
+
+<h2>watch（タイムライン監視）</h2>
+<table>
+  <thead><tr><th>id</th><th>interval_secs</th><th>authors</th><th>keywords</th><th>kinds</th><th></th></tr></thead>
+  <tbody id="watch-list"></tbody>
+</table>
+<p class="muted">id を空にすると追加、入れるとその watch を更新。kinds は 1,6,7（空なら 1）。</p>
+<div class="row">
+  <label>id<input id="w-id" type="number" min="1"></label>
+  <label>interval_secs<input id="w-interval" type="number" min="60" max="86400" value="1800"></label>
+  <label>authors<input id="w-authors" type="text"></label>
+  <label>keywords<input id="w-keywords" type="text"></label>
+  <label>kinds<input id="w-kinds" type="text"></label>
+</div>
+<button id="save-watch">watch を保存</button>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let instances = [];
+const msg = $('msg');
+function say(text, isError) { msg.textContent = text; msg.className = isError ? 'err' : ''; }
+const csv = (v) => v.split(',').map(s => s.trim()).filter(Boolean);
+const lines = (v) => v.split('\n').map(s => s.trim()).filter(Boolean);
+const ints = (v) => csv(v).map(Number).filter(Number.isInteger);
+const current = () => instances.find(i => i.instance_id === $('instance').value);
+const base = () => '/api/instances/' + encodeURIComponent($('instance').value);
+
+async function call(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { throw new Error(data.error || ('HTTP ' + res.status)); }
+  return data;
+}
+async function run(action, done) {
+  try { await action(); say(done); await load($('instance').value); }
+  catch (e) { say(e.message, true); }
+}
+
+async function load(selected) {
+  const data = await call('/api/instances');
+  instances = data.instances;
+  const select = $('instance');
+  select.textContent = '';
+  for (const i of instances) {
+    const option = document.createElement('option');
+    option.value = i.instance_id;
+    option.textContent = (i.settings.name || i.agent_id) + '（' + i.agent_id + '）';
+    select.appendChild(option);
+  }
+  if (selected) { select.value = selected; }
+  show();
+}
+
+function show() {
+  const i = current();
+  if (!i) { say('インスタンスがありません', true); return; }
+  $('state').textContent = 'instance ' + i.instance_id + ' / 状態 ' + i.lifecycle_state;
+  $('enabled-label').textContent = i.enabled ? '起動中（enabled）' : '停止中（disabled）';
+  $('relays').value = (i.settings.relays || []).join('\n');
+  $('name').value = i.settings.name || '';
+  const f = i.settings.filter || {};
+  $('filter-authors').value = (f.authors || []).join(', ');
+  $('filter-keywords').value = (f.keywords || []).join(', ');
+  $('filter-kinds').value = (f.kinds || []).join(',');
+  $('self-pubkey').textContent = i.settings.self_pubkey || '';
+  const a = i.access || {};
+  $('owner').value = (a.owner || []).join('\n');
+  $('trusted_users').value = (a.trusted_users || []).join('\n');
+  $('followees').value = (a.followees || []).join('\n');
+  $('co_agents').value = Object.entries(a.co_agents || {}).map(([k, v]) => k + ' ' + v).join('\n');
+  $('key-state').textContent = i.credential_configured ? '設定済み' : '未設定';
+  $('nsec').value = '';
+  loadWatches();
+}
+
+async function loadWatches() {
+  const tbody = $('watch-list');
+  tbody.textContent = '';
+  let data;
+  try { data = await call(base() + '/watches'); } catch (e) { say(e.message, true); return; }
+  for (const w of data.watches) {
+    const tr = document.createElement('tr');
+    for (const v of [w.id, w.interval_secs, w.authors.join(', '), w.keywords.join(', '), w.kinds.join(',')]) {
+      const td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
+    }
+    const td = document.createElement('td');
+    const edit = document.createElement('button');
+    edit.textContent = '編集';
+    edit.onclick = () => {
+      $('w-id').value = w.id; $('w-interval').value = w.interval_secs;
+      $('w-authors').value = w.authors.join(', '); $('w-keywords').value = w.keywords.join(', ');
+      $('w-kinds').value = w.kinds.join(',');
+    };
+    const del = document.createElement('button');
+    del.textContent = '削除';
+    del.onclick = () => run(() => call(base() + '/watches/delete', { id: w.id }), 'watch を削除しました');
+    td.appendChild(edit); td.appendChild(del); tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  if (data.watches.length === 0) {
+    const tr = document.createElement('tr'); const td = document.createElement('td');
+    td.colSpan = 6; td.className = 'muted'; td.textContent = 'watch はまだありません';
+    tr.appendChild(td); tbody.appendChild(tr);
+  }
+}
+
+$('instance').onchange = show;
+$('enable').onclick = () => run(() => call(base() + '/enabled', { enabled: true }), '起動しました');
+$('disable').onclick = () => run(() => call(base() + '/enabled', { enabled: false }), '停止しました');
+$('save-config').onclick = () => run(() => call(base() + '/config', {
+  relays: lines($('relays').value), name: $('name').value,
+  filter: { authors: csv($('filter-authors').value), keywords: csv($('filter-keywords').value), kinds: ints($('filter-kinds').value) },
+}), '基本を保存しました');
+$('save-access').onclick = () => run(() => {
+  const co_agents = {};
+  for (const line of lines($('co_agents').value)) {
+    const [key, agent] = line.split(/\s+/, 2);
+    co_agents[key] = agent || '';
+  }
+  return call(base() + '/access', {
+    owner: lines($('owner').value), trusted_users: lines($('trusted_users').value),
+    followees: lines($('followees').value), co_agents,
+  });
+}, 'アクセスを保存しました');
+$('save-key').onclick = () => run(() => call(base() + '/key', { nsec: $('nsec').value }), '秘密鍵を保存しました');
+$('generate').onclick = () => {
+  if (!confirm('今の鍵を上書きして新しい鍵を作ります。エージェントの Nostr アカウントが変わります。よろしいですか？')) { return; }
+  say('生成中…（prefix が長いと時間がかかります）');
+  run(() => call(base() + '/generate-key', { prefix: $('prefix').value, overwrite: true }),
+    '新しい鍵を保存しました。停止状態なので、確認してから起動してください');
+};
+$('save-watch').onclick = () => run(() => {
+  const payload = {
+    interval_secs: Number($('w-interval').value), authors: csv($('w-authors').value),
+    keywords: csv($('w-keywords').value), kinds: ints($('w-kinds').value),
+  };
+  if ($('w-id').value.trim()) { payload.id = Number($('w-id').value); }
+  return call(base() + '/watches', payload);
+}, 'watch を保存しました');
+
+load().catch(e => say(e.message, true));
+</script>
+</body>
+</html>

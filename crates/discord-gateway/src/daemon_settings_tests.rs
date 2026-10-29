@@ -156,3 +156,136 @@ async fn d1097_a_settings_change_rebuilds_only_that_child_with_the_same_core_con
     );
     daemon.shutdown().await;
 }
+
+/// A minimal gate-admin over a Unix socket: keeps one instance and answers the calls
+/// `GateAdminClient::reconcile` makes. Records every `config_b64` it receives.
+async fn fake_gate_admin(socket: PathBuf, received: Arc<Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let state: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    loop {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut raw = Vec::new();
+        let mut buf = [0_u8; 4096];
+        let (head, body) = loop {
+            let n = stream.read(&mut buf).await.unwrap();
+            raw.extend_from_slice(&buf[..n]);
+            if let Some(split) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&raw[..split]).to_string();
+                let length: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Content-Length: "))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                while raw.len() < split + 4 + length {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    raw.extend_from_slice(&buf[..n]);
+                }
+                break (head, raw[split + 4..split + 4 + length].to_vec());
+            }
+        };
+        let line = head.lines().next().unwrap_or_default().to_string();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let (status, reply) = {
+            let mut current = state.lock().unwrap();
+            if line.starts_with("GET ") {
+                match current.as_ref() {
+                    Some(value) => (200, value.clone()),
+                    None => (404, serde_json::json!({"code":"instance_unknown"})),
+                }
+            } else if line.starts_with("PUT /api/gate-instances/") {
+                let config = body["config_b64"].as_str().unwrap().to_string();
+                received.lock().unwrap().push(config.clone());
+                let value = serde_json::json!({"instance_id":A,"kind_id":"discord","subject_id":7,
+                "revision":1,"enabled":true,"config_b64":config,"config_digest":"d","bindings":[]});
+                *current = Some(value.clone());
+                (201, value)
+            } else if line.starts_with("PUT /api/gate-bindings/") {
+                let binding = serde_json::json!({"binding_id": line.split('/').nth(3).unwrap()
+                .split(' ').next().unwrap(), "address": body["address"], "session_id": null});
+                current.as_mut().unwrap()["bindings"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(binding.clone());
+                (201, binding)
+            } else if line.starts_with("POST ") {
+                let config = body["config_b64"].as_str().unwrap().to_string();
+                received.lock().unwrap().push(config.clone());
+                let value = current.as_mut().unwrap();
+                value["config_b64"] = serde_json::json!(config);
+                value["revision"] = serde_json::json!(value["revision"].as_u64().unwrap() + 1);
+                (201, value.clone())
+            } else {
+                (200, serde_json::json!({}))
+            }
+        };
+        let text = reply.to_string();
+        let response = format!(
+            "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+            text.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    }
+}
+
+/// D-1097 D2 through the real reconciler: core receives the neutral config, and a Discord-only
+/// change makes no core revision.
+#[tokio::test]
+async fn d1097_uds_reconciler_sends_only_the_neutral_config_to_core() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("gate-admin.sock");
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let server = tokio::spawn(fake_gate_admin(socket.clone(), received.clone()));
+    while !socket.exists() {
+        tokio::task::yield_now().await;
+    }
+    let reconciler = UdsGateReconciler::new(
+        opencrab_gate_client::admin::GateAdminClient::new_for_test(socket, "t".into()),
+        "discord",
+    );
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    store
+        .upsert_desired(
+            A,
+            "agent",
+            7,
+            &config(&[]),
+            &["discord-agent-1-2".into()],
+            "t",
+            None,
+            true,
+            &KEY,
+        )
+        .unwrap();
+    let first = reconciler
+        .reconcile(&store.get(A).unwrap().unwrap(), None)
+        .await
+        .unwrap();
+    store
+        .upsert_desired(
+            A,
+            "agent",
+            7,
+            &config(&["222222222222222222"]),
+            &["discord-agent-1-2".into()],
+            "",
+            None,
+            true,
+            &KEY,
+        )
+        .unwrap();
+    let second = reconciler
+        .reconcile(&store.get(A).unwrap().unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        received.lock().unwrap().clone(),
+        vec![DEFAULT_CORE_CONFIG_B64.to_string()],
+        "only the first call creates the instance; the owner change sends nothing new"
+    );
+    assert_eq!(
+        first.revision, second.revision,
+        "no core revision for a Discord-only change"
+    );
+    server.abort();
+}

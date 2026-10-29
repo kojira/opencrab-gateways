@@ -7,6 +7,7 @@
 #[tokio::test]
 async fn d1097_owner_mention_enables_the_channel_in_real_core() {
     use std::io::Write as _;
+    let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
     let fixture = Fixture::new();
@@ -41,7 +42,7 @@ async fn d1097_owner_mention_enables_the_channel_in_real_core() {
     let line = |id: &str, channel: &str, author: &str, mentions: &[&str]| {
         serde_json::json!({"id": id, "channel_id": channel, "guild_id": GUILD,
             "author": {"id": author, "bot": false, "username": "u"},
-            "content": "hello", "mentions": mentions})
+            "content": format!("{M_SAY} hello"), "mentions": mentions})
         .to_string()
     };
     {
@@ -90,4 +91,22 @@ async fn d1097_owner_mention_enables_the_channel_in_real_core() {
         .unwrap()
     };
     assert_eq!(other, 0, "a non-owner mention or an owner without a mention binds nothing");
+
+    // The bot's plain answer is posted to the newly enabled channel.
+    let posted = {
+        let buf = buf.clone();
+        wait_until(move || {
+            captured(&buf)
+                .iter()
+                .any(|c| c.kind == "say" && c.channel == "779" && c.body.contains(B_SAY))
+        })
+        .await
+    };
+    assert!(posted, "no answer on the new channel: {:?}", captured(&buf));
+    assert!(
+        !captured(&buf)
+            .iter()
+            .any(|c| c.kind == "say" && (c.channel == "777" || c.channel == "778")),
+        "nothing is posted where the channel was not enabled"
+    );
 }

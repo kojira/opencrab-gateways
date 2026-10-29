@@ -661,3 +661,51 @@ async fn d1097_record_bound_address_persists_without_a_gate_admin_call() {
         "still bound after a restart"
     );
 }
+
+/// D-1097: a bot created with no channel gets a placement its child accepts, so it starts and
+/// an owner mention can enable its first channel.
+#[test]
+fn d1097_a_bot_without_a_channel_gets_a_valid_child_placement() {
+    let temp = tempfile::tempdir().unwrap();
+    let placement_dir = temp.path().join("placements");
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: temp.path().join("core.sock"),
+        placement_dir: placement_dir.clone(),
+        attachment_spool_root: None,
+        attachment_outbox_root: None,
+        database_path: temp.path().join("owner.db"),
+        voice_settings: temp.path().join("voice/settings.json"),
+    };
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    let plan = crate::admin_settings::plan_create(
+        "agent",
+        "555555555555555555",
+        &["222222222222222222".into()],
+        &[],
+        "bot-token",
+    )
+    .unwrap();
+    let grant = crate::subject_grant::SubjectGrant {
+        subject_id: 11,
+        grant: zeroize::Zeroizing::new("g".into()),
+    };
+    crate::admin_settings::store_create(&store, A, &plan, &grant, &KEY).unwrap();
+    let generation = store.get(A).unwrap().unwrap().desired_generation;
+    store.mark_provisioning(A, generation).unwrap();
+    store
+        .mark_verified(A, generation, 1, "digest", &[], true)
+        .unwrap();
+    let row = store.get(A).unwrap().unwrap();
+    factory
+        .for_instance(
+            &row,
+            zeroize::Zeroizing::new(b"bot-token".to_vec()),
+            "nonce",
+        )
+        .unwrap();
+    let place = crate::config::Placement::load(&placement_dir.join(format!("{A}.json")))
+        .expect("the child accepts a placement with no channel");
+    assert!(place.instances[0].addresses.is_empty());
+    assert!(place.channel_socket.is_some());
+}

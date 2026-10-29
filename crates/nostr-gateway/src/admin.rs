@@ -1,5 +1,6 @@
 //! Protected Nostr-local administration over a mode-0600 Unix socket.
 
+use crate::admin_settings as settings;
 use crate::store::NostrStore;
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -12,25 +13,35 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Debug, Deserialize)]
-struct Request {
-    id: String,
-    op: String,
-    scope_instance_id: String,
-    instance_id: String,
+pub(crate) struct Request {
+    pub(crate) id: String,
+    pub(crate) op: String,
     #[serde(default)]
-    agent_id: Option<String>,
+    pub(crate) scope_instance_id: String,
     #[serde(default)]
-    subject_id: Option<i64>,
+    pub(crate) instance_id: String,
     #[serde(default)]
-    config_b64: Option<String>,
+    pub(crate) agent_id: Option<String>,
     #[serde(default)]
-    addresses: Option<Vec<String>>,
+    pub(crate) subject_id: Option<i64>,
     #[serde(default)]
-    credential: Option<String>,
+    pub(crate) config_b64: Option<String>,
     #[serde(default)]
-    subject_grant: Option<String>,
+    pub(crate) addresses: Option<Vec<String>>,
     #[serde(default)]
-    enabled: Option<bool>,
+    pub(crate) credential: Option<String>,
+    #[serde(default)]
+    pub(crate) subject_grant: Option<String>,
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+    /// D-1097: settings payloads (`set_config` / `set_access`).
+    #[serde(default)]
+    pub(crate) settings: Option<Value>,
+    /// D-1097 N3: vanity prefix for `generate_key`.
+    #[serde(default)]
+    pub(crate) prefix: Option<String>,
+    #[serde(default)]
+    pub(crate) overwrite: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -45,48 +56,41 @@ struct Response {
 
 pub type AdminScope = Arc<std::collections::BTreeSet<String>>;
 
-pub fn spawn(
-    socket: PathBuf,
-    scope: AdminScope,
-    store: Arc<Mutex<NostrStore>>,
-    master_key: Arc<[u8; 32]>,
-) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { serve(&socket, scope, store, master_key).await })
+/// Everything an admin request may touch.
+pub struct AdminContext {
+    pub scope: AdminScope,
+    pub store: Arc<Mutex<NostrStore>>,
+    pub master_key: Arc<[u8; 32]>,
+    /// nostaro binary for `generate_key` (D-1097 N3).
+    pub nostaro_bin: PathBuf,
 }
 
-pub async fn serve(
-    socket: &Path,
-    scope: AdminScope,
-    store: Arc<Mutex<NostrStore>>,
-    master_key: Arc<[u8; 32]>,
-) -> Result<()> {
+pub fn spawn(socket: PathBuf, context: AdminContext) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move { serve(&socket, Arc::new(context)).await })
+}
+
+pub async fn serve(socket: &Path, context: Arc<AdminContext>) -> Result<()> {
     prepare_socket(socket)?;
     let listener = UnixListener::bind(socket)?;
     set_mode(socket)?;
     loop {
         let (stream, _) = listener.accept().await?;
-        let scope = scope.clone();
-        let store = store.clone();
-        let key = master_key.clone();
+        let context = context.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle(stream, scope, store, key).await {
+            if let Err(error) = handle(stream, context).await {
                 tracing::warn!(error = %error, "nostr local admin request failed");
             }
         });
     }
 }
 
-async fn handle(
-    stream: UnixStream,
-    scope: AdminScope,
-    store: Arc<Mutex<NostrStore>>,
-    key: Arc<[u8; 32]>,
-) -> Result<()> {
+async fn handle(stream: UnixStream, context: Arc<AdminContext>) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => apply(request, &scope, &store, &key),
+            Ok(request) if request.op == "generate_key" => generate_key(request, &context).await,
+            Ok(request) => apply(request, &context.scope, &context.store, &context.master_key),
             Err(_) => Response {
                 id: String::new(),
                 ok: false,
@@ -109,26 +113,28 @@ fn apply(
 ) -> Response {
     let id = request.id.clone();
     let result = (|| -> Result<Value> {
-        anyhow::ensure!(
-            request.scope_instance_id == request.instance_id
-                && scope.contains(&request.instance_id),
-            "scope_denied"
-        );
+        if request.op == "list" {
+            let store = store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+            return settings::list(&store, scope);
+        }
+        check_scope(&request, scope)?;
         let store = store
             .lock()
             .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+        let existing = || -> Result<crate::store::InstanceRow> {
+            store.get(&request.instance_id)?.context("instance unknown")
+        };
         match request.op.as_str() {
-            "get" => Ok(store.get(&request.instance_id)?.map_or(Value::Null, |row| {
-                json!({
-                    "instance_id": row.instance_id,
-                    "agent_id": row.agent_id,
-                    "subject_id": row.subject_id,
-                    "enabled": row.enabled,
-                    "desired_generation": row.desired_generation,
-                    "lifecycle_state": row.lifecycle_state,
-                    "credential_configured": !row.credential_envelope.is_empty(),
-                })
-            })),
+            "get" => match store.get(&request.instance_id)? {
+                Some(row) => settings::get(&row),
+                None => Ok(Value::Null),
+            },
+            "set_config" => settings::set_config(&store, &existing()?, &request),
+            "set_access" => settings::set_access(&store, &existing()?, &request),
+            "set_key" => settings::set_key(&store, &existing()?, &request, key),
+            "set_enabled" => settings::set_enabled(&store, &existing()?, &request),
             "upsert" => {
                 let canonical_config = crate::config::canonicalize_config_b64(
                     request
@@ -152,6 +158,18 @@ fn apply(
             _ => anyhow::bail!("unknown_operation"),
         }
     })();
+    respond(id, result)
+}
+
+fn check_scope(request: &Request, scope: &std::collections::BTreeSet<String>) -> Result<()> {
+    anyhow::ensure!(
+        request.scope_instance_id == request.instance_id && scope.contains(&request.instance_id),
+        "scope_denied"
+    );
+    Ok(())
+}
+
+fn respond(id: String, result: Result<Value>) -> Response {
     match result {
         Ok(value) => Response {
             id,
@@ -166,6 +184,37 @@ fn apply(
             error: Some(error.to_string()),
         },
     }
+}
+
+/// `generate_key` runs nostaro, which may take long, so the store lock is held only around
+/// the reads and the final write, never across the search.
+async fn generate_key(request: Request, context: &AdminContext) -> Response {
+    let id = request.id.clone();
+    let result = async {
+        check_scope(&request, &context.scope)?;
+        let prefix = settings::check_generate(&request)?;
+        {
+            let store = context
+                .store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+            store
+                .get(&request.instance_id)?
+                .context("instance unknown")?;
+        }
+        let nsec = settings::vanity(&context.nostaro_bin, &prefix).await?;
+        let store = context
+            .store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
+        let row = store
+            .get(&request.instance_id)?
+            .context("instance unknown")?;
+        // A new identity starts disabled: the operator checks the settings, then enables it.
+        settings::store_identity(&store, &row, &nsec, Some(false), &context.master_key)
+    }
+    .await;
+    respond(id, result)
 }
 
 fn prepare_socket(path: &Path) -> Result<()> {
@@ -197,6 +246,10 @@ fn set_mode(_: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[path = "admin_settings_tests.rs"]
+mod settings_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine as _;
@@ -213,7 +266,15 @@ mod tests {
         let scope = Arc::new(std::collections::BTreeSet::from([
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
         ]));
-        let task = spawn(socket.clone(), scope, store, Arc::new([4; 32]));
+        let task = spawn(
+            socket.clone(),
+            AdminContext {
+                scope,
+                store,
+                master_key: Arc::new([4; 32]),
+                nostaro_bin: PathBuf::from("/nonexistent-nostaro"),
+            },
+        );
         while !socket.exists() {
             tokio::task::yield_now().await;
         }

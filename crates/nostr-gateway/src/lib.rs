@@ -1,6 +1,7 @@
 //! Nostr gateway。watch JSONL → V3 said（inbound）／ V3 say → nostaro reply（outbound）。
 
 pub mod admin;
+mod admin_settings;
 pub mod admission;
 mod attachments;
 pub mod config;

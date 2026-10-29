@@ -771,9 +771,12 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let admin_scope = Arc::new(config.admin_instance_ids.iter().cloned().collect());
     let _admin = crate::admin::spawn(
         config.admin_socket.clone(),
-        admin_scope,
-        daemon.store(),
-        Arc::new(raw),
+        crate::admin::AdminContext {
+            scope: admin_scope,
+            store: daemon.store(),
+            master_key: Arc::new(raw),
+            nostaro_bin: config.nostaro_bin.clone(),
+        },
     );
     let mut interval =
         tokio::time::interval(std::time::Duration::from_millis(config.reconcile_millis));

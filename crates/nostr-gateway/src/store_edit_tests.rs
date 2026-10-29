@@ -44,7 +44,11 @@ fn seeded() -> (tempfile::TempDir, NostrStore, u64) {
 
 fn assert_pending_after(store: &NostrStore, before: u64) -> InstanceRow {
     let row = store.get(ID).unwrap().unwrap();
-    assert_eq!(row.desired_generation, before + 1, "edit must bump generation");
+    assert_eq!(
+        row.desired_generation,
+        before + 1,
+        "edit must bump generation"
+    );
     assert_eq!(
         row.lifecycle_state,
         LifecycleState::Pending,
@@ -70,7 +74,9 @@ fn set_access_replaces_identity_projections() {
         owner: vec!["11".repeat(32)],
         trusted_users: vec!["22".repeat(32)],
         followees: vec!["33".repeat(32)],
-        co_agents: [("44".repeat(32), "peer".to_string())].into_iter().collect(),
+        co_agents: [("44".repeat(32), "peer".to_string())]
+            .into_iter()
+            .collect(),
     };
     store.set_access(ID, &access).unwrap();
     let row = assert_pending_after(&store, generation);

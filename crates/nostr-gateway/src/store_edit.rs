@@ -39,7 +39,12 @@ impl NostrStore {
                 insert.execute(params![instance_id, "owner", owner, None::<String>])?;
             }
             for trusted in &access.trusted_users {
-                insert.execute(params![instance_id, "trusted_user", trusted, None::<String>])?;
+                insert.execute(params![
+                    instance_id,
+                    "trusted_user",
+                    trusted,
+                    None::<String>
+                ])?;
             }
             for followee in &access.followees {
                 insert.execute(params![instance_id, "followee", followee, None::<String>])?;
@@ -66,6 +71,34 @@ impl NostrStore {
                 "UPDATE instances SET credential_envelope=?2 WHERE instance_id=?1",
                 params![instance_id, envelope],
             )?;
+            Ok(())
+        })
+    }
+
+    /// Replace the key and the matching `self_pubkey` config in one generation, so the daemon
+    /// never starts a child whose key and public key disagree. `enabled` is set when given.
+    pub fn set_identity(
+        &self,
+        instance_id: &str,
+        credential: &str,
+        config_b64: &str,
+        enabled: Option<bool>,
+        key: &[u8; secret_store::MASTER_KEY_LEN],
+    ) -> Result<u64> {
+        let credential = credential.trim();
+        anyhow::ensure!(!credential.is_empty(), "credential must be nonempty");
+        let envelope = secret_store::encrypt(credential.as_bytes(), key)?;
+        self.edit(instance_id, |tx| {
+            tx.execute(
+                "UPDATE instances SET credential_envelope=?2, config_b64=?3 WHERE instance_id=?1",
+                params![instance_id, envelope, config_b64],
+            )?;
+            if let Some(enabled) = enabled {
+                tx.execute(
+                    "UPDATE instances SET enabled=?2 WHERE instance_id=?1",
+                    params![instance_id, enabled],
+                )?;
+            }
             Ok(())
         })
     }

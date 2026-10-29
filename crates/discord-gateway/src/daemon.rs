@@ -35,11 +35,16 @@ pub struct DaemonConfig {
     /// D-1097: the VC settings file (see [`DaemonConfig::voice_settings_path`]).
     #[serde(default)]
     pub voice_settings: Option<PathBuf>,
-    /// D-1097: the gate-admin principal's creation namespace. When set, the admin socket may
-    /// create a bot for an agent that has none (instance id = core's namespace rule), and
-    /// instances under it are in admin scope without listing them in `admin_instance_ids`.
+    /// D-1097: the creation-namespace principal's namespace. Set together with
+    /// `gate_admin_creation_credential`: the admin socket may then create a bot for an agent that
+    /// has none (instance id = core's namespace rule), and instances under it are in admin scope
+    /// without listing them in `admin_instance_ids`.
     #[serde(default)]
     pub creation_namespace: Option<uuid::Uuid>,
+    /// D-1097: the creation-namespace principal's credential (0600). `gate_admin_credential`
+    /// stays the exact-scope principal over the imported instances.
+    #[serde(default)]
+    pub gate_admin_creation_credential: Option<PathBuf>,
     /// D-1097: core's public HTTP API, read by the settings page for the agent list
     /// (for example `http://127.0.0.1:8080`).
     #[serde(default)]
@@ -110,6 +115,16 @@ impl DaemonConfig {
             anyhow::ensure!(path.is_absolute(), "voice_settings must be absolute");
         }
         anyhow::ensure!(
+            self.creation_namespace.is_some() == self.gate_admin_creation_credential.is_some(),
+            "creation_namespace and gate_admin_creation_credential go together"
+        );
+        if let Some(path) = &self.gate_admin_creation_credential {
+            anyhow::ensure!(
+                path.is_absolute(),
+                "gate_admin_creation_credential must be absolute"
+            );
+        }
+        anyhow::ensure!(
             self.reconcile_millis > 0,
             "reconcile_millis must be positive"
         );
@@ -140,17 +155,29 @@ pub trait GateReconciler: Send + Sync {
 }
 
 pub struct UdsGateReconciler {
-    client: opencrab_gate_client::admin::GateAdminClient,
+    routing: crate::gate_routing::GateRouting,
     kind_id: String,
 }
 
 impl UdsGateReconciler {
+    /// One exact-scope credential for every instance.
     pub fn new(
         client: opencrab_gate_client::admin::GateAdminClient,
         kind_id: impl Into<String>,
     ) -> Self {
+        Self::routed(
+            crate::gate_routing::GateRouting {
+                exact: client,
+                creation: None,
+            },
+            kind_id,
+        )
+    }
+
+    /// D-1097: each instance through the credential that covers it.
+    pub fn routed(routing: crate::gate_routing::GateRouting, kind_id: impl Into<String>) -> Self {
         Self {
-            client,
+            routing,
             kind_id: kind_id.into(),
         }
     }
@@ -163,7 +190,8 @@ impl GateReconciler for UdsGateReconciler {
         desired: &InstanceRow,
     ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
         use opencrab_process_supervisor::lifecycle::CoreObservation;
-        let Some(observed) = self.client.get_instance(&desired.instance_id).await? else {
+        let client = self.routing.client_for_row(desired);
+        let Some(observed) = client.get_instance(&desired.instance_id).await? else {
             return Ok(CoreObservation::Mismatch);
         };
         let mut bindings: Vec<_> = observed
@@ -194,7 +222,8 @@ impl GateReconciler for UdsGateReconciler {
         subject_grant: Option<&str>,
     ) -> Result<VerifiedInstance> {
         let observed = self
-            .client
+            .routing
+            .client_for_row(desired)
             .reconcile(opencrab_gate_client::admin::ReconcileDesired {
                 instance_id: &desired.instance_id,
                 kind_id: &self.kind_id,
@@ -664,17 +693,42 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let mut raw = [0_u8; 32];
     raw.copy_from_slice(&key[..]);
     let store = DiscordStore::open(&config.database_path)?;
-    let client = opencrab_gate_client::admin::GateAdminClient::from_credential_file(
+    let exact = opencrab_gate_client::admin::GateAdminClient::from_credential_file(
         config.gate_admin_socket.clone(),
         &config.gate_admin_credential,
     )?;
+    // D-1097: imported instances are exact-scope; created ones are under the namespace.
     if let Some(import) = &config.legacy_import {
-        run_legacy_import(&store, import, &client, &raw).await?;
+        run_legacy_import(&store, import, &exact, &raw).await?;
     }
+    let creation = match (
+        &config.creation_namespace,
+        &config.gate_admin_creation_credential,
+    ) {
+        (Some(namespace), Some(path)) => Some((
+            *namespace,
+            opencrab_gate_client::admin::GateAdminClient::from_credential_file(
+                config.gate_admin_socket.clone(),
+                path,
+            )?,
+            crate::subject_grant::GateAdminGrants::from_credential_file(
+                config.gate_admin_socket.clone(),
+                path,
+            )?,
+        )),
+        _ => None,
+    };
+    let grants = creation.as_ref().map(|(_, _, grants)| {
+        Arc::new(grants.clone()) as Arc<dyn crate::subject_grant::SubjectGrantIssuer>
+    });
+    let routing = crate::gate_routing::GateRouting {
+        exact,
+        creation: creation.map(|(namespace, client, _)| (namespace, client)),
+    };
     let daemon = Arc::new(DiscordDaemon::new(
         store,
         raw,
-        Arc::new(UdsGateReconciler::new(client, "discord")),
+        Arc::new(UdsGateReconciler::routed(routing, "discord")),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),
@@ -686,16 +740,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         }),
     )?);
     daemon.serve_channel_requests(Arc::new(DaemonChannels(Arc::downgrade(&daemon))));
-    let grants = config
-        .creation_namespace
-        .map(|_| {
-            crate::subject_grant::GateAdminGrants::from_credential_file(
-                config.gate_admin_socket.clone(),
-                &config.gate_admin_credential,
-            )
-            .map(|issuer| Arc::new(issuer) as Arc<dyn crate::subject_grant::SubjectGrantIssuer>)
-        })
-        .transpose()?;
     let _admin = crate::admin::spawn_with(
         config.admin_socket.clone(),
         crate::admin::AdminContext {

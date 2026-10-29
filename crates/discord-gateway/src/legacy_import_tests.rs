@@ -184,7 +184,9 @@ struct DownCore;
 #[async_trait::async_trait]
 impl SubjectLookup for DownCore {
     async fn core_instance(&self, _: &str) -> Result<Option<(String, i64)>> {
-        anyhow::bail!("connect gate admin: refused")
+        Err(anyhow::Error::new(CoreUnavailable(anyhow::anyhow!(
+            "connect gate admin: refused"
+        ))))
     }
 }
 
@@ -206,4 +208,91 @@ async fn d1097_unreachable_core_is_retryable_and_writes_nothing() {
         !error.is::<CoreUnavailable>(),
         "a missing token is not retryable"
     );
+}
+
+struct RefusingCore;
+
+#[async_trait::async_trait]
+impl SubjectLookup for RefusingCore {
+    async fn core_instance(&self, _: &str) -> Result<Option<(String, i64)>> {
+        anyhow::bail!("gate admin rejected request: unauthorized")
+    }
+}
+
+/// A principal that does not cover the imported instances is a setup error, not a core that is
+/// still starting: the import fails loudly instead of waiting forever.
+#[tokio::test]
+async fn d1097_an_unauthorized_principal_fails_the_import_instead_of_waiting() {
+    let (_temp, store, import) = setup();
+    let error = import_legacy(&store, &import, &RefusingCore, &KEY)
+        .await
+        .unwrap_err();
+    assert!(!error.is::<CoreUnavailable>(), "{error:#}");
+    assert!(format!("{error:#}").contains("unauthorized"), "{error:#}");
+    assert!(store.list().unwrap().is_empty());
+}
+
+/// The real client: no socket = core not up (retry); core answering 401 = refusal (fail).
+#[tokio::test]
+async fn d1097_the_gate_admin_client_tells_an_outage_from_a_refusal() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let temp = tempfile::tempdir().unwrap();
+    let missing = opencrab_gate_client::admin::GateAdminClient::new_for_test(
+        temp.path().join("none.sock"),
+        "t".into(),
+    );
+    let error = missing.core_instance(A).await.unwrap_err();
+    assert!(error.is::<CoreUnavailable>(), "{error:#}");
+
+    let socket = temp.path().join("gate.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = stream.read(&mut buf).await;
+            let body = r#"{"code":"unauthorized"}"#;
+            let reply = format!(
+                "HTTP/1.1 401 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes()).await;
+        }
+    });
+    let refusing = opencrab_gate_client::admin::GateAdminClient::new_for_test(socket, "t".into());
+    let error = refusing.core_instance(A).await.unwrap_err();
+    assert!(!error.is::<CoreUnavailable>(), "{error:#}");
+    assert!(format!("{error:#}").contains("unauthorized"));
+}
+
+#[test]
+fn d1097_creation_namespace_and_its_credential_go_together() {
+    let config = |extra: serde_json::Value| {
+        let mut value = serde_json::json!({
+            "database_path":"/tmp/discord.db","admin_socket":"/tmp/admin.sock",
+            "gate_admin_socket":"/tmp/gate-admin.sock","gate_admin_credential":"/tmp/token",
+            "core_socket":"/tmp/runtime.sock","child_binary":"/bin/true","placement_dir":"/tmp/place"
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            value[k] = v.clone();
+        }
+        serde_json::from_value::<crate::daemon::DaemonConfig>(value).unwrap()
+    };
+    let ns = "0c9a7e51-2b3d-4f6a-8e1c-5d7b9f2a4c63";
+    config(serde_json::json!({"creation_namespace":ns,"gate_admin_creation_credential":"/tmp/c"}))
+        .validate()
+        .unwrap();
+    assert!(config(serde_json::json!({"creation_namespace":ns}))
+        .validate()
+        .is_err());
+    assert!(
+        config(serde_json::json!({"gate_admin_creation_credential":"/tmp/c"}))
+            .validate()
+            .is_err()
+    );
+    assert!(config(
+        serde_json::json!({"creation_namespace":ns,"gate_admin_creation_credential":"c"})
+    )
+    .validate()
+    .is_err());
 }

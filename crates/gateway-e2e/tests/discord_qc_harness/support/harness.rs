@@ -328,6 +328,7 @@ pub(crate) async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<Instanc
         revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
+        core_config_b64: None,
     };
     let overrides = HarnessOverrides {
         fake_events: Some(fixture.path.clone()),
@@ -377,6 +378,7 @@ pub(crate) async fn wire_instance_on_channel(
         revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
+        core_config_b64: None,
     };
     let overrides = HarnessOverrides {
         fake_events: Some(fixture.path.clone()),

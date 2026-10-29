@@ -126,7 +126,8 @@ impl SpawnerFactory for ProductionFactory {
             "control_socket": control_socket,
             "start_nonce": start_nonce,
             "instances": [{"instance_id":row.instance_id,"revision":revision,
-                "addresses":row.addresses,"config_b64":row.config_b64}]
+                "addresses":row.addresses,"config_b64":row.config_b64,
+                "core_config_b64": super::core_config_b64_for_runtime_config(&row.config_b64)?}]
         });
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;

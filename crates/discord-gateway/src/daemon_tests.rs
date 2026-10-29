@@ -3,6 +3,10 @@ use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
+/// `{"agent_id":"agent","self_bot_id":"111111111111111111"}`: the smallest valid Discord config.
+const VALID_CONFIG_B64: &str =
+    "eyJhZ2VudF9pZCI6ImFnZW50Iiwic2VsZl9ib3RfaWQiOiIxMTExMTExMTExMTExMTExMTEifQ==";
+
 struct FakeGate;
 #[async_trait]
 impl GateReconciler for FakeGate {
@@ -716,7 +720,7 @@ fn d1079_production_placement_carries_attachment_outbox_root() {
             instance_id,
             "agent",
             7,
-            "e30=",
+            VALID_CONFIG_B64,
             &[],
             "token",
             None,
@@ -755,4 +759,92 @@ fn d1079_daemon_config_requires_absolute_attachment_outbox_root() {
     };
     config("/tmp/outbox").validate().unwrap();
     assert!(config("outbox").validate().is_err());
+}
+
+/// D-1097 D2: core receives one fixed neutral config. Discord access (owners, trusted users,
+/// co-agents), delivery mode and reactions stay in the gateway, so changing them never needs a
+/// core revision or a core digest change.
+#[test]
+fn d1097_core_config_is_fixed_and_neutral_whatever_the_discord_config() {
+    use base64::Engine as _;
+    let encode = |value: serde_json::Value| {
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&value).unwrap())
+    };
+    let plain = encode(serde_json::json!({"agent_id":"a","self_bot_id":"111111111111111111"}));
+    let with_access = encode(serde_json::json!({
+        "agent_id":"a","self_bot_id":"111111111111111111","delivery_mode":"tool_driven",
+        "access":{"owners":["222222222222222222"],"trusted_users":["333333333333333333"]}
+    }));
+    let first = core_config_b64_for_runtime_config(&plain).unwrap();
+    let second = core_config_b64_for_runtime_config(&with_access).unwrap();
+    assert_eq!(first, DEFAULT_CORE_CONFIG_B64);
+    assert_eq!(second, DEFAULT_CORE_CONFIG_B64);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(DEFAULT_CORE_CONFIG_B64)
+        .unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        !text.contains("222222222222222222") && !text.contains("access"),
+        "{text}"
+    );
+    assert!(core_config_b64_for_runtime_config("not base64").is_err());
+}
+
+/// D-1097 D2: the child's hello digest is the digest of the fixed core config, not of the
+/// Discord config the child runs with, so the core instance matches.
+#[test]
+fn d1097_child_placement_carries_the_neutral_core_config() {
+    use base64::Engine as _;
+    let temp = tempfile::tempdir().unwrap();
+    let placement_dir = temp.path().join("placements");
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: temp.path().join("core.sock"),
+        placement_dir: placement_dir.clone(),
+        attachment_spool_root: None,
+        attachment_outbox_root: None,
+        database_path: temp.path().join("owner.db"),
+    };
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let config = base64::engine::general_purpose::STANDARD.encode(
+        br#"{"agent_id":"a","self_bot_id":"111111111111111111","access":{"owners":["222222222222222222"]}}"#,
+    );
+    let generation = store
+        .upsert_desired(
+            instance_id,
+            "a",
+            7,
+            &config,
+            &["discord-a-1-2".into()],
+            "token",
+            None,
+            true,
+            &[9; 32],
+        )
+        .unwrap();
+    store.mark_provisioning(instance_id, generation).unwrap();
+    store
+        .mark_verified(instance_id, generation, 1, "digest", &[], true)
+        .unwrap();
+    let row = store.get(instance_id).unwrap().unwrap();
+    factory
+        .for_instance(&row, zeroize::Zeroizing::new(b"token".to_vec()), "nonce")
+        .unwrap();
+    let path = placement_dir.join(format!("{instance_id}.json"));
+    let placement = crate::config::Placement::load(&path).unwrap();
+    let instance = &placement.instances[0];
+    assert_eq!(
+        instance.config_b64, config,
+        "the child runs with the Discord config"
+    );
+    assert_eq!(
+        instance.core_config_b64.as_deref(),
+        Some(DEFAULT_CORE_CONFIG_B64)
+    );
+    let core_bytes = crate::config::decode_config_b64(DEFAULT_CORE_CONFIG_B64).unwrap();
+    assert_eq!(
+        instance.hello_digest().unwrap(),
+        crate::config::config_digest(&core_bytes)
+    );
 }

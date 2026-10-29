@@ -45,6 +45,18 @@ pub struct InstancePlacement {
     /// gateway はこれらの say を drain し bind を待つ。実受理は core の ack が正（binding_for_address）。
     pub addresses: Vec<String>,
     pub config_b64: String,
+    /// D-1097: the config core holds for this instance (fixed and neutral). The hello digest is
+    /// its digest. Absent = the digest of `config_b64` (placements written before D-1097).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_config_b64: Option<String>,
+}
+
+impl InstancePlacement {
+    /// The `config_digest` this instance presents on hello.
+    pub fn hello_digest(&self) -> anyhow::Result<String> {
+        let core = self.core_config_b64.as_deref().unwrap_or(&self.config_b64);
+        Ok(config_digest(&decode_config_b64(core)?))
+    }
 }
 
 /// instance の非秘密 config。bot token は含めない（env 注入のみ）。
@@ -333,6 +345,7 @@ mod tests {
                 revision: 1,
                 addresses: vec!["discord-agent-x-100-200".into()],
                 config_b64: encode(&sample_config()),
+                core_config_b64: None,
             }],
         };
         p.validate().unwrap();
@@ -356,6 +369,7 @@ mod tests {
                 revision: 1,
                 addresses: vec!["discord-agent-x-100-200".into()],
                 config_b64: encode(&sample_config()),
+                core_config_b64: None,
             }],
         };
         place("/data/attachments/outbox").validate().unwrap();
@@ -375,6 +389,7 @@ mod tests {
                 revision: 1,
                 addresses: vec![],
                 config_b64: encode(&sample_config()),
+                core_config_b64: None,
             }],
         };
         assert!(p.validate().is_err());
@@ -418,6 +433,7 @@ mod tests {
                 revision: 1,
                 addresses: vec!["discord-agent-x--200".into()],
                 config_b64: encode(&sample_config()),
+                core_config_b64: None,
             }],
         };
         p.validate().unwrap();
@@ -479,6 +495,7 @@ mod tests {
             revision: 1,
             addresses: vec!["discord-agent-x-100-200".into()],
             config_b64: encode(&sample_config()),
+            core_config_b64: None,
         };
         let p = Placement {
             core_socket: "/tmp/g.sock".into(),
@@ -546,5 +563,44 @@ mod tests {
             let place: Placement = serde_json::from_value(value).unwrap();
             assert!(place.validate().is_err(), "{place:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod core_config_tests {
+    use super::*;
+
+    /// D-1097 D2: a placement without `core_config_b64` keeps the previous hello digest (the
+    /// digest of `config_b64`), so a placement written before the change still connects.
+    #[test]
+    fn d1097_hello_digest_falls_back_to_the_discord_config() {
+        use base64::Engine as _;
+        let config = base64::engine::general_purpose::STANDARD
+            .encode(br#"{"agent_id":"a","self_bot_id":"111111111111111111"}"#);
+        let place = InstancePlacement {
+            instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            revision: 1,
+            addresses: vec!["discord-a-1-2".into()],
+            config_b64: config.clone(),
+            core_config_b64: None,
+        };
+        assert_eq!(
+            place.hello_digest().unwrap(),
+            config_digest(&decode_config_b64(&config).unwrap())
+        );
+        let neutral = base64::engine::general_purpose::STANDARD.encode(br#"{"kind":"x"}"#);
+        let place = InstancePlacement {
+            core_config_b64: Some(neutral.clone()),
+            ..place
+        };
+        assert_eq!(
+            place.hello_digest().unwrap(),
+            config_digest(&decode_config_b64(&neutral).unwrap())
+        );
+        let broken = InstancePlacement {
+            core_config_b64: Some("not base64".into()),
+            ..place
+        };
+        assert!(broken.hello_digest().is_err());
     }
 }

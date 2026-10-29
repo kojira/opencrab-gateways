@@ -35,6 +35,16 @@ fn default_reconcile_millis() -> u64 {
     1_000
 }
 
+/// D-1097 D2: the one config core holds for every Discord instance.
+pub const DEFAULT_CORE_CONFIG_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==";
+
+/// The config to register in core for an instance whose Discord config is `config_b64`. The
+/// Discord config is only validated here; core never sees it.
+pub fn core_config_b64_for_runtime_config(config_b64: &str) -> Result<String> {
+    crate::config::parse_instance_config(&crate::config::decode_config_b64(config_b64)?)?;
+    Ok(DEFAULT_CORE_CONFIG_B64.to_string())
+}
+
 fn retry_deadline(row: &InstanceRow) -> i64 {
     let shift = row.failure_count.min(6);
     let delay = 1_000_i64.saturating_mul(1_i64 << shift).min(60_000);
@@ -157,7 +167,7 @@ impl GateReconciler for UdsGateReconciler {
                 kind_id: &self.kind_id,
                 subject_id: desired.subject_id,
                 enabled: desired.enabled,
-                config_b64: &desired.config_b64,
+                config_b64: &core_config_b64_for_runtime_config(&desired.config_b64)?,
                 subject_grant,
                 addresses: &desired.addresses,
             })

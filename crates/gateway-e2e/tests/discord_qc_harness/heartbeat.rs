@@ -97,6 +97,7 @@ async fn wire_hb(core: &Core, fixture: &Fixture, channel: &str) -> (Arc<Instance
         revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
+        core_config_b64: None,
     };
     let overrides = HarnessOverrides {
         fake_events: Some(fixture.path.clone()),

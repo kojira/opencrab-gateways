@@ -84,7 +84,12 @@ pub fn spawn_instance_with_voice(
         );
     }
     let cfg = parse_instance_config(config_bytes)?;
-    let digest = config_digest(config_bytes);
+    // D-1097 D2: the digest of what core holds (the fixed neutral config), not of the Discord
+    // config this child runs with. Placements written before D-1097 fall back to the latter.
+    let digest = match place.core_config_b64.as_deref() {
+        Some(core) => config_digest(&crate::config::decode_config_b64(core)?),
+        None => config_digest(config_bytes),
+    };
 
     // transport: dry-run（REST を叩かずログ）か production（serenity REST・token 保持）。
     // say も invoke も同一 transport を通すので dry-run 分岐は 1 箇所。

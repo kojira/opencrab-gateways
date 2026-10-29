@@ -26,11 +26,9 @@ fn seeded() -> (tempfile::TempDir, NostrStore, u64) {
         .upsert_desired(
             ID,
             "agent",
-            7,
             &config_b64(&["wss://old.example"]),
             &["addr".into()],
             "nsec-old",
-            None,
             true,
             &KEY,
         )

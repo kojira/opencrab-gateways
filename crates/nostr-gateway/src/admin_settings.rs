@@ -35,7 +35,6 @@ pub(crate) fn summary(row: &InstanceRow) -> Value {
     json!({
         "instance_id": row.instance_id,
         "agent_id": row.agent_id,
-        "subject_id": row.subject_id,
         "enabled": row.enabled,
         "desired_generation": row.desired_generation,
         "lifecycle_state": row.lifecycle_state,
@@ -43,16 +42,8 @@ pub(crate) fn summary(row: &InstanceRow) -> Value {
     })
 }
 
-pub(crate) fn list(
-    store: &NostrStore,
-    scope: &std::collections::BTreeSet<String>,
-) -> Result<Value> {
-    let instances: Vec<Value> = store
-        .list()?
-        .iter()
-        .filter(|row| scope.contains(&row.instance_id))
-        .map(summary)
-        .collect();
+pub(crate) fn list(store: &NostrStore) -> Result<Value> {
+    let instances: Vec<Value> = store.list()?.iter().map(summary).collect();
     Ok(json!({ "instances": instances }))
 }
 

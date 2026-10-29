@@ -17,21 +17,15 @@ pub(crate) struct Request {
     pub(crate) id: String,
     pub(crate) op: String,
     #[serde(default)]
-    pub(crate) scope_instance_id: String,
-    #[serde(default)]
     pub(crate) instance_id: String,
     #[serde(default)]
     pub(crate) agent_id: Option<String>,
-    #[serde(default)]
-    pub(crate) subject_id: Option<i64>,
     #[serde(default)]
     pub(crate) config_b64: Option<String>,
     #[serde(default)]
     pub(crate) addresses: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) credential: Option<String>,
-    #[serde(default)]
-    pub(crate) subject_grant: Option<String>,
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
     /// D-1097: settings payloads (`set_config` / `set_access`).
@@ -54,11 +48,9 @@ struct Response {
     error: Option<String>,
 }
 
-pub type AdminScope = Arc<std::collections::BTreeSet<String>>;
-
-/// Everything an admin request may touch.
+/// Everything an admin request may touch. Every instance in the store is this gateway's own;
+/// the socket (mode 0600) is the boundary.
 pub struct AdminContext {
-    pub scope: AdminScope,
     pub store: Arc<Mutex<NostrStore>>,
     pub master_key: Arc<[u8; 32]>,
     /// nostaro binary for `generate_key` (D-1097 N3).
@@ -90,7 +82,7 @@ async fn handle(stream: UnixStream, context: Arc<AdminContext>) -> Result<()> {
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request) if request.op == "generate_key" => generate_key(request, &context).await,
-            Ok(request) => apply(request, &context.scope, &context.store, &context.master_key),
+            Ok(request) => apply(request, &context.store, &context.master_key),
             Err(_) => Response {
                 id: String::new(),
                 ok: false,
@@ -105,21 +97,15 @@ async fn handle(stream: UnixStream, context: Arc<AdminContext>) -> Result<()> {
     Ok(())
 }
 
-fn apply(
-    request: Request,
-    scope: &std::collections::BTreeSet<String>,
-    store: &Mutex<NostrStore>,
-    key: &[u8; 32],
-) -> Response {
+fn apply(request: Request, store: &Mutex<NostrStore>, key: &[u8; 32]) -> Response {
     let id = request.id.clone();
     let result = (|| -> Result<Value> {
         if request.op == "list" {
             let store = store
                 .lock()
                 .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
-            return settings::list(&store, scope);
+            return settings::list(&store);
         }
-        check_scope(&request, scope)?;
         let store = store
             .lock()
             .map_err(|_| anyhow::anyhow!("store_unavailable"))?;
@@ -145,11 +131,9 @@ fn apply(
                 let generation = store.upsert_desired(
                     &request.instance_id,
                     request.agent_id.as_deref().context("agent_id required")?,
-                    request.subject_id.context("subject_id required")?,
                     &canonical_config,
                     request.addresses.as_deref().unwrap_or_default(),
                     request.credential.as_deref().unwrap_or_default(),
-                    request.subject_grant.as_deref(),
                     request.enabled.context("enabled required")?,
                     key,
                 )?;
@@ -159,14 +143,6 @@ fn apply(
         }
     })();
     respond(id, result)
-}
-
-fn check_scope(request: &Request, scope: &std::collections::BTreeSet<String>) -> Result<()> {
-    anyhow::ensure!(
-        request.scope_instance_id == request.instance_id && scope.contains(&request.instance_id),
-        "scope_denied"
-    );
-    Ok(())
 }
 
 fn respond(id: String, result: Result<Value>) -> Response {
@@ -191,7 +167,6 @@ fn respond(id: String, result: Result<Value>) -> Response {
 async fn generate_key(request: Request, context: &AdminContext) -> Response {
     let id = request.id.clone();
     let result = async {
-        check_scope(&request, &context.scope)?;
         let prefix = settings::check_generate(&request)?;
         {
             let store = context
@@ -256,20 +231,16 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[tokio::test]
-    async fn s5_nostr_admin_is_exact_scoped_mode_0600_and_redacts_secret() {
+    async fn s5_nostr_admin_is_mode_0600_and_redacts_secret() {
         let temp = tempfile::tempdir().unwrap();
         let socket = temp.path().join("admin.sock");
         let store = Arc::new(Mutex::new(
             NostrStore::open(&temp.path().join("owner.db")).unwrap(),
         ));
         let inspect = store.clone();
-        let scope = Arc::new(std::collections::BTreeSet::from([
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
-        ]));
         let task = spawn(
             socket.clone(),
             AdminContext {
-                scope,
                 store,
                 master_key: Arc::new([4; 32]),
                 nostaro_bin: PathBuf::from("/nonexistent-nostaro"),
@@ -282,39 +253,12 @@ mod tests {
             std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let mut stream = UnixStream::connect(&socket).await.unwrap();
-        let request = json!({"id":"1","op":"upsert","scope_instance_id":"other",
-            "instance_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","agent_id":"a","subject_id":1,
-            "config_b64":"e30=","addresses":[],"credential":"super-secret","enabled":true});
-        stream
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).await.unwrap();
-        assert!(line.contains("scope_denied"));
-        assert!(!line.contains("super-secret"));
-
-        let unauthorized = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-        let mut stream = UnixStream::connect(&socket).await.unwrap();
-        let request = json!({"id":"forged","op":"upsert","scope_instance_id":unauthorized,
-            "instance_id":unauthorized,"agent_id":"b","subject_id":2,
-            "config_b64":"e30=","addresses":[],"credential":"forged-secret","enabled":true});
-        stream
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .unwrap();
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).await.unwrap();
-        assert!(line.contains("scope_denied"));
-
         let instance_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let secret_config = base64::engine::general_purpose::STANDARD.encode(
             br#"{"relays":["wss://relay.example"],"self_pubkey":"0000000000000000000000000000000000000000000000000000000000000000","name":"bot","secret":"config-leak"}"#,
         );
         let mut stream = UnixStream::connect(&socket).await.unwrap();
-        let request = json!({"id":"secret-config","op":"upsert","scope_instance_id":instance_id,
-            "instance_id":instance_id,"agent_id":"a","subject_id":1,
+        let request = json!({"id":"secret-config","op":"upsert","instance_id":instance_id,"agent_id":"a",
             "config_b64":secret_config,"addresses":[],"credential":"super-secret","enabled":true});
         stream
             .write_all(format!("{request}\n").as_bytes())
@@ -329,8 +273,7 @@ mod tests {
             br#"{"relays":["wss://relay.example"],"self_pubkey":"0000000000000000000000000000000000000000000000000000000000000000","name":"bot","access":{"owner":["1111111111111111111111111111111111111111111111111111111111111111"]}}"#,
         );
         let mut stream = UnixStream::connect(&socket).await.unwrap();
-        let request = json!({"id":"2","op":"upsert","scope_instance_id":instance_id,
-            "instance_id":instance_id,"agent_id":"a","subject_id":1,
+        let request = json!({"id":"2","op":"upsert","instance_id":instance_id,"agent_id":"a",
             "config_b64":config,"addresses":[],"credential":"super-secret","enabled":true});
         stream
             .write_all(format!("{request}\n").as_bytes())

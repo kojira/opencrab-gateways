@@ -43,11 +43,9 @@ async fn fixture(nostaro_bin: PathBuf) -> Fixture {
             .upsert_desired(
                 id,
                 agent,
-                7,
                 &config_b64(&["wss://old.example"]),
                 &["addr".into()],
                 "nsec-secret-value",
-                None,
                 true,
                 &KEY,
             )
@@ -66,7 +64,6 @@ async fn fixture(nostaro_bin: PathBuf) -> Fixture {
     let task = spawn(
         socket.clone(),
         AdminContext {
-            scope: Arc::new(std::collections::BTreeSet::from([ID.to_string()])),
             store: store.clone(),
             master_key: Arc::new(KEY),
             nostaro_bin,
@@ -96,7 +93,7 @@ async fn call(socket: &Path, request: Value) -> Value {
 }
 
 fn op(name: &str, extra: Value) -> Value {
-    let mut request = json!({"id": name, "op": name, "scope_instance_id": ID, "instance_id": ID});
+    let mut request = json!({"id": name, "op": name, "instance_id": ID});
     for (key, value) in extra.as_object().unwrap() {
         request[key] = value.clone();
     }
@@ -104,15 +101,23 @@ fn op(name: &str, extra: Value) -> Value {
 }
 
 #[tokio::test]
-async fn list_returns_only_scoped_instances_without_secrets() {
+async fn list_returns_every_instance_without_secrets() {
     let f = fixture(PathBuf::from("/nonexistent")).await;
     let reply = call(&f.socket, json!({"id": "l", "op": "list"})).await;
     assert_eq!(reply["ok"], json!(true), "{reply}");
     let items = reply["result"]["instances"].as_array().unwrap();
-    assert_eq!(items.len(), 1, "out-of-scope instance must not be listed");
-    assert_eq!(items[0]["instance_id"], json!(ID));
-    assert_eq!(items[0]["agent_id"], json!("agent-a"));
-    assert_eq!(items[0]["credential_configured"], json!(true));
+    let ids: Vec<_> = items.iter().map(|i| i["instance_id"].clone()).collect();
+    assert!(
+        ids.contains(&json!(ID)) && ids.contains(&json!(OTHER)),
+        "{reply}"
+    );
+    let a = items
+        .iter()
+        .find(|i| i["instance_id"] == json!(ID))
+        .unwrap();
+    assert_eq!(a["agent_id"], json!("agent-a"));
+    assert_eq!(a["credential_configured"], json!(true));
+    assert!(!reply.to_string().contains("enc:v1:"));
 }
 
 #[tokio::test]
@@ -258,16 +263,14 @@ async fn set_enabled_toggles() {
 }
 
 #[tokio::test]
-async fn edits_outside_the_scope_are_denied() {
+async fn edits_to_an_unknown_instance_are_refused() {
     let f = fixture(PathBuf::from("/nonexistent")).await;
     let reply = call(
         &f.socket,
-        json!({"id": "x", "op": "set_enabled", "scope_instance_id": OTHER,
-            "instance_id": OTHER, "enabled": false}),
+        json!({"id": "x", "op": "set_enabled", "instance_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "enabled": false}),
     )
     .await;
-    assert!(reply["error"].as_str().unwrap().contains("scope_denied"));
-    assert!(f.store.lock().unwrap().get(OTHER).unwrap().unwrap().enabled);
+    assert_eq!(reply["ok"], json!(false), "{reply}");
 }
 
 fn fake_vanity(dir: &Path, nsec: &str, pubkey: &str) -> PathBuf {

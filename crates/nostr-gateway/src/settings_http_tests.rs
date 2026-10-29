@@ -1,7 +1,7 @@
 //! D-1097 N2: the Nostr gateway settings page over real HTTP, against a real admin socket.
 
 use super::*;
-use crate::admin::{AdminContext, AdminScope};
+use crate::admin::AdminContext;
 use crate::store::NostrStore;
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -38,11 +38,9 @@ async fn fixture() -> Fixture {
             .upsert_desired(
                 id,
                 agent,
-                7,
                 &config,
                 &["addr".into()],
                 "nsec-hidden",
-                None,
                 true,
                 &KEY,
             )
@@ -59,11 +57,9 @@ async fn fixture() -> Fixture {
     }
     let store = Arc::new(Mutex::new(store));
     let admin_socket = temp.path().join("admin.sock");
-    let scope: AdminScope = Arc::new([A.to_string(), B.to_string()].into_iter().collect());
     crate::admin::spawn(
         admin_socket.clone(),
         AdminContext {
-            scope,
             store: store.clone(),
             master_key: Arc::new(KEY),
             nostaro_bin: "/nonexistent".into(),

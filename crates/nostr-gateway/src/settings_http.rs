@@ -3,7 +3,7 @@
 //! A separate process from the daemon. It owns no state: settings go through the daemon's
 //! protected admin socket (the same ops an operator tool would use), and watches go to each
 //! instance's watch store file, which the running child already reloads within seconds.
-//! Every instance in the admin scope is listed; none is picked implicitly.
+//! Every instance of the daemon is listed; none is picked implicitly.
 //!
 //! HTTP API (JSON):
 //! - `GET  /` the page
@@ -118,8 +118,7 @@ async fn admin(
     instance_id: &str,
     extra: Value,
 ) -> Result<Value, Failure> {
-    let mut request =
-        json!({"id": op, "op": op, "scope_instance_id": instance_id, "instance_id": instance_id});
+    let mut request = json!({"id": op, "op": op, "instance_id": instance_id});
     if let Value::Object(fields) = extra {
         for (key, value) in fields {
             request[key] = value;

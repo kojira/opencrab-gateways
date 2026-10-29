@@ -17,7 +17,7 @@ impl GateReconciler for Gate {
     ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
         Ok(opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled)
     }
-    async fn reconcile(&self, desired: &InstanceRow, _: Option<&str>) -> Result<VerifiedInstance> {
+    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
         Ok(VerifiedInstance {
             revision: 1,
             digest: "d".into(),
@@ -111,11 +111,9 @@ async fn access_edit_restarts_the_child_with_the_new_owner() {
         .upsert_desired(
             ID,
             "agent",
-            7,
             "e30=",
             &["addr".into()],
             "nsec",
-            None,
             true,
             &[9; 32],
         )

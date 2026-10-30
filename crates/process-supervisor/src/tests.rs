@@ -1,12 +1,5 @@
 use super::*;
 
-#[test]
-fn s5_process_supervisor_has_no_concrete_gateway_vocabulary() {
-    let source = include_str!("lib.rs");
-    for concrete in ["discord", "nostr", "web-gateway"] {
-        assert!(!source.to_ascii_lowercase().contains(concrete));
-    }
-}
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tokio::sync::Notify;

@@ -105,18 +105,3 @@ pub(crate) fn reply_with_content_response(text: &str, content: &str) -> ChatResp
     resp.choices[0].message.content = Some(MessageContent::Text(content.to_string()));
     resp
 }
-
-/// execute_shell tool_call と content（holding 宣言本文）を同一生成に載せる（#916 holding 用）。
-/// §13 表 #10「query ツール（execute_shell 等）＋本文（holding）」の 1 生成を作る。
-pub(crate) fn shell_with_content_response(
-    content: &str,
-    command: &str,
-    args: &[&str],
-) -> ChatResponse {
-    let mut resp = tool_call_response(
-        "execute_shell",
-        serde_json::json!({ "command": command, "args": args }),
-    );
-    resp.choices[0].message.content = Some(MessageContent::Text(content.to_string()));
-    resp
-}

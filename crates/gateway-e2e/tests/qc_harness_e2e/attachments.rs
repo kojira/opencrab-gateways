@@ -28,7 +28,7 @@ async fn nostr_workspace_files_project_dispatch_metadata_and_cleanup() {
         }
     }
     for uncertain in [false, true] {
-        let core = start_core(Arc::new(FifoMock::new())).await;
+        let core = start_core(Arc::new(UnusedLlm)).await;
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("workspace");
         let outbox = dir.path().join("outbox");

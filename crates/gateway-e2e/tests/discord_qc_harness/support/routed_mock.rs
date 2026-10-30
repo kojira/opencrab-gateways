@@ -12,9 +12,6 @@ impl RoutedMock {
             reqs: Mutex::new(Vec::new()),
         }
     }
-    pub(crate) fn request_texts(&self) -> Vec<String> {
-        self.reqs.lock().unwrap().clone()
-    }
 }
 
 pub(crate) const M_SAY: &str = "SAYMARK";

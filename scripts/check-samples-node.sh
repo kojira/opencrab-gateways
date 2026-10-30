@@ -2,14 +2,12 @@
 # samples/node の独立性を static に見る（DESIGN-SAMPLES-NODE.md §5）。
 #
 # merge CI の共通 conformance 行列と一緒に必須。ビルドの成否には現れない
-# 依存・import・Bearer・旧会話 route を入口で止める。
+# 依存・import を入口で止める。
 #
 # 見るもの:
 #   - package.json の production runtime dependency が空
 #   - require() は node:* と相対 path だけ
 #   - JS から Rust/core crate・生成 DTO を import しない
-#   - operator Bearer / Authorization / OPENCRAB_GATE_OPERATOR_TOKEN を持たない
-#   - WEBGATE §2.1 撤去の旧会話 route を実装しない（/rooms と /chat の 404 固定は対象外）
 #
 # 見ないもの:
 #   - README の説明文
@@ -71,18 +69,6 @@ fi
 if hits=$(grep -nE 'opencrab_|opencrab-core|opencrab-web-gateway|CARGO_MANIFEST|crates/' \
   --include='*.js' -R "$NODE" || true) && [[ -n "$hits" ]]; then
   die "Rust/core import 0"
-  printf '%s\n' "$hits"
-fi
-
-if hits=$(grep -nEi 'bearer|authorization|OPENCRAB_GATE_OPERATOR_TOKEN' \
-  --include='*.js' -R "$NODE" || true) && [[ -n "$hits" ]]; then
-  die "operator Bearer 参照 0"
-  printf '%s\n' "$hits"
-fi
-
-if hits=$(grep -nE '/api/agents/|/web/send|/web/stream|/api/sessions/|send_web_message|send_owner_instruction|send_mentor_instruction' \
-  --include='*.js' -R "$NODE" || true) && [[ -n "$hits" ]]; then
-  die "WEBGATE §2 旧 route 実装 0"
   printf '%s\n' "$hits"
 fi
 

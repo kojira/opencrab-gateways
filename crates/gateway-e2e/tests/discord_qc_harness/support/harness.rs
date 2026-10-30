@@ -92,21 +92,7 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
 pub(crate) struct Core {
     pub(crate) extgate: Arc<ExtgateState>,
     pub(crate) sock: PathBuf,
-    /// #915: execute_shell を実走させる tools_config 等を per-test で触れるよう AppState を保持。
-    pub(crate) state: AppState,
     _dir: tempfile::TempDir,
-}
-
-/// #915: echo と sleep だけを許可した shell 有効 tools 設定（date 相当＝echo・sleep 相当＝sleep）。
-pub(crate) fn shell_enabled_tools_config() -> opencrab_actions::tools::ToolsConfig {
-    opencrab_actions::tools::ToolsConfig {
-        enabled: true,
-        shell: Some(opencrab_actions::tools::ShellToolConfig {
-            enabled: true,
-            allowed_commands: vec!["echo".to_string(), "sleep".to_string()],
-            ..Default::default()
-        }),
-    }
 }
 
 /// 実 serve_uds core + 実 AppState を UDS で立ち上げる。nostr hooks は張らない（discord は generic 経路）。
@@ -149,7 +135,6 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     Core {
         extgate,
         sock,
-        state,
         _dir: dir,
     }
 }
@@ -173,101 +158,5 @@ pub(crate) fn discord_config() -> Vec<u8> {
         "delivery_mode": "say",
         "access": {"owners": [AUTHOR]},
     }))
-    .unwrap()
-}
-
-/// discord gateway（fake_events + dry_run）を起動して core の hello 受理を待つ（D-1099: 事前登録なし）。
-pub(crate) async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<InstanceClient> {
-    let instance_id = uuid::Uuid::new_v4().to_string();
-    let config_bytes = discord_config();
-    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
-    let addr = address();
-
-    let place = InstancePlacement {
-        instance_id: instance_id.clone(),
-        addresses: vec![addr.clone()],
-        config_b64,
-        channel_socket: None,
-    };
-    let overrides = HarnessOverrides {
-        fake_events: Some(fixture.path.clone()),
-        dry_run: true,
-    };
-    let client = spawn_instance(
-        core.sock.clone(),
-        &place,
-        &config_bytes,
-        None,
-        overrides,
-        None,
-    )
-    .expect("spawn_instance");
-
-    wait_connected(&client, &addr).await;
-    client
-}
-
-/// 指定チャンネルを聞く gateway を起動する（#915: typing 隔離テスト用）。
-/// BUFFER は binary 内で共有・累積かつ CI は並列実行なので、typing（scope key を持たない capture）
-/// を他テストと分離するために、他テストが使わない専用チャンネルへ束ねる。
-pub(crate) async fn wire_instance_on_channel(
-    core: &Core,
-    fixture: &Fixture,
-    channel: &str,
-) -> Arc<InstanceClient> {
-    let instance_id = uuid::Uuid::new_v4().to_string();
-    let config_bytes = discord_config();
-    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
-    let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
-
-    let place = InstancePlacement {
-        instance_id: instance_id.clone(),
-        addresses: vec![addr.clone()],
-        config_b64,
-        channel_socket: None,
-    };
-    let overrides = HarnessOverrides {
-        fake_events: Some(fixture.path.clone()),
-        dry_run: true,
-    };
-    let client = spawn_instance(
-        core.sock.clone(),
-        &place,
-        &config_bytes,
-        None,
-        overrides,
-        None,
-    )
-    .expect("spawn_instance");
-
-    wait_connected(&client, &addr).await;
-    client
-}
-
-pub(crate) fn count_kind(buf: &Arc<Mutex<Vec<Captured>>>, kind: &str) -> usize {
-    captured(buf).iter().filter(|c| c.kind == kind).count()
-}
-
-/// 指定チャンネルに限定した kind 別キャプチャ数（#915: typing を専用チャンネルで数える）。
-pub(crate) fn count_kind_on_channel(
-    buf: &Arc<Mutex<Vec<Captured>>>,
-    kind: &str,
-    channel: &str,
-) -> usize {
-    captured(buf)
-        .iter()
-        .filter(|c| c.kind == kind && c.channel == channel)
-        .count()
-}
-
-pub(crate) fn own_speech_rows(core: &Core) -> i64 {
-    let conn = core.extgate.db.lock().unwrap();
-    conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM memory_sessions WHERE log_type='speech' AND speaker_id='{AGENT_ID}'"
-        ),
-        [],
-        |r| r.get(0),
-    )
     .unwrap()
 }

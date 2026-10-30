@@ -63,7 +63,7 @@ fn write_placement(dir: &Path, nostaro: &Path, legacy_author: &str) -> PathBuf {
         "nostaro_bin": nostaro,
         "instances": [{
             "instance_id": INSTANCE,
-            "revision": 1,
+            "agent_id": "agent",
             "address": "nostr-agent",
             "config_b64": base64::engine::general_purpose::STANDARD
                 .encode(serde_json::to_vec(&config).unwrap()),
@@ -74,7 +74,7 @@ fn write_placement(dir: &Path, nostaro: &Path, legacy_author: &str) -> PathBuf {
     path
 }
 
-/// 実 binary を起動して hello に ok、bind を送る。以後の frame は読み捨てる。
+/// 実 binary を起動して hello に ok を返す。以後の frame は読み捨てる。
 fn start_gateway(socket: &Path, placement: &Path) -> Child {
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket).unwrap();
@@ -115,12 +115,6 @@ fn start_gateway(socket: &Path, placement: &Path) -> Child {
         assert!(names.contains(&op), "hello must declare {op}: {names:?}");
     }
     writeln!(writer, "{}", json!({"id": hello["id"], "m": "ok"})).unwrap();
-    writeln!(
-        writer,
-        "{}",
-        json!({"id": "bind:00000000-0000-4000-8000-000000000002", "m": "bind", "binding_id": "00000000-0000-4000-8000-000000000002", "address": "nostr-agent"})
-    )
-    .unwrap();
     std::thread::spawn(move || {
         let _keep_listener = listener;
         let mut line = String::new();

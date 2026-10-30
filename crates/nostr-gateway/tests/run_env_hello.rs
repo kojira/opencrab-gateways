@@ -41,7 +41,7 @@ fn instance(instance_id: &str, address: &str, name: &str) -> Value {
     });
     json!({
         "instance_id": instance_id,
-        "revision": 1,
+        "agent_id": "agent",
         "address": address,
         "config_b64": base64::engine::general_purpose::STANDARD
             .encode(serde_json::to_vec(&config).unwrap()),
@@ -91,7 +91,7 @@ fn hellos_for(instances: Vec<Value>, secret: Option<&str>) -> Vec<Value> {
                     continue;
                 }
                 let hello: Value = serde_json::from_str(&line).unwrap();
-                // ack だけ返し、bind は返さない（watch 車線を起こさない）。
+                // hello に ok を返す。
                 let _ = writeln!(writer, "{}", json!({"id": hello["id"], "m": "ok"}));
                 frames.push(hello);
             }

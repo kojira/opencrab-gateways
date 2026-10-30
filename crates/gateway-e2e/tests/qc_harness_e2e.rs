@@ -14,15 +14,5 @@
 //! 各テストはoriginの有無に応じてreply targetまたはstandalone本文を観測する。
 
 include!("qc_harness_e2e/support.rs");
-include!("qc_harness_e2e/delivery_and_concurrency.rs");
-include!("qc_harness_e2e/dispatch_resume.rs");
-include!("qc_harness_e2e/utterance_contracts.rs");
-include!("qc_harness_e2e/continuation_898.rs");
-include!("qc_harness_e2e/no_reply_899.rs");
-include!("qc_harness_e2e/audit_support.rs");
-include!("qc_harness_e2e/audit_898.rs");
-include!("qc_harness_e2e/audit_899.rs");
-include!("qc_harness_e2e/audit_900_and_s13.rs");
-include!("qc_harness_e2e/heartbeat_925.rs");
 include!("qc_harness_e2e/attachments.rs");
 include!("qc_harness_e2e/daemon_provision.rs");

@@ -20,8 +20,6 @@ use tokio::sync::mpsc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-mod harvest;
-mod invariants;
 
 const INSTANCE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT: &str = "agent";

@@ -57,17 +57,14 @@ mod daemon_bindings {
             rusqlite::params![instance_id, subject, opencrab_extgate::config_digest(b"{}")],
         )
         .unwrap();
-        tx.execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at)
-             VALUES (?1, 'migrated title', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-            [key],
+        opencrab_db::queries::insert_session_in_tx(
+            &tx,
+            key,
+            "migrated title",
+            "2026-01-01T00:00:00+00:00",
         )
         .unwrap();
-        tx.execute(
-            "INSERT INTO agent_sessions (agent_id, session_id) VALUES (?1, ?2)",
-            rusqlite::params![agent_of(key), key],
-        )
-        .unwrap();
+        opencrab_db::queries::insert_agent_session_in_tx(&tx, &agent_of(key), key).unwrap();
         tx.execute(
             "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
              VALUES (?1, ?2, ?3, 1, NULL, ?3)",

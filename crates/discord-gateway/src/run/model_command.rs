@@ -33,12 +33,16 @@ pub(super) fn model_command_address<'a>(
         .then_some(requested_address)
 }
 
+/// The session key a command for `address` goes to, while the core connection is up.
+/// (Returned twice so callers keep one shape: the key to send to and the cache key.)
 pub(super) async fn resolve_model_command_transport(
     client: &InstanceClient,
     address: &str,
 ) -> Option<(String, String)> {
-    let binding_id = client.binding_for_address(address).await?;
-    Some((address.to_string(), binding_id))
+    client
+        .connection_live()
+        .await
+        .then(|| (address.to_string(), address.to_string()))
 }
 
 pub(super) async fn handle_model_interaction(
@@ -69,8 +73,8 @@ pub(super) async fn handle_model_interaction(
 
     if event.autocomplete {
         let models = match transport.as_ref() {
-            Some((address, binding_id)) => {
-                autocomplete_models(client, address, binding_id, &caller, cache).await
+            Some((address, session_key)) => {
+                autocomplete_models(client, address, session_key, &caller, cache).await
             }
             None => Vec::new(),
         };
@@ -111,7 +115,7 @@ pub(super) async fn handle_model_interaction(
         .await;
         return;
     };
-    let binding_id = transport.as_ref().map(|(_, binding_id)| binding_id.clone());
+    let cache_key = transport.as_ref().map(|(_, key)| key.clone());
     let outcome = match transport {
         Some((address, _)) => {
             client
@@ -127,9 +131,9 @@ pub(super) async fn handle_model_interaction(
     let text = match outcome {
         Ok(value) => {
             if name == LIST_COMMAND {
-                if let (Some(binding_id), Some(result)) = (binding_id, list_result(value.clone())) {
+                if let (Some(cache_key), Some(result)) = (cache_key, list_result(value.clone())) {
                     cache.lock().await.insert(
-                        binding_id,
+                        cache_key,
                         CachedModels {
                             fetched_at: std::time::Instant::now(),
                             result,
@@ -148,12 +152,12 @@ pub(super) async fn handle_model_interaction(
 async fn autocomplete_models(
     client: &InstanceClient,
     address: &str,
-    binding_id: &str,
+    cache_key: &str,
     caller: &SaidCaller,
     cache: &ModelCache,
 ) -> Vec<String> {
     let now = std::time::Instant::now();
-    if let Some(entry) = cache.lock().await.get(binding_id).cloned() {
+    if let Some(entry) = cache.lock().await.get(cache_key).cloned() {
         if now.duration_since(entry.fetched_at) < MODEL_CACHE_TTL {
             return entry.result.models;
         }
@@ -175,7 +179,7 @@ async fn autocomplete_models(
     };
     let models = result.models.clone();
     cache.lock().await.insert(
-        binding_id.to_string(),
+        cache_key.to_string(),
         CachedModels {
             fetched_at: std::time::Instant::now(),
             result,

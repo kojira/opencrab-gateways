@@ -12,7 +12,7 @@ use opencrab_gate_client::client::{InstanceClient, LiveEvent, PostRefuse, SaidOu
 use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
 use opencrab_gate_client::{FinalDelivery, RuntimeCapabilities, SayPolicy};
 
-use crate::config::{config_digest, parse_instance_config, AccessConfig, InstancePlacement};
+use crate::config::{parse_instance_config, AccessConfig, InstancePlacement};
 use crate::dedup::SeenEvents;
 use crate::follows::SharedAccess;
 use crate::harness::HarnessOverrides;
@@ -73,10 +73,6 @@ pub fn spawn_instance(
         );
     }
     let cfg = parse_instance_config(config_bytes)?;
-    let digest = match place.core_config_b64.as_deref() {
-        Some(core_config_b64) => config_digest(&crate::config::decode_config_b64(core_config_b64)?),
-        None => config_digest(config_bytes),
-    };
     // 返信本文を nostaro reply で投稿するための relays だけの config（鍵は env 注入・config に載せない）。
     let post_config = post::post_config_path(&socket, &place.instance_id);
     post::write_relays_config(&post_config, &cfg.relays).map_err(|e| {
@@ -132,9 +128,8 @@ pub fn spawn_instance(
     let client = InstanceClient::spawn_with_operations_and_env(
         socket,
         place.instance_id.clone(),
-        place.revision,
+        place.agent_id.clone(),
         cfg.self_pubkey.clone(),
-        digest,
         SayPolicy::AcceptToLiveQueue,
         operations,
         runtime_capabilities,
@@ -237,20 +232,15 @@ fn spawn_say_consumer(
     })
 }
 
-async fn wait_until_bound(client: &InstanceClient, address: &str) {
-    loop {
-        if client.binding_for_address(address).await.is_some() {
-            return;
-        }
+/// D-1099: core needs no registration; the lanes run while the core connection is up.
+async fn wait_until_connected(client: &InstanceClient) {
+    while !client.connection_live().await {
         tokio::time::sleep(BIND_POLL).await;
     }
 }
 
-async fn wait_until_unbound(client: &InstanceClient, address: &str) {
-    loop {
-        if client.binding_for_address(address).await.is_none() {
-            return;
-        }
+async fn wait_until_disconnected(client: &InstanceClient) {
+    while client.connection_live().await {
         tokio::time::sleep(BIND_POLL).await;
     }
 }
@@ -416,10 +406,10 @@ async fn flush_bundle(
         tracing::warn!("bundle dropped; default lane has no watch_id");
         return;
     };
-    let Some(binding_id) = client.binding_for_address(address).await else {
-        tracing::info!(count = events.len(), "bundle dropped; binding not ready");
+    if !client.connection_live().await {
+        tracing::info!(count = events.len(), "bundle dropped; core not connected");
         return;
-    };
+    }
     let ids: Vec<String> = events
         .iter()
         .filter_map(|e| crate::map::normalize_author_id(&e.id))
@@ -432,7 +422,7 @@ async fn flush_bundle(
         );
         return;
     }
-    let bundle = bundle_id(&binding_id, watch_id, &ids);
+    let bundle = bundle_id(address, watch_id, &ids);
     let count = events.len() as u32;
     let lane_for_origin = Lane::watch(watch_id);
     let origins: Vec<String> = ids
@@ -494,6 +484,8 @@ async fn send_mapped(
         start_turn: bundle.is_none_or(|place| place.index == place.count),
         system_context: None,
         reply_target: mapped.reply_target.clone(),
+        // D-1099: the event id is what replies and eN references point at.
+        reference: Some(event.id.clone()),
         live_inbound_scope: LiveInboundScope::Speaker,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
         agent_prelude: None,
@@ -537,6 +529,9 @@ fn record_said_outcome(metrics: &SaidMetrics, origin: &str, outcome: &SaidOutcom
         }
         SaidOutcome::Disconnected => {
             tracing::info!(origin, "said disconnected");
+        }
+        SaidOutcome::Opened { .. } => {
+            tracing::warn!(origin, "said answered as open");
         }
         SaidOutcome::WireErr { code, detail } => {
             if code == "store_error" {

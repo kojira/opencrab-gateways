@@ -1,11 +1,11 @@
 // ==================== D-1097: owner mention enables a channel (real core) ====================
 
-/// An owner @mentioning the bot in a channel it has no binding for: the child creates the
-/// binding on its own core connection, real core binds it, and that same message is recorded
-/// as a said on the new binding. A non-owner mention and an owner message without a mention in
-/// another unbound channel create nothing.
+/// An owner @mentioning the bot in a channel it does not listen to: the bot starts listening and
+/// that same message reaches real core as a said of the channel's session key, which opens the
+/// session (D-1099: nothing registered first). A non-owner mention and an owner message without
+/// a mention in other channels reach core with nothing.
 #[tokio::test]
-async fn d1097_owner_mention_enables_the_channel_in_real_core() {
+async fn d1099_owner_mention_enables_the_channel_in_real_core() {
     use std::io::Write as _;
     let buf = install_capture();
     let mock = Arc::new(RoutedMock::new());
@@ -15,13 +15,10 @@ async fn d1097_owner_mention_enables_the_channel_in_real_core() {
     let instance_id = uuid::Uuid::new_v4().to_string();
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
-    provision(&core, &instance_id, "discord", &config_b64, &[address()]).await;
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
-        revision: 1,
         addresses: vec![address()],
         config_b64,
-        core_config_b64: None,
         channel_socket: None,
     };
     let overrides = HarnessOverrides {
@@ -30,12 +27,7 @@ async fn d1097_owner_mention_enables_the_channel_in_real_core() {
     };
     let client = spawn_instance(core.sock.clone(), &place, &config_bytes, None, overrides, None)
         .expect("spawn_instance");
-    for _ in 0..250 {
-        if client.binding_for_address(&address()).await.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    wait_connected(&client, &address()).await;
 
     let line = |id: &str, channel: &str, author: &str, mentions: &[&str]| {
         serde_json::json!({"id": id, "channel_id": channel, "guild_id": GUILD,
@@ -61,7 +53,7 @@ async fn d1097_owner_mention_enables_the_channel_in_real_core() {
             conn.query_row(
                 "SELECT o.binding_id FROM external_origins o
                    JOIN gate_bindings b ON b.binding_id = o.binding_id
-                  WHERE b.address = ?1 AND b.closed_at IS NULL",
+                  WHERE b.session_key = ?1",
                 [&new_address],
                 |r| r.get::<_, String>(0),
             )
@@ -72,13 +64,12 @@ async fn d1097_owner_mention_enables_the_channel_in_real_core() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let bound = said_on_new.expect("the owner's mention became a said on a new binding");
-    assert_eq!(client.binding_for_address(&new_address).await, Some(bound));
+    said_on_new.expect("the owner's mention became a said of the new session key");
 
     let other: i64 = {
         let conn = core.extgate.db.lock().unwrap();
         conn.query_row(
-            "SELECT COUNT(*) FROM gate_bindings WHERE instance_id=?1 AND address IN (?2, ?3)",
+            "SELECT COUNT(*) FROM gate_bindings WHERE instance_id=?1 AND session_key IN (?2, ?3)",
             rusqlite::params![
                 instance_id,
                 format!("discord-{AGENT_ID}-{GUILD}-777"),
@@ -88,7 +79,7 @@ async fn d1097_owner_mention_enables_the_channel_in_real_core() {
         )
         .unwrap()
     };
-    assert_eq!(other, 0, "a non-owner mention or an owner without a mention binds nothing");
+    assert_eq!(other, 0, "a non-owner mention or an owner without a mention reaches core with nothing");
 
     // The bot's plain answer is posted to the newly enabled channel.
     let posted = {

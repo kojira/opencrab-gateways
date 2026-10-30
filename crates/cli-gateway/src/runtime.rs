@@ -5,11 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use opencrab_gate_client::client::{
-    CreateBindingError, InstanceClient, LiveEvent, PostRefuse, SaidOutcome,
-};
+use opencrab_gate_client::client::{InstanceClient, LiveEvent, OpenError, PostRefuse, SaidOutcome};
 use opencrab_gate_client::wire::{
-    config_digest, said_frame_with_context, LiveInboundScope, SaidCaller, SaidContext, MAX_FRAME,
+    said_frame_with_context, LiveInboundScope, SaidCaller, SaidContext, MAX_FRAME,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -166,9 +164,8 @@ where
     let client = InstanceClient::spawn(
         PathBuf::from(&options.placement.core_socket),
         options.instance.instance_id.clone(),
-        options.instance.revision,
+        options.instance.agent_id.clone(),
         options.instance.author_id.clone(),
-        config_digest(&options.instance.author_id),
     );
     let session_id =
         match establish_session(&client, &options.session, options.connect_timeout).await {
@@ -354,34 +351,33 @@ async fn establish_session(
         .map_err(|_| anyhow::anyhow!("session acknowledgement timed out"))?
 }
 
+/// D-1099: a new session is opened in core under a fresh session key; an existing one is used as
+/// given. Either way the cli waits for its core connection first.
 async fn establish_session_inner(
     client: &Arc<InstanceClient>,
     selector: &SessionArg,
 ) -> anyhow::Result<String> {
-    let session_id = match selector {
+    match selector {
         SessionArg::New(name) => {
-            let binding_id = uuid::Uuid::new_v4().to_string();
-            let address = format!("extgate-{binding_id}");
+            let key = format!("extgate-{}", uuid::Uuid::new_v4());
             loop {
-                match client.create_binding(&binding_id, &address, name).await {
-                    Ok(()) => break,
-                    Err(CreateBindingError::NotReady | CreateBindingError::Disconnected) => {
+                match client.open(&key, Some(name)).await {
+                    Ok(session_id) => return Ok(session_id),
+                    Err(OpenError::NotReady | OpenError::Disconnected) => {
                         tokio::time::sleep(POLL_INTERVAL).await;
                     }
-                    Err(CreateBindingError::Rejected { code }) => {
-                        anyhow::bail!("binding rejected: {code}");
+                    Err(OpenError::Rejected { code }) => {
+                        anyhow::bail!("session rejected: {code}");
                     }
                 }
             }
-            address
         }
-        SessionArg::Existing(address) => address.clone(),
-    };
-    loop {
-        if client.binding_for_address(&session_id).await.is_some() {
-            return Ok(session_id);
+        SessionArg::Existing(key) => {
+            while !client.connection_live().await {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            Ok(key.clone())
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
@@ -483,11 +479,11 @@ async fn sender_loop(
                 Input::Message { id, text } => {
                     let origin = format!("cli:{id}");
                     let context = owner_context();
-                    let Some(binding_id) = client.binding_for_address(&address).await else {
+                    if !client.connection_live().await {
                         connection.disconnected_request_error(id, &emitters).await?;
                         continue;
-                    };
-                    if !said_fits(&binding_id, &origin, &client.author_id, &context, &text) {
+                    }
+                    if !said_fits(&address, &origin, &client.author_id, &context, &text) {
                         emitters.error(Some(id), "too_large").await?;
                         continue;
                     }
@@ -515,7 +511,7 @@ async fn sender_loop(
 }
 
 fn said_fits(
-    binding_id: &str,
+    session_key: &str,
     origin: &str,
     author_id: &str,
     context: &SaidContext,
@@ -524,7 +520,7 @@ fn said_fits(
     let maximum_request_id = format!("said:{}", u64::MAX);
     let frame = said_frame_with_context(
         &maximum_request_id,
-        binding_id,
+        session_key,
         origin,
         author_id,
         None,
@@ -543,6 +539,7 @@ fn owner_context() -> SaidContext {
         start_turn: true,
         system_context: None,
         reply_target: None,
+        reference: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
         agent_prelude: None,
@@ -555,6 +552,7 @@ fn map_said(id: String, origin: String, outcome: Result<SaidOutcome, PostRefuse>
         Ok(SaidOutcome::Accepted { seq }) => Event::Accepted { id, origin, seq },
         Ok(SaidOutcome::NotAdmitted) => Event::NotAdmitted { id },
         Ok(SaidOutcome::Disconnected) => error_event(Some(id), "disconnect"),
+        Ok(SaidOutcome::Opened { .. }) => error_event(Some(id), "unexpected_open"),
         Ok(SaidOutcome::WireErr { code, .. }) => error_event(Some(id), stable_wire_code(&code)),
         Err(PostRefuse::NotReady) => error_event(Some(id), "instance_not_ready"),
         Err(PostRefuse::Busy) => error_event(Some(id), "conversation_busy"),
@@ -669,7 +667,8 @@ async fn connection_loop(
     connection: Arc<ConnectionState>,
 ) {
     loop {
-        let current = client.binding_for_address(&address).await.is_some();
+        let _ = &address;
+        let current = client.connection_live().await;
         if connection.set(current, &emitters).await.is_err() {
             break;
         }

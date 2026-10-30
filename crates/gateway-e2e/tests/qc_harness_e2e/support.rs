@@ -505,42 +505,9 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     }
 }
 
-/// D-1098: declares the instance and its complete binding set on core's gate socket, the way a
-/// gateway does before `hello`. Returns the binding ids (UUIDv5(instance, address)).
-async fn provision(
-    core: &Core,
-    instance_id: &str,
-    kind_id: &str,
-    config_b64: &str,
-    addresses: &[String],
-) -> Vec<String> {
-    let provisioned = opencrab_gate_client::provision::ProvisionClient::new(core.sock.clone())
-        .provision(&opencrab_gate_client::provision::ProvisionDesired {
-            instance_id,
-            kind_id,
-            agent_id: AGENT_ID,
-            enabled: true,
-            config_b64,
-            addresses,
-        })
-        .await
-        .expect("provision");
-    addresses
-        .iter()
-        .map(|address| {
-            provisioned
-                .bindings
-                .iter()
-                .find(|binding| &binding.address == address)
-                .expect("provisioned binding")
-                .binding_id
-                .clone()
-        })
-        .collect()
-}
-
-/// instance + binding を登録し、`spawn_instance`（fake_watch＋dry_run）を起動して bind ack を待つ。
-/// 返り値の `session_id` は canonical（新規 address なら `extgate-{binding_id}`）。
+/// `spawn_instance`（fake_watch＋dry_run）を起動して core の hello 受理を待ち、この instance の
+/// session key（`nostr-<agent>`）の core session を開く（D-1099: 事前登録なし）。返り値の
+/// `session_id` は core の session（新規 key ではその key）。
 async fn wire_instance(
     core: &Core,
     fixture: &Fixture,
@@ -550,16 +517,11 @@ async fn wire_instance(
     let address = format!("nostr-{AGENT_ID}");
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
 
-    let binding_id = provision(core, &instance_id, "nostr", &config_b64, std::slice::from_ref(&address))
-        .await
-        .remove(0);
-
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
-        revision: 1,
+        agent_id: AGENT_ID.to_string(),
         address: address.clone(),
         config_b64,
-        core_config_b64: None,
     };
     let overrides = HarnessOverrides {
         fake_watch: Some(fixture.path.clone()),
@@ -578,18 +540,17 @@ async fn wire_instance(
     )
     .expect("spawn_instance");
 
-    // bind ack を待つ（watch lane はここから起動する）。
-    let mut bound = false;
+    // hello 受理を待つ（watch lane はここから起動する）。
+    let mut live = false;
     for _ in 0..250 {
-        if client.binding_for_address(&address).await.is_some() {
-            bound = true;
+        if client.connection_live().await {
+            live = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(bound, "binding が ack されない");
-
-    let session_id = format!("extgate-{binding_id}");
+    assert!(live, "hello が受理されない");
+    let session_id = client.open(&address, None).await.expect("open");
     (client, address, session_id)
 }
 

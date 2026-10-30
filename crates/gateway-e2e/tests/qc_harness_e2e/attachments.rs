@@ -39,18 +39,13 @@ async fn nostr_workspace_files_project_dispatch_metadata_and_cleanup() {
             .set_workspace_base(workspace.to_str().unwrap().into());
         core.extgate.set_attachment_outbox_root(outbox.clone());
         let instance = uuid::Uuid::new_v4().to_string();
-        let config = opencrab_extgate::encode_config_b64(b"{}");
-        let binding = provision(&core, &instance, "nostr", &config, &["attachment-test".to_string()])
-            .await
-            .remove(0);
         let payload = Arc::new(Mutex::new(None));
         let release = Arc::new(tokio::sync::Notify::new());
         let client = InstanceClient::spawn_with_operations(
             core.sock.clone(),
             instance.clone(),
-            1,
+            AGENT_ID.to_string(),
             self_pk(),
-            opencrab_extgate::ids::config_digest_from_b64(&config).unwrap(),
             SayPolicy::AcceptToLiveQueue,
             Some(opencrab_nostr_gateway::ops::operation_declarations_with_files(true)),
             RuntimeCapabilities {
@@ -68,10 +63,19 @@ async fn nostr_workspace_files_project_dispatch_metadata_and_cleanup() {
                 .lock_registry()
                 .unwrap()
                 .get(&instance)
-                .is_some_and(|entry| entry.acknowledged.contains(&binding)))
+                .is_some())
             .await
         );
-        let session = opencrab_extgate::session_id_for_binding(&binding);
+        // D-1099: the gateway's session key opens core's session; core keeps its own row id.
+        let session = client.open("attachment-test", None).await.expect("open");
+        let binding = opencrab_db::queries::find_gate_session(
+            &core.extgate.db.lock().unwrap(),
+            &instance,
+            "attachment-test",
+        )
+        .unwrap()
+        .expect("core record")
+        .row_id;
         let projection = ExtgateOpsGatewayActions::for_binding(
             core.extgate.clone(),
             &instance,

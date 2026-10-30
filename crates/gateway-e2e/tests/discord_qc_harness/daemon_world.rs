@@ -1,16 +1,14 @@
 // ==================== D-1098: the Discord daemon against a real core ====================
 //
-// Real pieces: core (extgate + AppState + mock LLM) on its gate socket, the Discord daemon with
-// the real `ProvisionReconciler`, its admin socket, the settings HTTP API, and the real child
+// Real pieces: core (extgate + AppState + mock LLM) on its gate socket, the Discord daemon (it
+// never calls core, D-1099), its admin socket, the settings HTTP API, and the real child
 // code (`spawn_instance_with_voice` reading the placement the daemon wrote). The child runs in
 // this process with a fake event file and the dry-run transport instead of serenity, which is
 // the only stand-in: no Discord. No core credential is configured anywhere.
 
 mod daemon_e2e {
     use super::*;
-    use opencrab_discord_gateway::daemon::{
-        DiscordDaemon, ProductionFactory, ProvisionReconciler, SpawnerFactory,
-    };
+    use opencrab_discord_gateway::daemon::{DiscordDaemon, ProductionFactory, SpawnerFactory};
     use opencrab_discord_gateway::store::{DiscordStore, InstanceRow};
     use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
     use std::path::PathBuf;
@@ -24,8 +22,8 @@ mod daemon_e2e {
     pub(crate) type LiveChildren = Arc<Mutex<std::collections::BTreeSet<String>>>;
 
     /// The real child (`main`'s path), in this process: reads the daemon-written placement,
-    /// connects to core and sends `hello` with the provisioned revision and digest, then reports
-    /// ready on the control socket like `main`.
+    /// connects to core and sends `hello` with its instance and agent, then reports ready on the
+    /// control socket like `main`.
     pub(crate) struct InProcessFactory {
         pub(crate) production: ProductionFactory,
         /// Events per agent: what "Discord" delivers to that bot.
@@ -107,18 +105,11 @@ mod daemon_e2e {
                     )
                 });
                 if let (Ok(client), Some(control), Some(nonce)) = (&client, control, nonce) {
-                    // `main`'s readiness report: once every placed address is bound.
-                    let (client, addresses) = (client.clone(), inst.addresses.clone());
+                    // `main`'s readiness report: once core accepted the hello.
+                    let client = client.clone();
                     rt.spawn(async move {
                         use tokio::io::AsyncWriteExt as _;
-                        loop {
-                            let mut all = client.connection_live().await;
-                            for address in &addresses {
-                                all = all && client.remembered_binding(address).await.is_some();
-                            }
-                            if all {
-                                break;
-                            }
+                        while !client.connection_live().await {
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                         if let Ok(mut stream) = tokio::net::UnixStream::connect(control).await {
@@ -197,7 +188,7 @@ mod daemon_e2e {
     pub(crate) struct World {
         pub(crate) core: Core,
         pub(crate) dir: tempfile::TempDir,
-        pub(crate) daemon: Arc<DiscordDaemon<ProvisionReconciler, InProcessFactory>>,
+        pub(crate) daemon: Arc<DiscordDaemon<InProcessFactory>>,
         pub(crate) admin: tokio::task::JoinHandle<anyhow::Result<()>>,
         pub(crate) admin_socket: PathBuf,
         pub(crate) clients: StartedChildren,
@@ -227,7 +218,7 @@ mod daemon_e2e {
         .unwrap();
     }
 
-    /// The daemon of one gateway process: store, reconciler, children, channel listeners and
+    /// The daemon of one gateway process: store, children, channel listeners and
     /// admin socket, all on the files under `dir`.
     pub(crate) fn start_daemon(
         core: &Core,
@@ -235,7 +226,7 @@ mod daemon_e2e {
         events: &std::collections::BTreeMap<String, PathBuf>,
         (clients, live): (&StartedChildren, &LiveChildren),
     ) -> (
-        Arc<DiscordDaemon<ProvisionReconciler, InProcessFactory>>,
+        Arc<DiscordDaemon<InProcessFactory>>,
         tokio::task::JoinHandle<anyhow::Result<()>>,
     ) {
         let db = dir.join("discord.db");
@@ -254,12 +245,7 @@ mod daemon_e2e {
             live: live.clone(),
         };
         let daemon = Arc::new(
-            DiscordDaemon::new(
-                DiscordStore::open(&db).unwrap(),
-                KEY,
-                Arc::new(ProvisionReconciler::new(core.sock.clone(), "discord")),
-                Arc::new(factory),
-            )
+            DiscordDaemon::new(DiscordStore::open(&db).unwrap(), KEY, Arc::new(factory))
             .unwrap(),
         );
         daemon.serve_channel_requests(Arc::new(opencrab_discord_gateway::daemon::DaemonChannels(
@@ -345,7 +331,8 @@ mod daemon_e2e {
             }
         }
 
-        /// Core's open binding for `address`: `(binding_id, session_id)`.
+        /// Core's own record of the session key `address`: `(row id, session_id)`, if core has
+        /// seen it (D-1099: core creates it on the first frame).
         pub(crate) fn core_binding(&self, address: &str) -> Option<(String, String)> {
             use rusqlite::OptionalExtension as _;
             self.core
@@ -355,7 +342,8 @@ mod daemon_e2e {
                 .unwrap()
                 .query_row(
                     "SELECT binding_id, session_id FROM gate_bindings
-                     WHERE address=?1 AND closed_at IS NULL",
+                     WHERE session_key=?1
+                     ORDER BY closed_at IS NOT NULL, created_at DESC LIMIT 1",
                     [address],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -363,12 +351,21 @@ mod daemon_e2e {
                 .unwrap()
         }
 
-        /// Waits until the running child of `instance_id` has `address` bound in core.
+        /// Waits until the running child of `instance_id` is connected to core and listens to
+        /// `address` (the store has it). Returns the address.
         pub(crate) async fn bound(&self, instance_id: &str, address: &str) -> Option<String> {
             for _ in 0..250 {
+                let listens = self
+                    .daemon
+                    .store()
+                    .lock()
+                    .unwrap()
+                    .get(instance_id)
+                    .unwrap()
+                    .is_some_and(|row| row.addresses.iter().any(|a| a == address));
                 if let Some(client) = self.client_of(instance_id) {
-                    if let Some(id) = client.binding_for_address(address).await {
-                        return Some(id);
+                    if listens && client.connection_live().await {
+                        return Some(address.to_string());
                     }
                 }
                 self.daemon.reconcile_once().await.unwrap();

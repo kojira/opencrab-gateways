@@ -1,6 +1,6 @@
 {
   "name": "partial-ignored-keeps-connection",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     { "op": "sse_open", "id": "ev", "path": "/api/web-conversations/web-agent-conv/events" },
     {
@@ -23,7 +23,7 @@
 
     { "op": "uds_send", "frame": {
       "m": "partial",
-      "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "session": "web-agent-conv",
       "stream_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
       "text": "一文目です。"
     } },

@@ -1,26 +1,3 @@
-fn wait_gateway_uds(gw_port: u16, timeout: Duration) -> Option<(u16, String)> {
-    let probe = r#"{"client_message_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","text":"probe","attachments":[]}"#;
-    let start = Instant::now();
-    let mut last = None;
-    while start.elapsed() < timeout {
-        if let Some((st, body)) = http(
-            gw_port,
-            "POST",
-            "/api/web-conversations/web-e2eagent-probe/messages",
-            None,
-            Some(probe),
-            Duration::from_secs(2),
-        ) {
-            last = Some((st, body.clone()));
-            if st == 503 && body.contains("instance_not_ready") {
-                return last;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    last
-}
-
 /// QC 症状の再現: core 再起動後も gateway が自動再接続し、作成が 201 ready → message → say。
 #[test]
 fn core_restart_gateway_reconnects_then_create_201_message_say() {
@@ -34,12 +11,9 @@ fn core_restart_gateway_reconnects_then_create_201_message_say() {
     let core = seed_core(root.path(), &db, &sock, core_port, mock.port);
     let gw = spawn_gateway(root.path(), &sock, gw_port);
     assert!(wait_tcp(gw_port, Duration::from_secs(15)), "gateway http");
-    let live = wait_gateway_uds(gw_port, Duration::from_secs(15));
-    assert!(
-        live.as_ref()
-            .is_some_and(|(st, b)| *st == 503 && b.contains("instance_not_ready")),
-        "gateway never hellod before restart: {live:?}"
-    );
+    // A conversation made before the restart: it must stay this gateway's conversation.
+    let before = create(gw_port, "Before");
+    let before_session = before["session_id"].as_str().unwrap().to_string();
 
     drop(core);
     let down_start = Instant::now();
@@ -64,7 +38,7 @@ fn core_restart_gateway_reconnects_then_create_201_message_say() {
         match http(
             gw_port,
             "POST",
-            "/api/web-conversations/web-e2eagent-probe/messages",
+            &format!("/api/web-conversations/{before_session}/messages"),
             None,
             Some(
                 r#"{"client_message_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","text":"probe","attachments":[]}"#,
@@ -91,29 +65,21 @@ fn core_restart_gateway_reconnects_then_create_201_message_say() {
         std::fs::read_to_string(root.path().join("core.log"))
             .unwrap_or_else(|error| format!("<core log unavailable: {error}>"))
     );
-    let live = wait_gateway_uds(gw_port, Duration::from_secs(15));
-    assert!(
-        live.as_ref()
-            .is_some_and(|(st, b)| *st == 503 && b.contains("instance_not_ready")),
-        "gateway did not re-hello after core restart: {live:?}"
-    );
-
+    let v = create(gw_port, "Reconnect");
+    assert_eq!(v["state"], "ready", "{v}");
+    let session = v["session_id"].as_str().unwrap().to_string();
+    // The conversation made before the restart is still this gateway's.
     let (st, body) = http(
         gw_port,
-        "POST",
-        "/api/web-conversations",
+        "GET",
+        &format!("/api/web-conversations/{before_session}"),
         None,
-        Some(&format!(
-            r#"{{"agent_id":"{AGENT}","name":"Reconnect"}}"#
-        )),
-        Duration::from_secs(70),
+        None,
+        Duration::from_secs(5),
     )
-    .expect("create");
-    assert_eq!(st, 201, "{body}");
-    let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
-    assert_eq!(v["state"], "ready", "{body}");
-    let session = v["session_id"].as_str().unwrap().to_string();
-    let binding = v["binding_id"].as_str().unwrap().to_string();
+    .expect("get");
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("\"ready\""), "{body}");
 
     let sse_rx = spawn_sse(gw_port, &session);
     let post_body = format!(
@@ -144,7 +110,7 @@ fn core_restart_gateway_reconnects_then_create_201_message_say() {
     let inbound: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1 AND content = 'hello from e2e'",
-            [format!("extgate-{binding}")],
+            [session.clone()],
             |r| r.get(0),
         )
         .unwrap();
@@ -152,7 +118,7 @@ fn core_restart_gateway_reconnects_then_create_201_message_say() {
     let reply: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1 AND content = ?2",
-            [format!("extgate-{binding}"), REPLY.to_string()],
+            [session.clone(), REPLY.to_string()],
             |r| r.get(0),
         )
         .unwrap();

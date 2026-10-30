@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use super::client::{CreateBindingError, InstanceClient, LiveEvent, PostRefuse, SaidOutcome};
+use super::client::{InstanceClient, LiveEvent, OpenError, PostRefuse, SaidOutcome};
 use super::json::parse_object_no_dup;
 use super::wire::{parse_uuid, Attachment, LiveInboundScope, SaidCaller, SaidContext};
 
@@ -23,6 +23,8 @@ const JSON_TYPE: &str = "application/json; charset=utf-8";
 pub struct HttpState {
     pub instances: Vec<Arc<InstanceClient>>,
     pub agent_clients: HashMap<String, Arc<InstanceClient>>,
+    /// D-1099: which instance owns each web conversation (gateway state).
+    pub conversations: Arc<crate::conversations::Conversations>,
 }
 
 pub fn router(state: HttpState) -> Router {
@@ -85,42 +87,33 @@ async fn create_conversation(State(state): State<HttpState>, body: axum::body::B
         return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
     }
     let conversation_id = uuid::Uuid::new_v4().to_string();
-    let binding_id = uuid::Uuid::new_v4().to_string();
-    let session_id = format!("extgate-{binding_id}");
-    let theme = parsed.name.as_deref().unwrap_or(&session_id);
-    match client.create_binding(&binding_id, &session_id, theme).await {
-        Ok(()) => {}
-        Err(CreateBindingError::NotReady | CreateBindingError::Disconnected) => {
+    // The session key keeps the historical `extgate-<uuid>` shape, so session URLs are unchanged.
+    let session_key = format!("extgate-{}", uuid::Uuid::new_v4());
+    let session_id = match client.open(&session_key, parsed.name.as_deref()).await {
+        Ok(session_id) => session_id,
+        Err(OpenError::NotReady | OpenError::Disconnected) => {
             return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
         }
-        Err(CreateBindingError::Rejected { code }) => {
+        Err(OpenError::Rejected { code }) => {
             return json_error(wire_status(&code), &code, None);
         }
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while tokio::time::Instant::now() < deadline {
-        if client.binding_for_address(&session_id).await.as_deref() == Some(&binding_id) {
-            return json_state(
-                StatusCode::CREATED,
-                json!({
-                    "conversation_id": conversation_id,
-                    "session_id": session_id,
-                    "binding_id": binding_id,
-                    "name": parsed.name,
-                    "state": "ready",
-                }),
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    if let Err(error) = state
+        .conversations
+        .record(&session_key, &client.instance_id, &session_id)
+    {
+        tracing::warn!(error = %error, "web conversation not recorded");
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "store_error", None);
     }
     json_state(
-        StatusCode::ACCEPTED,
+        StatusCode::CREATED,
         json!({
             "conversation_id": conversation_id,
             "session_id": session_id,
-            "binding_id": binding_id,
+            // Kept for the dashboard's create response (it is the session key now).
+            "binding_id": session_key,
             "name": parsed.name,
-            "state": "provisioning",
+            "state": "ready",
         }),
     )
 }
@@ -129,29 +122,20 @@ async fn get_conversation(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
 ) -> Response {
-    let mut remembered = Vec::new();
-    let mut ready = Vec::new();
-    for client in &state.instances {
-        if client.remembered_binding(&session_id).await.is_some() {
-            remembered.push(client);
-            if client.binding_for_address(&session_id).await.is_some() {
-                ready.push(client);
-            }
+    let client = match find_client(&state, &session_id) {
+        Ok(client) => client,
+        Err(FindClient::None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(FindClient::Unavailable) => {
+            return json_state(
+                StatusCode::OK,
+                json!({"session_id": session_id, "state": "unavailable"}),
+            )
         }
-    }
-    if ready.len() > 1 || remembered.len() > 1 {
-        return json_error(StatusCode::CONFLICT, "binding_conflict", None);
-    }
-    let state_name = if ready.len() == 1 {
+    };
+    let state_name = if client.connection_live().await {
         "ready"
-    } else if let Some(client) = remembered.first() {
-        if client.connection_live().await {
-            "provisioning"
-        } else {
-            "unavailable"
-        }
     } else {
-        return StatusCode::NOT_FOUND.into_response();
+        "unavailable"
     };
     json_state(
         StatusCode::OK,
@@ -178,31 +162,22 @@ fn json_state(status: StatusCode, body: Value) -> Response {
     res
 }
 
-async fn find_client(state: &HttpState, address: &str) -> Result<Arc<InstanceClient>, FindClient> {
-    let mut hits = Vec::new();
-    for inst in &state.instances {
-        if inst.binding_for_address(address).await.is_some() {
-            hits.push(inst.clone());
+/// The instance that owns the web conversation `session_key` (gateway state, D-1099).
+fn find_client(state: &HttpState, session_key: &str) -> Result<Arc<InstanceClient>, FindClient> {
+    let owner = match state.conversations.owner(session_key) {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return Err(FindClient::None),
+        Err(error) => {
+            tracing::warn!(error = %error, "web conversation lookup failed");
+            return Err(FindClient::Unavailable);
         }
-    }
-    match hits.len() {
-        0 => Err(FindClient::None),
-        1 => Ok(hits.remove(0)),
-        _ => Err(FindClient::Ambiguous),
-    }
-}
-
-async fn uds_disconnected(state: &HttpState, address: &str) -> bool {
-    let mut any_live = false;
-    for inst in &state.instances {
-        if inst.connection_live().await {
-            any_live = true;
-        }
-        if inst.remembered_binding(address).await.is_some() && !inst.connection_live().await {
-            return true;
-        }
-    }
-    !any_live && !state.instances.is_empty()
+    };
+    state
+        .instances
+        .iter()
+        .find(|inst| inst.instance_id == owner)
+        .cloned()
+        .ok_or(FindClient::Unavailable)
 }
 
 fn sse_error(code: &str) -> Response {
@@ -214,8 +189,10 @@ fn sse_error(code: &str) -> Response {
 }
 
 enum FindClient {
+    /// Not a conversation of this gateway.
     None,
-    Ambiguous,
+    /// Ours, but its instance is not running here.
+    Unavailable,
 }
 
 struct PostBody {
@@ -284,25 +261,22 @@ async fn post_message(
         Err(code) => return json_error(StatusCode::BAD_REQUEST, code, None),
     };
     let origin = format!("web:{}", parsed.client_message_id);
-    let client = match find_client(&state, &session_id).await {
+    let client = match find_client(&state, &session_id) {
         Ok(c) => c,
-        Err(FindClient::None) => {
-            let code = if uds_disconnected(&state, &session_id).await {
-                "disconnect"
-            } else {
-                "instance_not_ready"
-            };
-            return json_error(StatusCode::SERVICE_UNAVAILABLE, code, None);
-        }
-        Err(FindClient::Ambiguous) => {
-            return json_error(StatusCode::CONFLICT, "binding_conflict", None);
+        Err(FindClient::None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(FindClient::Unavailable) => {
+            return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
         }
     };
+    if !client.connection_live().await {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "disconnect", None);
+    }
     let context = SaidContext {
         caller: SaidCaller::Owner,
         start_turn: true,
         system_context: None,
         reply_target: None,
+        reference: None,
         live_inbound_scope: LiveInboundScope::All,
         model_profile: super::wire::TurnModelProfile::Default,
         agent_prelude: None,
@@ -340,34 +314,31 @@ async fn post_message(
         Ok(SaidOutcome::Disconnected) => {
             json_error(StatusCode::SERVICE_UNAVAILABLE, "disconnect", None)
         }
+        Ok(SaidOutcome::Opened { .. }) => {
+            json_error(StatusCode::BAD_GATEWAY, "unexpected_open", None)
+        }
     }
 }
 
 fn wire_status(code: &str) -> StatusCode {
     match code {
         "bad_request" => StatusCode::BAD_REQUEST,
-        "binding_unknown" | "instance_unknown" => StatusCode::NOT_FOUND,
-        "instance_not_ready" | "binding_closed" | "instance_disabled" | "binding_conflict" => {
-            StatusCode::CONFLICT
-        }
+        "subject_unknown" => StatusCode::NOT_FOUND,
+        "instance_not_ready" | "instance_conflict" | "instance_active" => StatusCode::CONFLICT,
         "store_error" => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_GATEWAY,
     }
 }
 
 async fn get_events(State(state): State<HttpState>, Path(session_id): Path<String>) -> Response {
-    let client = match find_client(&state, &session_id).await {
+    let client = match find_client(&state, &session_id) {
         Ok(c) => c,
-        Err(FindClient::None) => {
-            if uds_disconnected(&state, &session_id).await {
-                return sse_error("disconnect");
-            }
-            return json_error(StatusCode::SERVICE_UNAVAILABLE, "instance_not_ready", None);
-        }
-        Err(FindClient::Ambiguous) => {
-            return json_error(StatusCode::CONFLICT, "binding_conflict", None);
-        }
+        Err(FindClient::None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(FindClient::Unavailable) => return sse_error("disconnect"),
     };
+    if !client.connection_live().await {
+        return sse_error("disconnect");
+    }
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
         while let Some(ev) = client.next_live(&session_id).await {
@@ -448,6 +419,7 @@ mod http_tests {
         let app = router(HttpState {
             instances: Vec::new(),
             agent_clients: HashMap::new(),
+            conversations: Arc::new(crate::conversations::Conversations::open(None).unwrap()),
         });
         let response = app
             .oneshot(

@@ -154,38 +154,15 @@ pub(crate) async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
     }
 }
 
-/// D-1098: declares the instance and its complete binding set on core's gate socket, the way a
-/// gateway does before `hello`. Returns the binding ids (UUIDv5(instance, address)).
-pub(crate) async fn provision(
-    core: &Core,
-    instance_id: &str,
-    kind_id: &str,
-    config_b64: &str,
-    addresses: &[String],
-) -> Vec<String> {
-    let provisioned = opencrab_gate_client::provision::ProvisionClient::new(core.sock.clone())
-        .provision(&opencrab_gate_client::provision::ProvisionDesired {
-            instance_id,
-            kind_id,
-            agent_id: AGENT_ID,
-            enabled: true,
-            config_b64,
-            addresses,
-        })
-        .await
-        .expect("provision");
-    addresses
-        .iter()
-        .map(|address| {
-            provisioned
-                .bindings
-                .iter()
-                .find(|binding| &binding.address == address)
-                .expect("provisioned binding")
-                .binding_id
-                .clone()
-        })
-        .collect()
+/// D-1099: waits until core accepted the instance's hello (nothing is registered first).
+pub(crate) async fn wait_connected(client: &InstanceClient, what: &str) {
+    for _ in 0..250 {
+        if client.connection_live().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("hello was not accepted ({what})");
 }
 
 pub(crate) fn discord_config() -> Vec<u8> {
@@ -199,28 +176,17 @@ pub(crate) fn discord_config() -> Vec<u8> {
     .unwrap()
 }
 
-/// instance + binding を登録し、discord gateway（fake_events + dry_run）を起動して bind ack を待つ。
+/// discord gateway（fake_events + dry_run）を起動して core の hello 受理を待つ（D-1099: 事前登録なし）。
 pub(crate) async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<InstanceClient> {
     let instance_id = uuid::Uuid::new_v4().to_string();
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = address();
 
-    provision(
-        core,
-        &instance_id,
-        "discord",
-        &config_b64,
-        std::slice::from_ref(&addr),
-    )
-    .await;
-
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
-        revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
-        core_config_b64: None,
         channel_socket: None,
     };
     let overrides = HarnessOverrides {
@@ -237,19 +203,11 @@ pub(crate) async fn wire_instance(core: &Core, fixture: &Fixture) -> Arc<Instanc
     )
     .expect("spawn_instance");
 
-    let mut bound = false;
-    for _ in 0..250 {
-        if client.binding_for_address(&addr).await.is_some() {
-            bound = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(bound, "binding が ack されない");
+    wait_connected(&client, &addr).await;
     client
 }
 
-/// 指定チャンネルで instance+binding を張り gateway を起動する（#915: typing 隔離テスト用）。
+/// 指定チャンネルを聞く gateway を起動する（#915: typing 隔離テスト用）。
 /// BUFFER は binary 内で共有・累積かつ CI は並列実行なので、typing（scope key を持たない capture）
 /// を他テストと分離するために、他テストが使わない専用チャンネルへ束ねる。
 pub(crate) async fn wire_instance_on_channel(
@@ -262,21 +220,10 @@ pub(crate) async fn wire_instance_on_channel(
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
 
-    provision(
-        core,
-        &instance_id,
-        "discord",
-        &config_b64,
-        std::slice::from_ref(&addr),
-    )
-    .await;
-
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
-        revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
-        core_config_b64: None,
         channel_socket: None,
     };
     let overrides = HarnessOverrides {
@@ -293,15 +240,7 @@ pub(crate) async fn wire_instance_on_channel(
     )
     .expect("spawn_instance");
 
-    let mut bound = false;
-    for _ in 0..250 {
-        if client.binding_for_address(&addr).await.is_some() {
-            bound = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(bound, "binding が ack されない（専用チャンネル {channel}）");
+    wait_connected(&client, &addr).await;
     client
 }
 

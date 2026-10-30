@@ -56,7 +56,7 @@ mod daemon_cases {
     /// Test 1: a bot for an agent that has none, created from the settings HTTP API with no
     /// credential configured anywhere, comes up and answers its owner.
     #[tokio::test]
-    async fn d1098_a_new_bot_created_from_the_settings_page_answers_its_owner() {
+    async fn d1099_a_new_bot_created_from_the_settings_page_answers_its_owner() {
         let buf = install_capture();
         let w = world(&[NEW_AGENT], |_, _, _| {}).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -95,34 +95,24 @@ mod daemon_cases {
         let instance_id = created["instance_id"].as_str().unwrap().to_string();
         assert_eq!(created["self_bot_id"], NEW_BOT);
 
-        // The daemon provisions it in core and starts the bot; its child binds the channel.
+        // The daemon starts the bot; its child says hello and core finds or creates the
+        // instance (D-1099: nothing was registered in core before).
         let address = format!("discord-{NEW_AGENT}-{GUILD}-910");
         w.until(|w| w.client_of(&instance_id).is_some()).await;
-        let client = w.client_of(&instance_id).unwrap();
-        for _ in 0..250 {
-            if client.binding_for_address(&address).await.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(
-            client.binding_for_address(&address).await.is_some(),
-            "bound in core"
-        );
-        let (kind, config): (String, String) = {
-            let conn = w.core.extgate.db.lock().unwrap();
-            conn.query_row(
-                "SELECT kind_id, config_b64 FROM gate_instances WHERE instance_id=?1",
-                [&instance_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        assert!(w.bound(&instance_id, &address).await.is_some(), "connected");
+        let instances: i64 = w
+            .core
+            .extgate
+            .db
+            .lock()
             .unwrap()
-        };
-        assert_eq!(kind, "discord");
-        assert_eq!(
-            config,
-            opencrab_discord_gateway::daemon::DEFAULT_CORE_CONFIG_B64
-        );
+            .query_row(
+                "SELECT COUNT(*) FROM gate_instances WHERE instance_id=?1",
+                [&instance_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(instances, 1, "the hello created the instance in core");
 
         // The owner speaks; the bot answers in the channel.
         w.say(NEW_AGENT, "9101", "910", OWNER, &format!("{M_SAY} hi"), &[]);
@@ -176,10 +166,10 @@ mod daemon_cases {
 
     const LEGACY: [&str; 3] = ["agent-kairo", "agent-nostaro", "agent-labomi"];
 
-    /// Test 2: the 3 instance-mode bots are imported under their existing v4 ids, provisioned
-    /// in core as they are, and each one answers its owner.
+    /// Test 2: the 3 instance-mode bots are imported under their existing v4 ids, say hello under
+    /// those ids, and each one answers its owner.
     #[tokio::test]
-    async fn d1098_three_imported_bots_keep_their_ids_and_answer() {
+    async fn d1099_three_imported_bots_keep_their_ids_and_answer() {
         let buf = install_capture();
         let ids: Vec<String> = LEGACY
             .iter()
@@ -217,19 +207,12 @@ mod daemon_cases {
         for (i, (agent, id)) in LEGACY.iter().zip(&ids).enumerate() {
             let parsed = uuid::Uuid::parse_str(id).unwrap();
             assert_eq!(parsed.get_version_num(), 4);
-            let kind: String = w
-                .core
-                .extgate
-                .db
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT kind_id FROM gate_instances WHERE instance_id=?1",
-                    [id],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(kind, "discord", "{agent} provisioned under its existing id");
+            assert!(
+                w.bound(id, &format!("discord-{agent}-{GUILD}-92{i}"))
+                    .await
+                    .is_some(),
+                "{agent} connected under its existing id"
+            );
             let channel = format!("92{i}");
             w.say(
                 agent,
@@ -250,7 +233,7 @@ mod daemon_cases {
 
     /// Test 3: an owner added from the admin socket is an owner from the next message on.
     #[tokio::test]
-    async fn d1098_an_owner_edit_applies_live() {
+    async fn d1099_an_owner_edit_applies_live() {
         let buf = install_capture();
         const AGENT: &str = "agent-owner-edit";
         const NEW_OWNER: &str = "333333333333333333";
@@ -281,14 +264,8 @@ mod daemon_cases {
         // The daemon rebuilds only this bot with the new access.
         w.until(|w| w.client_of(&id).is_some_and(|c| !Arc::ptr_eq(&c, &first)))
             .await;
-        let client = w.client_of(&id).unwrap();
         let address = format!("discord-{AGENT}-{GUILD}-940");
-        for _ in 0..250 {
-            if client.binding_for_address(&address).await.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        assert!(w.bound(&id, &address).await.is_some(), "connected");
         // The new owner's mention in a new channel enables it: only an owner can.
         w.say(
             AGENT,
@@ -311,9 +288,9 @@ mod daemon_cases {
     }
 
     /// Test 4: an owner @mention in a channel the bot does not have enables it, the message is
-    /// answered there, and the channel is still provisioned after the daemon restarts.
+    /// answered there, and the channel is still in the gateway store after a restart.
     #[tokio::test]
-    async fn d1098_owner_mention_enables_a_channel_that_survives_a_restart() {
+    async fn d1099_owner_mention_enables_a_channel_that_survives_a_restart() {
         let buf = install_capture();
         const AGENT: &str = "agent-mention";
         let w = world(&[AGENT], |_, _, _| {}).await;
@@ -375,40 +352,14 @@ mod daemon_cases {
             "only the owner's mention enabled one"
         );
 
-        // Restart: a fresh daemon on the same store provisions the recorded channel again.
+        // Restart: a fresh store on the same file still listens to the enabled channel.
         w.daemon.shutdown().await;
         let db = w.dir.path().join("discord.db");
         let store = opencrab_discord_gateway::store::DiscordStore::open(&db).unwrap();
-        let generation = store.get(&id).unwrap().unwrap().desired_generation;
-        store.mark_pending(&id, generation).unwrap();
-        let reconciler = opencrab_discord_gateway::daemon::ProvisionReconciler::new(
-            w.core.sock.clone(),
-            "discord",
+        assert_eq!(
+            store.get(&id).unwrap().unwrap().addresses,
+            vec![address],
+            "the enabled channel survives the restart (gateway state)"
         );
-        use opencrab_discord_gateway::daemon::GateReconciler as _;
-        // The child is gone (shutdown), so core accepts a provision of the stored state.
-        let mut verified = None;
-        for _ in 0..100 {
-            match reconciler
-                .reconcile(&store.get(&id).unwrap().unwrap())
-                .await
-            {
-                Ok(v) => {
-                    verified = Some(v);
-                    break;
-                }
-                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
-            }
-        }
-        let verified = verified.expect("provisioned again after the restart");
-        assert_eq!(verified.bindings.len(), 1);
-        let open: i64 = w.core.extgate.db.lock().unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM gate_bindings WHERE instance_id=?1 AND address=?2 AND closed_at IS NULL",
-                rusqlite::params![id, address],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(open, 1, "the enabled channel stays bound in core");
     }
 }

@@ -175,9 +175,9 @@ fn decode_hex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-fn padded_say_frame(id: &str, binding_id: &str, frame_size: usize) -> Vec<u8> {
+fn padded_say_frame(id: &str, session: &str, frame_size: usize) -> Vec<u8> {
     let prefix = format!(
-        "{{\"id\":\"{id}\",\"m\":\"say\",\"binding_id\":\"{binding_id}\",\"payload\":{{\"text\":\""
+        "{{\"id\":\"{id}\",\"m\":\"say\",\"session\":\"{session}\",\"payload\":{{\"text\":\""
     );
     let suffix = "\"}}\n";
     let overhead = prefix.len() + suffix.len();
@@ -295,10 +295,14 @@ impl Session {
         let placement = json!({
             "http_bind": http.to_string(),
             "core_socket": sock_str,
+            // D-1099: the gateway owns the fixtures' conversation from the start.
+            "conversations": [{
+                "session": ids["address"],
+                "instance_id": ids["instance_id"],
+            }],
             "instances": [{
                 "instance_id": ids["instance_id"],
-                "revision": ids["revision"],
-                "agent_id": "agent-a",
+                "agent_id": ids["agent_id"],
                 "author_id": ids["author_id"],
             }]
         });
@@ -343,30 +347,12 @@ impl Session {
             "final_delivery": "automatic",
             "operations": [],
             "instance_id": ids["instance_id"],
-            "revision": ids["revision"],
-            "config_digest": ids["config_digest"],
+            "agent_id": ids["agent_id"],
         });
         assert!(subset(&expect, &hello), "hello {hello} !~ {expect}");
         self.captures.insert("hello".into(), hello.clone());
         self.mock.send(&json!({"id": hello["id"], "m": "ok"})).await;
-        if kind == "hello" {
-            return;
-        }
-        assert_eq!(kind, "hello_bind");
-        let bind_id = format!("bind:{}", ids["binding_id"].as_str().unwrap());
-        self.mock
-            .send(&json!({
-                "id": bind_id,
-                "m": "bind",
-                "binding_id": ids["binding_id"],
-                "address": ids["address"],
-            }))
-            .await;
-        let ack = self.mock.recv().await;
-        assert!(
-            subset(&json!({"m": "ok", "id": bind_id}), &ack),
-            "bind ack {ack}"
-        );
+        assert_eq!(kind, "hello", "D-1099: the only prelude is hello");
     }
 
     async fn http_exchange(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
@@ -508,15 +494,15 @@ impl Session {
             }
             "uds_send_padded_say" => {
                 let id = step["id"].as_str().unwrap();
-                let binding_id = step["binding_id"].as_str().unwrap();
+                let session = step["session"].as_str().unwrap();
                 let frame_size = usize::try_from(step["frame_size"].as_u64().unwrap()).unwrap();
                 self.mock
-                    .send_raw(&padded_say_frame(id, binding_id, frame_size))
+                    .send_raw(&padded_say_frame(id, session, frame_size))
                     .await;
             }
             "uds_send_says" => {
                 let count = usize::try_from(step["count"].as_u64().unwrap()).unwrap();
-                let binding_id = step["binding_id"].as_str().unwrap();
+                let session = step["session"].as_str().unwrap();
                 let prefix = step["id_prefix"].as_str().unwrap();
                 let expect_ok = step["expect_ok"].as_bool().unwrap_or(true);
                 for i in 0..count {
@@ -524,7 +510,7 @@ impl Session {
                     let frame = json!({
                         "id": id,
                         "m": "say",
-                        "binding_id": binding_id,
+                        "session": session,
                         "payload": {"text": format!("m{i}")},
                     });
                     self.mock.send(&frame).await;

@@ -3,60 +3,6 @@ use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
-struct FakeGate;
-#[async_trait]
-impl GateReconciler for FakeGate {
-    async fn observe(
-        &self,
-        desired: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(if desired.enabled {
-            opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled
-        } else {
-            opencrab_process_supervisor::lifecycle::CoreObservation::ExactDisabled
-        })
-    }
-
-    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
-        Ok(VerifiedInstance {
-            revision: 4,
-            digest: "digest".into(),
-            bindings: desired.addresses.clone(),
-            enabled: desired.enabled,
-        })
-    }
-}
-
-struct OfflineGate;
-#[async_trait]
-impl GateReconciler for OfflineGate {
-    async fn observe(
-        &self,
-        _: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Unavailable)
-    }
-
-    async fn reconcile(&self, _: &InstanceRow) -> Result<VerifiedInstance> {
-        anyhow::bail!("core server is stopped")
-    }
-}
-
-struct RecoveryGate(opencrab_process_supervisor::lifecycle::CoreObservation);
-#[async_trait]
-impl GateReconciler for RecoveryGate {
-    async fn observe(
-        &self,
-        _: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(self.0)
-    }
-
-    async fn reconcile(&self, _: &InstanceRow) -> Result<VerifiedInstance> {
-        anyhow::bail!("reconciliation not expected during startup matrix")
-    }
-}
-
 struct RecoveryFactory {
     observation: opencrab_process_supervisor::lifecycle::ProcessObservation,
     reaped: Arc<AtomicUsize>,
@@ -162,7 +108,7 @@ fn daemon(
     enabled: bool,
 ) -> (
     tempfile::TempDir,
-    NostrDaemon<FakeGate, FakeFactory>,
+    NostrDaemon<FakeFactory>,
     Arc<AtomicUsize>,
     Arc<Notify>,
 ) {
@@ -188,7 +134,7 @@ fn daemon(
     });
     (
         temp,
-        NostrDaemon::new(store, [9; 32], Arc::new(FakeGate), factory).unwrap(),
+        NostrDaemon::new(store, [9; 32], factory).unwrap(),
         started,
         exit,
     )
@@ -294,14 +240,7 @@ async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped()
         .mark_provisioning("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation)
         .unwrap());
     assert!(store
-        .mark_verified(
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            generation,
-            4,
-            "digest",
-            &["binding".into()],
-            true,
-        )
+        .mark_verified("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation, true)
         .unwrap());
     drop(store);
 
@@ -309,7 +248,6 @@ async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped()
     let daemon = NostrDaemon::new(
         NostrStore::open(&path).unwrap(),
         [9; 32],
-        Arc::new(OfflineGate),
         Arc::new(FakeFactory {
             started: started.clone(),
             exit: Arc::new(Notify::new()),
@@ -349,10 +287,8 @@ async fn s5_nostr_disabled_and_nonready_instances_never_spawn() {
 }
 
 #[tokio::test]
-async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observations() {
-    use opencrab_process_supervisor::lifecycle::{
-        CoreObservation, LifecycleState, ProcessObservation,
-    };
+async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_observations() {
+    use opencrab_process_supervisor::lifecycle::{LifecycleState, ProcessObservation};
     for state in [
         LifecycleState::Disabled,
         LifecycleState::Pending,
@@ -378,9 +314,7 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observati
                 | LifecycleState::Running
                 | LifecycleState::Error
         ) {
-            store
-                .mark_verified(id, generation, 1, "digest", &[], enabled)
-                .unwrap();
+            store.mark_verified(id, generation, enabled).unwrap();
         }
         if matches!(state, LifecycleState::Running) {
             store.record_started(id, generation, 4242, "nonce").unwrap();
@@ -401,11 +335,6 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observati
         let daemon = NostrDaemon::new(
             store,
             [9; 32],
-            Arc::new(RecoveryGate(if enabled {
-                CoreObservation::ExactEnabled
-            } else {
-                CoreObservation::ExactDisabled
-            })),
             Arc::new(RecoveryFactory {
                 observation: if state == LifecycleState::Running {
                     ProcessObservation::ExactLive
@@ -442,9 +371,7 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observati
 
 #[tokio::test]
 async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
-    use opencrab_process_supervisor::lifecycle::{
-        CoreObservation, LifecycleState, ProcessObservation,
-    };
+    use opencrab_process_supervisor::lifecycle::{LifecycleState, ProcessObservation};
     for observation in [ProcessObservation::Missing, ProcessObservation::StaleLive] {
         let temp = tempfile::tempdir().unwrap();
         let store = NostrStore::open(&temp.path().join("owner.db")).unwrap();
@@ -453,16 +380,13 @@ async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
             .upsert_desired(id, "agent", "e30=", &[], "token", true, &[9; 32])
             .unwrap();
         store.mark_provisioning(id, generation).unwrap();
-        store
-            .mark_verified(id, generation, 1, "digest", &[], true)
-            .unwrap();
+        store.mark_verified(id, generation, true).unwrap();
         store.record_started(id, generation, 4242, "nonce").unwrap();
         store.mark_running(id, generation, 4242, "nonce").unwrap();
         let reaped = Arc::new(AtomicUsize::new(0));
         let daemon = NostrDaemon::new(
             store,
             [9; 32],
-            Arc::new(RecoveryGate(CoreObservation::ExactEnabled)),
             Arc::new(RecoveryFactory {
                 observation,
                 reaped: reaped.clone(),
@@ -490,7 +414,7 @@ async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
 }
 
 #[test]
-fn production_placement_uses_gateway_access_and_opaque_core_config() {
+fn production_placement_uses_gateway_access_and_names_the_agent() {
     use crate::config::{decode_config_b64, parse_instance_config, AccessConfig};
     use opencrab_process_supervisor::lifecycle::LifecycleState;
 
@@ -517,9 +441,6 @@ fn production_placement_uses_gateway_access_and_opaque_core_config() {
         desired_generation: 1,
         applied_generation: Some(1),
         lifecycle_state: LifecycleState::Ready,
-        core_revision: Some(4),
-        core_digest: Some("digest".into()),
-        core_bindings: vec![],
         process_id: None,
         process_nonce: None,
         failure_count: 0,
@@ -553,7 +474,14 @@ fn production_placement_uses_gateway_access_and_opaque_core_config() {
     relative.attachment_outbox_root = Some("relative".into());
     assert!(relative.validate().is_err());
     let instance = &value["instances"][0];
-    assert_eq!(instance["core_config_b64"], DEFAULT_CORE_CONFIG_B64);
+    assert!(
+        instance.get("core_config_b64").is_none(),
+        "core keeps no config"
+    );
+    assert_eq!(
+        instance["agent_id"], "agent",
+        "the child says hello with its agent"
+    );
     let cfg = parse_instance_config(
         &decode_config_b64(instance["config_b64"].as_str().unwrap()).unwrap(),
     )
@@ -593,9 +521,6 @@ fn production_placement_fails_loud_without_gateway_access() {
         desired_generation: 1,
         applied_generation: Some(1),
         lifecycle_state: LifecycleState::Ready,
-        core_revision: Some(4),
-        core_digest: Some("digest".into()),
-        core_bindings: vec![],
         process_id: None,
         process_nonce: None,
         failure_count: 0,

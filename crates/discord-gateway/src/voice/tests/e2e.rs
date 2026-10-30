@@ -11,11 +11,12 @@ use tokio::net::UnixListener;
 
 use super::mock_http;
 use crate::config::{AccessConfig, SystemReactions};
-use crate::ops::{BindingDeliveryTargets, DiscordInvokeHandler};
+use crate::ops::{DiscordInvokeHandler, SessionDeliveryTargets};
 use crate::transport::{DiscordTransport, DryRunTransport};
 use crate::voice::session::{VoiceManager, VoiceManagerConfig, VoicePlayer, VOICE_SYSTEM_CONTEXT};
 
-pub(super) const BINDING: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+/// The session key of the test channel (`address_for("agent", "20", "10")`).
+pub(super) const BINDING: &str = "discord-agent-20-10";
 
 #[derive(Default)]
 pub(super) struct FakePlayer {
@@ -95,9 +96,8 @@ pub(super) async fn core() -> Core {
         InstanceClient::connect(
             &connect_path,
             "11111111-1111-4111-8111-111111111111".into(),
-            1,
+            "agent".into(),
             "999".into(),
-            "0".repeat(64),
         )
         .await
         .unwrap()
@@ -110,14 +110,7 @@ pub(super) async fn core() -> Core {
         .unwrap();
     let client = connect.await.unwrap();
     let address = crate::map::address_for("agent", "20", "10");
-    write_json(
-        &mut writer,
-        &json!({"id":"bind-1","m":"bind","binding_id":BINDING,"address":address}),
-    )
-    .await
-    .unwrap();
-    let ok: Value = serde_json::from_slice(&read_frame(&mut reader).await.unwrap()).unwrap();
-    assert_eq!(ok["m"], "ok");
+    assert_eq!(address, BINDING);
     Core {
         reader,
         writer,
@@ -149,7 +142,9 @@ pub(super) fn manager_with(
                 owners: vec!["30".into()],
                 ..Default::default()
             },
-            addresses: vec![core.address.clone()],
+            addresses: std::sync::Arc::new(std::sync::RwLock::new(
+                [core.address.clone()].into_iter().collect(),
+            )),
             settings_path,
         },
         player,
@@ -226,7 +221,7 @@ async fn transcribed_speech_becomes_said_on_the_text_channel() {
     };
     let said: Value = serde_json::from_slice(&read_frame(&mut core.reader).await.unwrap()).unwrap();
     assert_eq!(said["m"], "said");
-    assert_eq!(said["binding_id"], BINDING);
+    assert_eq!(said["session"], BINDING);
     assert!(
         said["origin"]
             .as_str()
@@ -275,7 +270,7 @@ async fn posted_say_and_reply_are_spoken_in_order() {
     assert!(player.played.lock().unwrap().is_empty());
 
     m.join(BINDING, Some("555"), None).await.unwrap();
-    let targets: BindingDeliveryTargets =
+    let targets: SessionDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let transport: Arc<dyn DiscordTransport> = Arc::new(DryRunTransport);
     let consumer = crate::run::spawn_say_consumer(
@@ -290,7 +285,7 @@ async fn posted_say_and_reply_are_spoken_in_order() {
     );
     write_json(
         &mut core.writer,
-        &json!({"id":"s1","m":"say","binding_id":BINDING,"payload":{"text":"こんにちは <@1> https://x.example"}}),
+        &json!({"id":"s1","m":"say","session":BINDING,"payload":{"text":"こんにちは <@1> https://x.example"}}),
     )
     .await
     .unwrap();

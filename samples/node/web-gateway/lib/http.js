@@ -3,13 +3,7 @@
 const http = require("node:http");
 const { parseObject, dump, JsonSyntaxError } = require("./json");
 const { parseUuid } = require("./wire");
-const {
-  connectionLive,
-  rememberedBinding,
-  bindingForAddress,
-  postSaid,
-  nextLive,
-} = require("./client");
+const { connectionLive, postSaid, nextLive } = require("./client");
 
 const JSON_TYPE = "application/json; charset=utf-8";
 
@@ -29,33 +23,17 @@ function gone(res) {
   res.end();
 }
 
-function findClient(instances, address) {
-  const hits = [];
-  for (const inst of instances) {
-    if (bindingForAddress(inst, address)) {
-      hits.push(inst);
-    }
-  }
-  if (hits.length === 0) {
+// D-1099: the gateway's own record says which instance owns a conversation (session key).
+function findClient(gateway, session) {
+  const owner = gateway.conversations.get(session);
+  if (!owner) {
     return { none: true };
   }
-  if (hits.length === 1) {
-    return { client: hits[0] };
+  const client = gateway.instances.find((inst) => inst.instanceId === owner);
+  if (!client) {
+    return { unavailable: true };
   }
-  return { ambiguous: true };
-}
-
-function udsDisconnected(instances, address) {
-  let anyLive = false;
-  for (const inst of instances) {
-    if (connectionLive(inst)) {
-      anyLive = true;
-    }
-    if (rememberedBinding(inst, address) && !connectionLive(inst)) {
-      return true;
-    }
-  }
-  return !anyLive && instances.length > 0;
+  return { client };
 }
 
 function parseAttachments(value) {
@@ -109,13 +87,11 @@ function wireStatus(code) {
   switch (code) {
     case "bad_request":
       return 400;
-    case "binding_unknown":
-    case "instance_unknown":
+    case "subject_unknown":
       return 404;
     case "instance_not_ready":
-    case "binding_closed":
-    case "instance_disabled":
-    case "binding_conflict":
+    case "instance_conflict":
+    case "instance_active":
       return 409;
     case "store_error":
       return 500;
@@ -147,7 +123,7 @@ function sseError(res, code) {
   res.end();
 }
 
-async function postMessage(instances, sessionId, req, res) {
+async function postMessage(gateway, sessionId, req, res) {
   const bytes = await readBody(req);
   const parsed = parsePostBody(bytes);
   if (!parsed) {
@@ -155,14 +131,17 @@ async function postMessage(instances, sessionId, req, res) {
     return;
   }
   const origin = `web:${parsed.clientMessageId}`;
-  const found = findClient(instances, sessionId);
+  const found = findClient(gateway, sessionId);
   if (found.none) {
-    const code = udsDisconnected(instances, sessionId) ? "disconnect" : "instance_not_ready";
-    jsonError(res, 503, code, null);
+    gone(res);
     return;
   }
-  if (found.ambiguous) {
-    jsonError(res, 409, "binding_conflict", null);
+  if (found.unavailable) {
+    jsonError(res, 503, "instance_not_ready", null);
+    return;
+  }
+  if (!connectionLive(found.client)) {
+    jsonError(res, 503, "disconnect", null);
     return;
   }
   const outcome = await postSaid(found.client, sessionId, origin, parsed.text, parsed.attachments);
@@ -197,18 +176,14 @@ async function postMessage(instances, sessionId, req, res) {
   }
 }
 
-async function getEvents(instances, sessionId, req, res) {
-  const found = findClient(instances, sessionId);
+async function getEvents(gateway, sessionId, req, res) {
+  const found = findClient(gateway, sessionId);
   if (found.none) {
-    if (udsDisconnected(instances, sessionId)) {
-      sseError(res, "disconnect");
-      return;
-    }
-    jsonError(res, 503, "instance_not_ready", null);
+    gone(res);
     return;
   }
-  if (found.ambiguous) {
-    jsonError(res, 409, "binding_conflict", null);
+  if (found.unavailable || !connectionLive(found.client)) {
+    sseError(res, "disconnect");
     return;
   }
   res.writeHead(200, {
@@ -266,7 +241,7 @@ function matchPath(pathname) {
   return { kind: "missing" };
 }
 
-function listenHttp(bind, instances) {
+function listenHttp(bind, gateway) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
     const route = matchPath(url.pathname);
@@ -276,11 +251,11 @@ function listenHttp(bind, instances) {
         return;
       }
       if (route.kind === "messages" && req.method === "POST") {
-        await postMessage(instances, route.sessionId, req, res);
+        await postMessage(gateway, route.sessionId, req, res);
         return;
       }
       if (route.kind === "events" && req.method === "GET") {
-        await getEvents(instances, route.sessionId, req, res);
+        await getEvents(gateway, route.sessionId, req, res);
         return;
       }
       gone(res);

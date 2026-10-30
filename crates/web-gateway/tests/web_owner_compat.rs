@@ -35,6 +35,7 @@ async fn d_1006_web_01_existing_instance_starts_without_bearer_or_web_master_key
         database_path,
         admin_socket: admin_socket.clone(),
         admin_instance_ids: vec!["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into()],
+        conversations_path: None,
     };
     let mut owner = tokio::spawn(run(config));
     tokio::time::timeout(Duration::from_secs(2), async {

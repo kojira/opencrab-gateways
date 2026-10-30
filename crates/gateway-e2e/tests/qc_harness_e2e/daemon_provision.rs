@@ -1,10 +1,8 @@
-// ==================== D-1098: the Nostr daemon provisions and reaches hello ok ====================
+// ==================== D-1099: the Nostr daemon starts a child that reaches hello ok ====================
 
 mod nostr_daemon_provision {
     use super::*;
-    use opencrab_nostr_gateway::daemon::{
-        NostrDaemon, ProductionFactory, ProvisionReconciler, SpawnerFactory,
-    };
+    use opencrab_nostr_gateway::daemon::{NostrDaemon, ProductionFactory, SpawnerFactory};
     use opencrab_nostr_gateway::store::{InstanceRow, NostrStore};
     use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
 
@@ -80,11 +78,11 @@ mod nostr_daemon_provision {
         }
     }
 
-    /// Test 5: a Nostr instance in the daemon's store is provisioned in core with no core
-    /// credential, its child says `hello` with the provisioned revision and core accepts it
-    /// (the address is bound, which core does only after `hello ok`).
+    /// Test 5: a Nostr instance in the daemon's store starts a child that says `hello` with its
+    /// instance and agent; core accepts it and creates the instance (nothing registered first,
+    /// no core credential).
     #[tokio::test]
-    async fn d1098_a_nostr_instance_is_provisioned_and_reaches_hello_ok() {
+    async fn d1099_a_nostr_instance_reaches_hello_ok() {
         let core = start_core(Arc::new(RoutedMock::new()) as Arc<dyn LlmProvider>).await;
         let dir = tempfile::Builder::new()
             .prefix("nd")
@@ -119,7 +117,6 @@ mod nostr_daemon_provision {
         let daemon = NostrDaemon::new(
             store,
             key,
-            Arc::new(ProvisionReconciler::new(core.sock.clone(), "nostr")),
             Arc::new(InProcess {
                 production: ProductionFactory {
                     child_binary: "/bin/true".into(),
@@ -132,36 +129,33 @@ mod nostr_daemon_provision {
             }),
         )
         .unwrap();
-        let mut bound = None;
+        let mut connected = None;
         for _ in 0..200 {
             daemon.reconcile_once().await.unwrap();
             let client = clients.lock().unwrap().last().cloned();
             if let Some(client) = client {
-                if let Some(binding) = client.binding_for_address(&address).await {
-                    bound = Some(binding);
+                if client.connection_live().await {
+                    connected = Some(client);
                     break;
                 }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let binding_id = bound.expect("hello ok and bound");
-        assert_eq!(
-            binding_id,
-            opencrab_gate_client::provision::binding_id_for(&instance_id, &address).unwrap()
-        );
-        let (kind, config): (String, String) = core
+        let client = connected.expect("hello ok");
+        let instances: i64 = core
             .extgate
             .db
             .lock()
             .unwrap()
             .query_row(
-                "SELECT kind_id, config_b64 FROM gate_instances WHERE instance_id=?1",
+                "SELECT COUNT(*) FROM gate_instances WHERE instance_id=?1",
                 [&instance_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(kind, "nostr");
-        assert_eq!(config, "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==");
+        assert_eq!(instances, 1, "the hello created the instance in core");
+        let session = client.open(&address, None).await.expect("open");
+        assert_eq!(session, address, "a new key becomes the session id");
         daemon.shutdown().await;
     }
 }

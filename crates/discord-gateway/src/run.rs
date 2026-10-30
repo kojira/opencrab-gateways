@@ -1,7 +1,8 @@
 //! 1 instance の UDS client・受信ループ・say consumer を束ねる（設計 §0・§4.3・§5・§6）。
 //!
-//! Nostr gateway と違い timeline/bundle 車線は無い。1 channel = 1 binding、1 Message Create = 1 said。
-//! 受信は serenity（または fake fixture）を 1 本回し、ack 済み binding の channel だけ said にする。
+//! Nostr gateway と違い timeline/bundle 車線は無い。1 channel = 1 core session（session key は
+//! channel address）、1 Message Create = 1 said。受信は serenity（または fake fixture）を 1 本回し、
+//! この bot が聞いている channel（gateway の address 集合）だけ said にする（D-1099）。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use crate::harness::HarnessOverrides;
 use crate::map::{address_for, address_of, map_message, parse_address, parse_event_line};
 use crate::model::{InteractionAction, ModelInteractionEvent, COMMAND_TIMEOUT};
 use crate::ops::{
-    operation_declarations, targets_for, BindingDeliveryTargets, DiscordInvokeHandler,
+    operation_declarations, targets_for, DiscordInvokeHandler, SessionDeliveryTargets,
 };
 use crate::post::{deliver_say, SayDelivery};
 use crate::receive::{run_fake_events_once, run_serenity_receive, OnLine};
@@ -81,8 +82,6 @@ pub fn spawn_instance_with_voice(
         );
     }
     let cfg = parse_instance_config(config_bytes)?;
-    // D-1097 D2: the digest of what core holds (`InstancePlacement::hello_digest`).
-    let digest = place.hello_digest()?;
 
     // transport: dry-run（REST を叩かずログ）か production（serenity REST・token 保持）。
     // say も invoke も同一 transport を通すので dry-run 分岐は 1 箇所。
@@ -98,6 +97,8 @@ pub fn spawn_instance_with_voice(
             (serenity, Some(http))
         };
 
+    // The channels this bot listens to (= core session keys). Owner mentions add to it.
+    let listening = owner_mention::listening(&place.addresses);
     let songbird = (serenity_http.is_some() && overrides.fake_events.is_none())
         .then(|| songbird::Songbird::serenity_from_config(songbird_config()));
     let voice = voice_settings
@@ -108,14 +109,14 @@ pub fn spawn_instance_with_voice(
                     agent_id: cfg.agent_id.clone(),
                     self_bot_id: cfg.self_bot_id.clone(),
                     access: cfg.access.clone(),
-                    addresses: place.addresses.clone(),
+                    addresses: listening.clone(),
                     settings_path,
                 },
                 Arc::new(SongbirdPlayer::new(songbird)),
                 transport.clone(),
             )
         });
-    let delivery_targets: BindingDeliveryTargets =
+    let delivery_targets: SessionDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let invoke_handler = DiscordInvokeHandler::with_voice(
         transport.clone(),
@@ -136,9 +137,8 @@ pub fn spawn_instance_with_voice(
     let client = InstanceClient::spawn_with_operations_and_env(
         socket,
         place.instance_id.clone(),
-        place.revision,
+        cfg.agent_id.clone(),
         cfg.self_bot_id.clone(),
-        digest,
         SayPolicy::AcceptToLiveQueue,
         Some(operation_declarations(attachment_outbox_root.is_some())),
         opencrab_gate_client::RuntimeCapabilities {
@@ -171,6 +171,7 @@ pub fn spawn_instance_with_voice(
     supervise(Supervision {
         client: client.clone(),
         addresses: place.addresses.clone(),
+        listening: listening.clone(),
         channel_socket: place.channel_socket.clone(),
         cfg,
         transport,
@@ -189,12 +190,13 @@ pub fn spawn_instance_with_voice(
 struct Supervision {
     client: Arc<InstanceClient>,
     addresses: Vec<String>,
+    listening: owner_mention::Listening,
     channel_socket: Option<PathBuf>,
     cfg: InstanceConfig,
     transport: Arc<dyn DiscordTransport>,
     token: Option<Arc<String>>,
     overrides: HarnessOverrides,
-    delivery_targets: BindingDeliveryTargets,
+    delivery_targets: SessionDeliveryTargets,
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
     songbird: Option<Arc<songbird::Songbird>>,
@@ -206,6 +208,7 @@ fn supervise(supervision: Supervision) {
     let Supervision {
         client,
         addresses,
+        listening,
         channel_socket,
         cfg,
         transport,
@@ -238,12 +241,12 @@ fn supervise(supervision: Supervision) {
         cfg.agent_id.clone(),
         cfg.self_bot_id.clone(),
         cfg.access.clone(),
-        addresses.clone(),
         attachment_spool,
         serenity_http,
         voice.clone(),
         (
             activity_store.clone(),
+            listening,
             channel_socket,
             Some(start_say.clone()),
         ),
@@ -268,9 +271,11 @@ fn supervise(supervision: Supervision) {
     }
 }
 
-/// Activity store, channel-request socket and say-consumer starter of one instance.
+/// Activity store, listened channels, channel-request socket and say-consumer starter of one
+/// instance.
 type ChannelParts = (
     Option<crate::webhook::RouteStore>,
+    owner_mention::Listening,
     Option<PathBuf>,
     Option<owner_mention::SayConsumers>,
 );
@@ -281,11 +286,10 @@ fn build_on_line(
     agent_id: String,
     self_bot_id: String,
     access: AccessConfig,
-    configured_addresses: Vec<String>,
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
     voice: Option<Arc<VoiceManager>>,
-    (activity_store, channel_socket, say_consumers): ChannelParts,
+    (activity_store, listening, channel_socket, say_consumers): ChannelParts,
 ) -> OnLine {
     let model_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     Arc::new(move |line: String| {
@@ -293,7 +297,6 @@ fn build_on_line(
         let agent_id = agent_id.clone();
         let self_bot_id = self_bot_id.clone();
         let access = access.clone();
-        let configured_addresses = configured_addresses.clone();
         let attachment_spool = attachment_spool.clone();
         let serenity_http = serenity_http.clone();
         let model_cache = model_cache.clone();
@@ -301,7 +304,15 @@ fn build_on_line(
         let activity_store = activity_store.clone();
         let channel_socket = channel_socket.clone();
         let say_consumers = say_consumers.clone();
+        let listening = listening.clone();
         tokio::spawn(async move {
+            // Slash commands answer in the channels this bot listens to right now.
+            let configured_addresses: Vec<String> = listening
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .cloned()
+                .collect();
             let gate = (
                 &*client,
                 agent_id.as_str(),
@@ -338,14 +349,16 @@ fn build_on_line(
                     return;
                 }
             }
-            let mention = (&*client, agent_id.as_str(), self_bot_id.as_str(), &access);
-            let enable = (channel_socket.as_deref(), say_consumers.as_ref());
+            let mention = (agent_id.as_str(), self_bot_id.as_str(), &access);
+            let enable = (
+                &listening,
+                channel_socket.as_deref(),
+                say_consumers.as_ref(),
+            );
             owner_mention::maybe_enable(mention, enable, &line).await;
             handle_incoming(
                 &client,
-                &agent_id,
-                &self_bot_id,
-                &access,
+                (&agent_id, &self_bot_id, &access, &listening),
                 &line,
                 attachment_spool.as_deref(),
                 voice.as_deref(),
@@ -363,9 +376,12 @@ pub(crate) use caller::caller_for;
 /// 受理された人間の発言者は VC 参加の呼びかけ手として `voice` に覚えさせる（D-1072）。
 pub(crate) async fn handle_incoming(
     client: &InstanceClient,
-    agent_id: &str,
-    self_bot_id: &str,
-    access: &AccessConfig,
+    (agent_id, self_bot_id, access, listening): (
+        &str,
+        &str,
+        &AccessConfig,
+        &owner_mention::Listening,
+    ),
     line: &str,
     attachment_spool: Option<&AttachmentSpool>,
     voice: Option<&VoiceManager>,
@@ -378,9 +394,9 @@ pub(crate) async fn handle_incoming(
         return;
     };
     let address = address_of(agent_id, &msg);
-    // 購読集合: core が bind ack した channel だけを said にする（wire discovery を追加しない）。
-    if client.binding_for_address(&address).await.is_none() {
-        tracing::debug!(%address, "message outside ack'd binding; discarded (no core frame)");
+    // 購読集合: この bot が聞いている channel だけを said にする（gateway の状態・D-1099）。
+    if !owner_mention::listens(listening, &address) {
+        tracing::debug!(%address, "message outside listened channels; discarded (no core frame)");
         return;
     }
     let mut text = mapped.text;
@@ -418,6 +434,8 @@ pub(crate) async fn handle_incoming(
         start_turn: true,
         system_context: None,
         reply_target: None,
+        // D-1099: the message id is what replies and eN references point at.
+        reference: Some(msg.id.clone()),
         live_inbound_scope: LiveInboundScope::All,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
         agent_prelude: None,
@@ -447,6 +465,7 @@ pub(crate) async fn handle_incoming(
         }
         Ok(SaidOutcome::NotAdmitted) => tracing::info!(%address, "said not admitted"),
         Ok(SaidOutcome::Disconnected) => tracing::info!(%address, "said disconnected"),
+        Ok(SaidOutcome::Opened { .. }) => tracing::warn!(%address, "said answered as open"),
         Ok(SaidOutcome::WireErr { code, detail }) => {
             tracing::warn!(%address, code, ?detail, "said wire err")
         }
@@ -476,10 +495,8 @@ async fn deliver_activity_turn(
     let (Some(activity), Some(channel)) = (activity, channel) else {
         return;
     };
-    let Some(binding_id) = client.binding_for_address(address).await else {
-        return;
-    };
-    activity.flush(&binding_id, agent_id, channel);
+    let _ = client;
+    activity.flush(address, agent_id, channel);
 }
 
 /// 活動イベント 1 件を、その場でセッション宛先へ配送する（D-1087）。
@@ -497,10 +514,8 @@ async fn deliver_activity_event(
     let (Some(activity), Some(channel)) = (activity, channel) else {
         return;
     };
-    let Some(binding_id) = client.binding_for_address(address).await else {
-        return;
-    };
-    activity.event(&binding_id, agent_id, channel, item);
+    let _ = client;
+    activity.event(address, agent_id, channel, item);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -510,7 +525,7 @@ pub(crate) fn spawn_say_consumer(
     transport: Arc<dyn DiscordTransport>,
     agent_id: String,
     reactions: SystemReactions,
-    delivery_targets: BindingDeliveryTargets,
+    delivery_targets: SessionDeliveryTargets,
     voice: Option<Arc<VoiceManager>>,
     activity: Option<Arc<crate::webhook::ActivityDelivery>>,
 ) -> tokio::task::JoinHandle<()> {
@@ -547,14 +562,11 @@ pub(crate) fn spawn_say_consumer(
                                 voice.speak_say(channel, &text, stream_id.as_deref());
                             }
                             if let Some(own) = &message_id {
-                                if let Some(binding_id) = client.binding_for_address(&address).await
-                                {
-                                    targets_for(&delivery_targets, &binding_id)
-                                        .await
-                                        .lock()
-                                        .await
-                                        .insert(delivery_id, (channel.clone(), own.clone()));
-                                }
+                                targets_for(&delivery_targets, &address)
+                                    .await
+                                    .lock()
+                                    .await
+                                    .insert(delivery_id, (channel.clone(), own.clone()));
                             } else {
                                 tracing::debug!(%address, "posted say has no message id");
                             }
@@ -678,16 +690,11 @@ pub(crate) fn spawn_say_consumer(
                         channel.as_deref(),
                     )
                     .await;
-                    let location =
-                        if let Some(binding_id) = client.binding_for_address(&address).await {
-                            targets_for(&delivery_targets, &binding_id)
-                                .await
-                                .lock()
-                                .await
-                                .remove(&target)
-                        } else {
-                            None
-                        };
+                    let location = targets_for(&delivery_targets, &address)
+                        .await
+                        .lock()
+                        .await
+                        .remove(&target);
                     if let Some((target_channel, message)) = location {
                         react_system_on(
                             &transport,
@@ -739,7 +746,7 @@ pub(crate) fn spawn_say_consumer(
 
 mod caller;
 mod model_command;
-mod owner_mention;
+pub(crate) mod owner_mention;
 mod reactions;
 #[cfg(test)]
 mod silent_origin_tests;

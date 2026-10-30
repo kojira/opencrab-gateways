@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 pub struct DaemonConfig {
     pub database_path: PathBuf,
     pub admin_socket: PathBuf,
-    /// Core's gate socket: the daemon provisions instances on it and the children connect to it.
+    /// Core's gate socket, handed to the children (the daemon itself does not connect).
     pub core_socket: PathBuf,
     pub child_binary: PathBuf,
     pub placement_dir: PathBuf,
@@ -33,16 +33,11 @@ fn default_reconcile_millis() -> u64 {
     1_000
 }
 
-// Core retains only generic final-delivery compatibility. Runtime Nostr config and
-// gateway admission authority stay gateway-owned. Nostr has a single contract:
-// plain text is delivered normally and operations are available only when the
-// model wants to target a specific post.
-const DEFAULT_CORE_CONFIG_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==";
-
-fn core_config_b64_for_runtime_config(config_b64: &str) -> Result<String> {
+/// Validates a Nostr instance config (the daemon refuses to start an instance it cannot run).
+fn validate_runtime_config(config_b64: &str) -> Result<()> {
     let _value: serde_json::Value = serde_json::from_slice(&config::decode_config_b64(config_b64)?)
         .context("runtime config is not valid JSON")?;
-    Ok(DEFAULT_CORE_CONFIG_B64.to_string())
+    Ok(())
 }
 
 fn retry_deadline(row: &InstanceRow) -> i64 {
@@ -80,78 +75,6 @@ impl DaemonConfig {
             "reconcile_millis must be positive"
         );
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct VerifiedInstance {
-    pub revision: u64,
-    pub digest: String,
-    pub bindings: Vec<String>,
-    pub enabled: bool,
-}
-
-#[async_trait]
-pub trait GateReconciler: Send + Sync {
-    async fn observe(
-        &self,
-        desired: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation>;
-
-    /// Makes core hold `desired` and returns what the child's `hello` must carry.
-    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance>;
-}
-
-/// D-1098: provisions an instance on core's gate socket (credential-less `provision` frame,
-/// before the child's `hello`). Core gets the fixed neutral config and the instance's address.
-pub struct ProvisionReconciler {
-    client: opencrab_gate_client::provision::ProvisionClient,
-    kind_id: String,
-}
-
-impl ProvisionReconciler {
-    pub fn new(core_socket: PathBuf, kind_id: impl Into<String>) -> Self {
-        Self {
-            client: opencrab_gate_client::provision::ProvisionClient::new(core_socket),
-            kind_id: kind_id.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl GateReconciler for ProvisionReconciler {
-    /// Core has no read side for gateways; startup decides from the process alone and the next
-    /// provision converges core.
-    async fn observe(
-        &self,
-        _desired: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Unavailable)
-    }
-
-    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
-        let core_config_b64 = core_config_b64_for_runtime_config(&desired.config_b64)?;
-        let provisioned = self
-            .client
-            .provision(&opencrab_gate_client::provision::ProvisionDesired {
-                instance_id: &desired.instance_id,
-                kind_id: &self.kind_id,
-                agent_id: &desired.agent_id,
-                enabled: desired.enabled,
-                config_b64: &core_config_b64,
-                addresses: &desired.addresses,
-            })
-            .await?;
-        Ok(VerifiedInstance {
-            revision: provisioned.revision,
-            digest: provisioned.config_digest,
-            bindings: provisioned
-                .bindings
-                .into_iter()
-                .map(|binding| binding.binding_id)
-                .collect(),
-            enabled: provisioned.enabled,
-        })
     }
 }
 
@@ -221,30 +144,22 @@ impl StoreObserver {
     }
 }
 
-pub struct NostrDaemon<R, F> {
+pub struct NostrDaemon<F> {
     store: Arc<Mutex<NostrStore>>,
     key: Arc<[u8; 32]>,
-    reconciler: Arc<R>,
     factory: Arc<F>,
     supervisors: Arc<ProcessSupervisorSet>,
     startup_recovered: std::sync::atomic::AtomicBool,
 }
 
-impl<R, F> NostrDaemon<R, F>
+impl<F> NostrDaemon<F>
 where
-    R: GateReconciler + 'static,
     F: SpawnerFactory + 'static,
 {
-    pub fn new(
-        store: NostrStore,
-        key: [u8; 32],
-        reconciler: Arc<R>,
-        factory: Arc<F>,
-    ) -> Result<Self> {
+    pub fn new(store: NostrStore, key: [u8; 32], factory: Arc<F>) -> Result<Self> {
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             key: Arc::new(key),
-            reconciler,
             factory,
             supervisors: ProcessSupervisorSet::new(SupervisorConfig::daemon_owned()),
             startup_recovered: std::sync::atomic::AtomicBool::new(false),
@@ -270,12 +185,10 @@ where
                 .factory
                 .observe_process(&row)
                 .unwrap_or(ProcessObservation::Unknown);
-            let core = self
-                .reconciler
-                .observe(&row)
-                .await
-                .unwrap_or(CoreObservation::Unavailable);
-            let decision = row.lifecycle().recover(now, process, core);
+            // D-1099: core holds nothing to compare against.
+            let decision = row
+                .lifecycle()
+                .recover(now, process, CoreObservation::Unavailable);
             if !matches!(decision, StartupDecision::AdoptRunning) {
                 let _ = self.factory.reap_stale(&row);
                 let _ = self.factory.cleanup_artifacts(&row);
@@ -345,32 +258,26 @@ where
                     {
                         continue;
                     }
-                    let verified = match self.reconciler.reconcile(&row).await {
-                        Ok(value) => value,
-                        Err(error) => {
-                            self.factory.cleanup_artifacts(&row)?;
-                            self.store.lock().unwrap().mark_error(
-                                &row.instance_id,
-                                row.desired_generation,
-                                "reconciliation_failed",
-                                retry_deadline(&row),
-                            )?;
-                            tracing::warn!(instance_id = %row.instance_id, error = %error, "instance reconciliation failed");
-                            continue;
-                        }
-                    };
+                    if let Err(error) = validate_runtime_config(&row.config_b64) {
+                        self.factory.cleanup_artifacts(&row)?;
+                        self.store.lock().unwrap().mark_error(
+                            &row.instance_id,
+                            row.desired_generation,
+                            "invalid_config",
+                            retry_deadline(&row),
+                        )?;
+                        tracing::warn!(instance_id = %row.instance_id, error = %error, "instance config invalid");
+                        continue;
+                    }
                     anyhow::ensure!(
                         self.store.lock().unwrap().mark_verified(
                             &row.instance_id,
                             row.desired_generation,
-                            verified.revision,
-                            &verified.digest,
-                            &verified.bindings,
-                            verified.enabled,
+                            row.enabled,
                         )?,
                         "stale lifecycle verification commit"
                     );
-                    if verified.enabled {
+                    if row.enabled {
                         if let Err(error) = self.start_ready(&row.instance_id).await {
                             self.factory.cleanup_artifacts(&row)?;
                             self.store.lock().unwrap().mark_error(
@@ -654,7 +561,6 @@ impl SpawnerFactory for ProductionFactory {
         credential: zeroize::Zeroizing<Vec<u8>>,
         start_nonce: &str,
     ) -> Result<Arc<dyn ChildSpawner>> {
-        let revision = row.core_revision.context("verified revision missing")?;
         std::fs::create_dir_all(&self.placement_dir)?;
         let path = self.placement_dir.join(format!("{}.json", row.instance_id));
         anyhow::ensure!(
@@ -665,16 +571,14 @@ impl SpawnerFactory for ProductionFactory {
             &row.config_b64,
             row.access.clone(),
         )?;
-        let core_config_b64 = core_config_b64_for_runtime_config(&runtime_config_b64)?;
         let value = serde_json::json!({
             "core_socket": self.core_socket,
             "nostaro_bin": self.nostaro_bin,
             "attachment_outbox_root": self.attachment_outbox_root,
             "control_socket":self.control_socket(row,"").expect("production control socket"),
             "start_nonce":start_nonce,
-            "instances": [{"instance_id":row.instance_id,"revision":revision,
-                "address":row.addresses[0],"config_b64":runtime_config_b64,
-                "core_config_b64": core_config_b64}]
+            "instances": [{"instance_id":row.instance_id,"agent_id":row.agent_id,
+                "address":row.addresses[0],"config_b64":runtime_config_b64}]
         });
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
@@ -706,10 +610,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let daemon = NostrDaemon::new(
         store,
         raw,
-        Arc::new(ProvisionReconciler::new(
-            config.core_socket.clone(),
-            "nostr",
-        )),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),

@@ -12,7 +12,6 @@ const AUTHOR: &str = "e2e-owner";
 const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
 const CLIENT_MSG: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const REPLY: &str = "e2e-reply-from-mock";
-const CONFIG_B64: &str = "eyJhdXRob3JfaWQiOiJlMmUtb3duZXIifQ==";
 
 struct Proc(Child);
 impl Drop for Proc {
@@ -401,7 +400,7 @@ fn seed_core(root: &Path, db: &Path, sock: &Path, core_port: u16, llm_port: u16)
     )
     .expect("model pricing");
     assert_eq!(st, 200, "model-pricing {body}");
-    provision_web(sock, &[]);
+    let _ = sock;
     core
 }
 
@@ -410,8 +409,9 @@ fn spawn_gateway(root: &Path, sock: &Path, gw_port: u16) -> Proc {
     std::fs::write(
         &placement,
         format!(
-            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
-            sock.display()
+            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","conversations_path":"{}","instances":[{{"instance_id":"{INSTANCE}","agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
+            sock.display(),
+            root.join("web-conversations.db").display()
         ),
     )
     .unwrap();
@@ -437,7 +437,8 @@ fn wait_tcp(port: u16, timeout: Duration) -> bool {
     false
 }
 
-fn counts(db: &Path) -> (i64, i64, i64) {
+/// (web sessions, agent memberships) in core.
+fn counts(db: &Path) -> (i64, i64) {
     let conn = Connection::open(db).unwrap();
     let sessions: i64 = conn
         .query_row(
@@ -449,52 +450,27 @@ fn counts(db: &Path) -> (i64, i64, i64) {
     let members: i64 = conn
         .query_row("SELECT COUNT(*) FROM agent_sessions", [], |r| r.get(0))
         .unwrap();
-    let bindings: i64 = conn
-        .query_row("SELECT COUNT(*) FROM gate_bindings", [], |r| r.get(0))
-        .unwrap();
-    (sessions, members, bindings)
+    (sessions, members)
 }
 
-/// D-1098: declares the web instance (and its complete binding set) on core's gate socket the
-/// way a gateway does before `hello`. Returns the binding ids core reports, per address.
-fn provision_web(sock: &Path, addresses: &[String]) -> Vec<String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+/// Creates a conversation through the gateway, retrying while its core connection comes up.
+fn create(gw_port: u16, name: &str) -> serde_json::Value {
     let start = Instant::now();
-    let provisioned = loop {
-        let attempt = runtime.block_on(
-            opencrab_gate_client::provision::ProvisionClient::new(sock.to_path_buf()).provision(
-                &opencrab_gate_client::provision::ProvisionDesired {
-                    instance_id: INSTANCE,
-                    kind_id: "web",
-                    agent_id: AGENT,
-                    enabled: true,
-                    config_b64: CONFIG_B64,
-                    addresses,
-                },
-            ),
-        );
-        match attempt {
-            Ok(provisioned) => break provisioned,
-            Err(error) if start.elapsed() > Duration::from_secs(15) => {
-                panic!("provision: {error:#}")
+    loop {
+        if let Some((st, body)) = http(
+            gw_port,
+            "POST",
+            "/api/web-conversations",
+            None,
+            Some(&format!(r#"{{"agent_id":"{AGENT}","name":"{name}"}}"#)),
+            Duration::from_secs(10),
+        ) {
+            if st == 201 {
+                return serde_json::from_str(body.trim()).unwrap();
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            assert_eq!(st, 503, "unexpected create status {st} {body}");
         }
-    };
-    assert_eq!(provisioned.revision, 1, "the placement says revision 1");
-    addresses
-        .iter()
-        .map(|address| {
-            provisioned
-                .bindings
-                .iter()
-                .find(|binding| &binding.address == address)
-                .expect("provisioned binding")
-                .binding_id
-                .clone()
-        })
-        .collect()
+        assert!(start.elapsed() < Duration::from_secs(30), "create never ready");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

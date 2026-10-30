@@ -1,6 +1,6 @@
 {
-  "name": "hello-bind-said-dedup",
-  "prelude": "hello_bind",
+  "name": "hello-said-dedup",
+  "prelude": "hello",
   "steps": [
     {
       "op": "http_post_async",
@@ -19,7 +19,7 @@
         "m": "said",
         "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         "author_id": "owner-1",
-        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        "session": "web-agent-conv"
       }
     },
     {

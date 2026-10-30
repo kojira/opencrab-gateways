@@ -26,16 +26,16 @@ use crate::voice::session::VoiceManager;
 /// reply call_id をそのまま使う。
 pub(crate) type DeliveryTargets = Arc<Mutex<HashMap<String, (String, String)>>>;
 /// 1 instance が複数 binding を持てるため、binding ごとの対応表を共有する。
-pub(crate) type BindingDeliveryTargets = Arc<Mutex<HashMap<String, DeliveryTargets>>>;
+pub(crate) type SessionDeliveryTargets = Arc<Mutex<HashMap<String, DeliveryTargets>>>;
 
 pub(crate) async fn targets_for(
-    targets: &BindingDeliveryTargets,
-    binding_id: &str,
+    targets: &SessionDeliveryTargets,
+    session_key: &str,
 ) -> DeliveryTargets {
     targets
         .lock()
         .await
-        .entry(binding_id.to_string())
+        .entry(session_key.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())))
         .clone()
 }
@@ -141,7 +141,7 @@ fn reply_input(reply_files: bool) -> Value {
 /// Discord の invoke handler。短縮参照解決済み payload を Discord REST（transport）へ写す。
 pub struct DiscordInvokeHandler {
     transport: Arc<dyn DiscordTransport>,
-    targets: BindingDeliveryTargets,
+    targets: SessionDeliveryTargets,
     voice: Option<Arc<VoiceManager>>,
     /// core の outbox（`attachment_outbox_root`）。None なら reply の `files` は Rejected。
     outbox_root: Option<PathBuf>,
@@ -154,7 +154,7 @@ impl DiscordInvokeHandler {
 
     pub(crate) fn with_voice(
         transport: Arc<dyn DiscordTransport>,
-        targets: BindingDeliveryTargets,
+        targets: SessionDeliveryTargets,
         voice: Option<Arc<VoiceManager>>,
     ) -> Self {
         Self {
@@ -242,7 +242,7 @@ impl InvokeHandler for DiscordInvokeHandler {
     async fn handle(
         &self,
         call_id: &str,
-        binding_id: &str,
+        session_key: &str,
         operation: &str,
         payload: &Value,
     ) -> InvokeOutcome {
@@ -266,7 +266,7 @@ impl InvokeHandler for DiscordInvokeHandler {
                 }
                 if let TransportOutcome::Ok(result) = &outcome {
                     if let Some(message_id) = result.get("message_id").and_then(Value::as_str) {
-                        targets_for(&self.targets, binding_id)
+                        targets_for(&self.targets, session_key)
                             .await
                             .lock()
                             .await
@@ -318,13 +318,13 @@ impl InvokeHandler for DiscordInvokeHandler {
                 let Some(voice) = &self.voice else {
                     return voice_outcome(Err("voice is not available in this gateway".into()));
                 };
-                voice_outcome(voice.join(binding_id, channel, text_channel).await)
+                voice_outcome(voice.join(session_key, channel, text_channel).await)
             }
             "leave_voice" => {
                 let Some(voice) = &self.voice else {
                     return voice_outcome(Err("voice is not available in this gateway".into()));
                 };
-                voice_outcome(voice.leave(binding_id).await)
+                voice_outcome(voice.leave(session_key).await)
             }
             // 宣言外は正常な core からは来ない。fail-closed（§5.1）。
             _ => InvokeOutcome::Rejected,
@@ -488,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_successful_reply_registers_completed_target() {
-        let targets: BindingDeliveryTargets = Arc::new(Mutex::new(HashMap::new()));
+        let targets: SessionDeliveryTargets = Arc::new(Mutex::new(HashMap::new()));
         let h =
             DiscordInvokeHandler::with_voice(Arc::new(DryRunTransport), Arc::clone(&targets), None);
         assert!(matches!(

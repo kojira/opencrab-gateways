@@ -1,6 +1,6 @@
 {
   "name": "http-post-and-routes",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "http_post_async",

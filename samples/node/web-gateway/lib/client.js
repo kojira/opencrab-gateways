@@ -20,8 +20,6 @@ const RECONNECT_MAX_MS = 8_000;
 
 function blankInner() {
   return {
-    acknowledged: new Map(),
-    remembered: new Map(),
     pendingSaid: new Map(),
     pendingTurn: new Map(),
     live: new Map(),
@@ -30,9 +28,10 @@ function blankInner() {
   };
 }
 
-function createClient(instanceId, authorId) {
+function createClient(instanceId, agentId, authorId) {
   return {
     instanceId,
+    agentId,
     authorId,
     inner: blankInner(),
     write: null,
@@ -57,17 +56,6 @@ function waitClosed(client) {
 
 function connectionLive(client) {
   return !client.inner.closed;
-}
-
-function rememberedBinding(client, address) {
-  return client.inner.remembered.get(address) || null;
-}
-
-function bindingForAddress(client, address) {
-  if (client.inner.closed) {
-    return null;
-  }
-  return client.inner.acknowledged.get(address) || null;
 }
 
 function nextId(client) {
@@ -115,10 +103,6 @@ function closeAll(client, code, generation) {
     return;
   }
   inner.closed = true;
-  for (const [address, bindingId] of inner.acknowledged) {
-    inner.remembered.set(address, bindingId);
-  }
-  inner.acknowledged.clear();
   for (const pending of inner.pendingSaid.values()) {
     pending.resolve({ kind: "disconnected" });
   }
@@ -145,26 +129,23 @@ function closeAll(client, code, generation) {
   notifyClosed(client);
 }
 
-function postSaid(client, address, origin, text, attachments) {
+function postSaid(client, session, origin, text, attachments) {
   const inner = client.inner;
   if (inner.closed) {
     return Promise.resolve({ refuse: "not_ready" });
   }
-  const bindingId = inner.acknowledged.get(address);
-  if (!bindingId) {
-    return Promise.resolve({ refuse: "not_ready" });
-  }
-  if (!inner.pendingTurn.get(bindingId)) {
-    inner.pendingTurn.set(bindingId, { sawSay: false });
+  liveQueue(inner, session);
+  if (!inner.pendingTurn.get(session)) {
+    inner.pendingTurn.set(session, { sawSay: false });
   }
   const id = nextId(client);
   const outcome = new Promise((resolve) => {
     inner.pendingSaid.set(id, { kind: "said", resolve });
   });
   const generation = inner.generation;
-  console.error(`said instance=${client.instanceId} binding=${bindingId} origin=${origin}`);
-  if (!sendFrame(client, saidFrame(id, bindingId, origin, client.authorId, text, attachments))) {
-    inner.pendingTurn.delete(bindingId);
+  console.error(`said instance=${client.instanceId} session=${session} origin=${origin}`);
+  if (!sendFrame(client, saidFrame(id, session, origin, client.authorId, text, attachments))) {
+    inner.pendingTurn.delete(session);
     inner.pendingSaid.delete(id);
     return Promise.resolve({ kind: "disconnected" });
   }
@@ -179,9 +160,9 @@ function postSaid(client, address, origin, text, attachments) {
       return { kind: "disconnected" };
     }
     if (result.kind !== "accepted") {
-      client.inner.pendingTurn.delete(bindingId);
+      client.inner.pendingTurn.delete(session);
     }
-    console.error(`said ack instance=${client.instanceId} binding=${bindingId}`);
+    console.error(`said ack instance=${client.instanceId} session=${session}`);
     return result;
   });
 }
@@ -204,25 +185,8 @@ function nextLive(client, address) {
   });
 }
 
-function handleBind(client, msg, generation) {
-  console.error(`bind instance=${client.instanceId} binding=${msg.bindingId} address=${msg.address}`);
-  const inner = client.inner;
-  if (inner.closed) {
-    return;
-  }
-  const existing = inner.acknowledged.get(msg.address);
-  if (existing && existing !== msg.bindingId) {
-    closeAll(client, "binding_conflict", generation);
-    return;
-  }
-  inner.remembered.set(msg.address, msg.bindingId);
-  inner.acknowledged.set(msg.address, msg.bindingId);
-  liveQueue(inner, msg.address);
-  sendFrame(client, okFrame(msg.id));
-}
-
 function handleSay(client, msg, generation) {
-  console.error(`say instance=${client.instanceId} binding=${msg.bindingId}`);
+  console.error(`say instance=${client.instanceId} session=${msg.session}`);
   const text = sayText(msg.payload);
   if (text === null) {
     sendFrame(client, errFrame(msg.id, "external_rejected", null));
@@ -232,23 +196,12 @@ function handleSay(client, msg, generation) {
   if (inner.closed) {
     return true;
   }
-  let address = null;
-  for (const [addr, bid] of inner.acknowledged) {
-    if (bid === msg.bindingId) {
-      address = addr;
-      break;
-    }
-  }
-  if (address === null) {
-    sendFrame(client, errFrame(msg.id, "external_rejected", null));
-    return false;
-  }
-  const q = liveQueue(inner, address);
+  const q = liveQueue(inner, msg.session);
   if (!tryPush(q, { kind: "message", text })) {
     sendFrame(client, errFrame(msg.id, "external_rejected", null));
     return false;
   }
-  const turn = inner.pendingTurn.get(msg.bindingId);
+  const turn = inner.pendingTurn.get(msg.session);
   if (turn) {
     turn.sawSay = true;
   }
@@ -264,22 +217,12 @@ function handleActivity(client, msg) {
   if (inner.closed) {
     return;
   }
-  let address = null;
-  for (const [addr, bid] of inner.acknowledged) {
-    if (bid === msg.bindingId) {
-      address = addr;
-      break;
-    }
-  }
-  if (address === null) {
-    return;
-  }
-  const q = liveQueue(inner, address);
+  const q = liveQueue(inner, msg.session);
   tryPush(q, { kind: "activity", activityId: msg.activityId, state: msg.state });
   if (msg.state === "ended") {
-    const turn = inner.pendingTurn.get(msg.bindingId);
+    const turn = inner.pendingTurn.get(msg.session);
     if (turn) {
-      inner.pendingTurn.delete(msg.bindingId);
+      inner.pendingTurn.delete(msg.session);
       if (!turn.sawSay) {
         tryPush(q, { kind: "completed_no_reply" });
       }
@@ -326,9 +269,6 @@ function handleResponse(client, msg, generation) {
 
 function handleMsg(client, msg, generation) {
   switch (msg.type) {
-    case "bind":
-      handleBind(client, msg, generation);
-      return false;
     case "say":
       return handleSay(client, msg, generation);
     case "activity":
@@ -469,13 +409,12 @@ function connectUds(path) {
   });
 }
 
-function attach(client, socketPath, revision, digest) {
+function attach(client, socketPath) {
   return connectUds(socketPath).then((socket) => {
     const inner = client.inner;
     inner.generation += 1;
     const generation = inner.generation;
     inner.closed = false;
-    inner.acknowledged.clear();
     inner.pendingSaid.clear();
     inner.pendingTurn.clear();
     inner.live.clear();
@@ -485,7 +424,7 @@ function attach(client, socketPath, revision, digest) {
       inner.pendingSaid.set(helloId, { kind: "hello", resolve });
     });
     console.error(`hello instance=${client.instanceId}`);
-    if (!sendFrame(client, helloFrame(helloId, client.instanceId, revision, digest))) {
+    if (!sendFrame(client, helloFrame(helloId, client.instanceId, client.agentId))) {
       inner.closed = true;
       socket.destroy();
       return Promise.reject(new ConnectHelloError("hello write"));
@@ -503,13 +442,13 @@ function attach(client, socketPath, revision, digest) {
   });
 }
 
-function spawn(socketPath, instanceId, revision, authorId, digest) {
-  const client = createClient(instanceId, authorId);
+function spawn(socketPath, instanceId, agentId, authorId) {
+  const client = createClient(instanceId, agentId, authorId);
   const loop = async () => {
     let backoff = RECONNECT_MIN_MS;
     for (;;) {
       try {
-        await attach(client, socketPath, revision, digest);
+        await attach(client, socketPath);
         console.error(`uds connected instance=${client.instanceId}`);
         backoff = RECONNECT_MIN_MS;
         if (client.inner.closed) {
@@ -538,8 +477,6 @@ function spawn(socketPath, instanceId, revision, authorId, digest) {
 module.exports = {
   spawn,
   connectionLive,
-  rememberedBinding,
-  bindingForAddress,
   postSaid,
   nextLive,
 };

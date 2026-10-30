@@ -1,6 +1,6 @@
 {
   "name": "frame-no-lf-overflow",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "sse_open",

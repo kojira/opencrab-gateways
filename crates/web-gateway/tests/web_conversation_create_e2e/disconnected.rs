@@ -22,19 +22,9 @@ fn creation_is_owned_by_gateway_and_requires_its_live_instance() {
 
     let gw = spawn_gateway(root.path(), &sock, gw_port);
     assert!(wait_tcp(gw_port, Duration::from_secs(15)), "gateway http");
-    let (st, body) = http(
-        gw_port,
-        "POST",
-        "/api/web-conversations",
-        None,
-        Some(&format!(r#"{{"agent_id":"{AGENT}"}}"#)),
-        Duration::from_secs(70),
-    )
-    .expect("create");
-    assert_eq!(st, 201, "{body}");
-    let value: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+    let value = create(gw_port, "x");
     assert_eq!(value["state"], "ready");
-    assert_eq!(counts(&db), (1, 1, 1));
+    assert_eq!(counts(&db), (1, 1));
 
     drop(gw);
     drop(core);

@@ -1,8 +1,8 @@
-// ==================== D-1098: bindings core already holds, through the Discord daemon ====================
+// ==================== D-1099: sessions core already holds, through the Discord daemon ====================
 //
-// Core decides the binding id for an address (it keeps an instance's existing binding, reopens a
-// closed one); the gateway uses the id core reports. These cases check that the bot answers in
-// the session the address already had.
+// The gateway names a session key (the channel address); core continues the session it already
+// has for that key (migrated rows keep theirs). These cases check that the bot answers in the
+// session the address already had, with nothing registered in core beforehand.
 
 mod daemon_bindings {
     use super::daemon_e2e::*;
@@ -36,44 +36,41 @@ mod daemon_bindings {
         false
     }
 
-    /// A core binding in the shape the pre-provision migration left: an id no gateway derives
-    /// (v4), session = address, a title other than provision's.
-    fn seed_migrated_binding(core: &Core, instance_id: &str, binding_id: &str, address: &str) {
+    /// A core session record in the shape the pre-D-1098 migration left: a row id no gateway
+    /// derives (v4), session = the key, a title other than the default. The instance row is
+    /// what the migrated production DB holds.
+    fn seed_migrated_session(core: &Core, instance_id: &str, row_id: &str, key: &str) {
         let mut conn = core.extgate.db.lock().unwrap();
         let tx = conn.transaction().unwrap();
         let subject: i64 = tx
             .query_row(
                 "SELECT subject_id FROM agents WHERE agent_id=(?1)",
-                [agent_of(address)],
+                [agent_of(key)],
                 |r| r.get(0),
             )
             .unwrap();
         tx.execute(
             "INSERT INTO gate_instances (instance_id, kind_id, subject_id, revision, enabled,
                 config_b64, config_digest, created_at, updated_at, deleted_at)
-             VALUES (?1, 'discord', ?2, 3, 1, ?3, ?4, 1, 1, NULL)
+             VALUES (?1, 'discord', ?2, 3, 1, 'e30=', ?3, 1, 1, NULL)
              ON CONFLICT(instance_id) DO NOTHING",
-            rusqlite::params![
-                instance_id,
-                subject,
-                "e30=",
-                opencrab_extgate::config_digest(b"{}")
-            ],
+            rusqlite::params![instance_id, subject, opencrab_extgate::config_digest(b"{}")],
         )
         .unwrap();
-        let outcome = opencrab_db::queries::CoreBindingService::create_in_tx(
+        opencrab_db::queries::insert_session_in_tx(
             &tx,
-            &opencrab_db::queries::CoreBindingRequest {
-                binding_id,
-                instance_id,
-                address,
-                session_id: address,
-                session_title: "migrated title",
-                now: 1,
-            },
+            key,
+            "migrated title",
+            "2026-01-01T00:00:00+00:00",
         )
         .unwrap();
-        assert_eq!(outcome, opencrab_db::queries::CoreBindingOutcome::Created);
+        opencrab_db::queries::insert_agent_session_in_tx(&tx, &agent_of(key), key).unwrap();
+        tx.execute(
+            "INSERT INTO gate_bindings (binding_id, instance_id, session_key, created_at, closed_at, session_id)
+             VALUES (?1, ?2, ?3, 1, NULL, ?3)",
+            rusqlite::params![row_id, instance_id, key],
+        )
+        .unwrap();
         tx.commit().unwrap();
     }
 
@@ -111,10 +108,11 @@ mod daemon_bindings {
         path
     }
 
-    /// (a) Production today: core already holds the 3 bots' channels as migrated bindings. The
-    /// import provisions them as they are; each bot answers in the session it already had.
+    /// (a) Production today: core already holds the 3 bots' channels as migrated session
+    /// records. The imported bots key their saids by those addresses and each answers in the
+    /// session it already had; core keeps the same record.
     #[tokio::test]
-    async fn d1098_imported_bots_keep_their_migrated_bindings_and_sessions() {
+    async fn d1099_imported_bots_continue_their_migrated_sessions() {
         let buf = install_capture();
         let ids: Vec<String> = LEGACY
             .iter()
@@ -134,7 +132,7 @@ mod daemon_bindings {
             std::fs::create_dir(&tokens).unwrap();
             let mut placements = Vec::new();
             for i in 0..3 {
-                seed_migrated_binding(core, &ids_seed[i], &migrated_seed[i], &addresses_seed[i]);
+                seed_migrated_session(core, &ids_seed[i], &migrated_seed[i], &addresses_seed[i]);
                 placements.push(legacy_placement(
                     dir,
                     LEGACY[i],
@@ -158,12 +156,7 @@ mod daemon_bindings {
         })
         .await;
         for i in 0..3 {
-            let id = w.bound(&ids[i], &addresses[i]).await;
-            assert_eq!(
-                id.as_deref(),
-                Some(migrated[i].as_str()),
-                "bound under the migrated id"
-            );
+            assert!(w.bound(&ids[i], &addresses[i]).await.is_some(), "connected");
             let channel = format!("96{i}");
             w.say(
                 LEGACY[i],
@@ -184,29 +177,17 @@ mod daemon_bindings {
             );
             assert_eq!(
                 w.core_binding(&addresses[i]),
-                Some((migrated[i].clone(), addresses[i].clone()))
-            );
-            let row = w
-                .daemon
-                .store()
-                .lock()
-                .unwrap()
-                .get(&ids[i])
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                row.core_bindings,
-                vec![migrated[i].clone()],
-                "store holds core's id"
+                Some((migrated[i].clone(), addresses[i].clone())),
+                "core kept the migrated record (no second one)"
             );
         }
         w.daemon.shutdown().await;
     }
 
-    /// (b) Removing a channel in the settings API and adding it back keeps its binding and
-    /// session: the bot answers there again and the turns continue in the same session.
+    /// (b) Removing a channel in the settings API and adding it back keeps its session: the bot
+    /// stops answering there, then answers again and the turns continue in the same session.
     #[tokio::test]
-    async fn d1098_a_channel_removed_and_added_back_keeps_its_session() {
+    async fn d1099_a_channel_removed_and_added_back_keeps_its_session() {
         let buf = install_capture();
         const AGENT: &str = "agent-readd";
         let w = world(&[AGENT], |_, _, _| {}).await;
@@ -231,10 +212,10 @@ mod daemon_bindings {
             .as_str()
             .unwrap()
             .to_string();
-        let first = w.bound(&id, &readd).await.expect("bound");
-        let (_, session) = w.core_binding(&readd).unwrap();
+        w.bound(&id, &readd).await.expect("connected");
         w.say(AGENT, "9801", "981", OWNER, &format!("{M_SAY} one"), &[]);
         assert!(posted(&buf, "say", "981", B_SAY).await);
+        let (first, session) = w.core_binding(&readd).expect("core opened the session");
         assert!(turns_reach(&w, &session, 1).await);
 
         let http = reqwest::Client::new();
@@ -257,11 +238,8 @@ mod daemon_bindings {
                 == opencrab_process_supervisor::lifecycle::LifecycleState::Running
         })
         .await;
-        assert_eq!(
-            w.core_binding(&readd),
-            None,
-            "core closed the removed channel"
-        );
+        // The gateway no longer listens there; core's session record is untouched.
+        assert_eq!(w.core_binding(&readd), Some((first.clone(), session.clone())));
 
         let added = http
             .post(format!("{base}/api/instances/{id}/channels"))
@@ -270,11 +248,11 @@ mod daemon_bindings {
             .await
             .unwrap();
         assert_eq!(added.status(), 200);
-        let again = loop_bound(&w, &id, &readd, &first).await;
-        assert_eq!(again, first, "the same binding is reopened");
+        loop_bound(&w, &id, &readd).await;
         assert_eq!(
             w.core_binding(&readd),
-            Some((first.clone(), session.clone()))
+            Some((first.clone(), session.clone())),
+            "the same session record"
         );
         w.say(AGENT, "9802", "981", OWNER, &format!("{M_SAY} two"), &[]);
         assert!(
@@ -284,8 +262,8 @@ mod daemon_bindings {
         w.daemon.shutdown().await;
     }
 
-    /// The id the running child has bound for `address`, after the daemon has restarted it.
-    async fn loop_bound(w: &World, id: &str, address: &str, _previous: &str) -> String {
+    /// Waits until the restarted child listens to `address` again.
+    async fn loop_bound(w: &World, id: &str, address: &str) -> String {
         for _ in 0..250 {
             w.daemon.reconcile_once().await.unwrap();
             let row = w.daemon.store().lock().unwrap().get(id).unwrap().unwrap();
@@ -299,13 +277,13 @@ mod daemon_bindings {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("the channel was not bound again");
+        panic!("the channel was not listened to again");
     }
 
-    /// (c) A real daemon restart: a channel the owner enabled by @mention is provisioned by the
-    /// new daemon process, its child comes up and the bot answers there in the same session.
+    /// (c) A real daemon restart: a channel the owner enabled by @mention is still in the store,
+    /// the new daemon's child listens to it and the bot answers there in the same session.
     #[tokio::test]
-    async fn d1098_after_a_daemon_restart_the_mention_enabled_channel_answers() {
+    async fn d1099_after_a_daemon_restart_the_mention_enabled_channel_answers() {
         let buf = install_capture();
         const AGENT: &str = "agent-restart";
         let mut w = world(&[AGENT], |_, _, _| {}).await;
@@ -328,15 +306,14 @@ mod daemon_bindings {
         let started_before = w.clients.lock().unwrap().len();
         let turns_before = turns_in(&w, &session);
 
-        // The old process is gone; the new daemon finds the child lost, provisions the stored
-        // channels again and starts a new child.
+        // The old process is gone; the new daemon finds the child lost and starts a new one on
+        // the stored channels.
         // Only what arrives after the restart is in the event stream of the new child.
         std::fs::write(&w.events[AGENT], "").unwrap();
         w.restart_daemon().await;
         w.until(|w| w.clients.lock().unwrap().len() > started_before)
             .await;
-        let restarted = w.bound(&id, &address).await;
-        assert_eq!(restarted.as_deref(), Some(binding.as_str()), "same binding");
+        assert!(w.bound(&id, &address).await.is_some(), "listens again");
         assert_eq!(w.core_binding(&address), Some((binding, session.clone())));
         w.say(AGENT, "9902", "990", OWNER, &format!("{M_SAY} again"), &[]);
         assert!(

@@ -1,6 +1,6 @@
 {
   "name": "turn-failed-keeps-connection",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     { "op": "sse_open", "id": "ev", "path": "/api/web-conversations/web-agent-conv/events" },
     {
@@ -23,7 +23,7 @@
 
     { "op": "uds_send", "frame": {
       "m": "turn_failed",
-      "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "session": "web-agent-conv",
       "origin": "web:cccccccc-cccc-4ccc-8ccc-cccccccccccc"
     } },
     { "op": "uds_idle", "ms": 100 },

@@ -6,13 +6,13 @@ merge CI（`.github/workflows/ci.yml` の `conformance` job）は Rust SUT 列�
 
 ## 起動 ABI
 
-placement は `{http_bind,core_socket,instances:[{instance_id,revision,author_id}]}`。ready は `http_bind` への TCP listen 成立だけ。stdout/stderr は見ない。
+placement は `{http_bind,core_socket,conversations:[{session,instance_id}],instances:[{instance_id,agent_id,author_id}]}`。harness は fixture の会話（`ids.address`）を `conversations` で渡す。ready は `http_bind` への TCP listen 成立だけ。stdout/stderr は見ない。
 
 ## fixture
 
 `fixtures/` の JSON をディレクトリ走査で全件読み、全 SUT に同じ手順・同じ正規化期待値で適用する。SUT 名分岐、実装別 skip、片側 golden は置かない。
 
-共通範囲: gateway 側 framing（1,048,576 成功 / LF 未着超過 / invalid UTF-8 / 非 object / duplicate / LF 込み超過）/ hello / bind / said / dedup / say 3 結果（受理 / external_rejected / indeterminate）/ live queue overflow(32) / activity / disconnect / HTTP / SSE。再接続は production spawn 経路。bind-conflict は WEBGATE §8.1。
+共通範囲: gateway 側 framing（1,048,576 成功 / LF 未着超過 / invalid UTF-8 / 非 object / duplicate / LF 込み超過）/ hello / said / dedup / say 3 結果（受理 / external_rejected / indeterminate）/ live queue overflow(32) / activity / disconnect / HTTP / SSE。再接続は production spawn 経路。D-1099 で bind は無くなった（会話の所有は gateway の記録）。
 
 ## 合格数
 

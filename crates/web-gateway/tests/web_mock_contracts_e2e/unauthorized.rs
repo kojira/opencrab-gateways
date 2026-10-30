@@ -24,7 +24,7 @@ fn unauthorized_shell_command_is_rejected() {
     let tools_block = "[tools]\nenabled = true\n\n[tools.shell]\nenabled = true\nallowed_commands = [\"echo\"]\ntimeout_secs = 30\n";
     let h = setup(mock.port, "shelldeny", false, tools_block);
     let db = &h.db;
-    let ext_session = format!("extgate-{}", h.binding);
+    let ext_session = h.core_session.clone();
 
     post_message(
         h.gw_port,

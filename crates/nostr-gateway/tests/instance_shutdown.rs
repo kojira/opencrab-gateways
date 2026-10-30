@@ -57,7 +57,7 @@ fn sigterm_stops_nostaro_watch_child() {
         "nostaro_bin": nostaro,
         "instances": [{
             "instance_id": "00000000-0000-4000-8000-000000000001",
-            "revision": 1,
+            "agent_id": "agent",
             "address": "nostr-agent",
             "config_b64": base64::engine::general_purpose::STANDARD
                 .encode(serde_json::to_vec(&config).unwrap()),
@@ -73,7 +73,7 @@ fn sigterm_stops_nostaro_watch_child() {
         .spawn()
         .unwrap();
 
-    // mock core: hello に ok、続けて bind を送り ack を受ける。
+    // mock core: hello に ok を返す（D-1099: bind は無く、接続中は lane が動く）。
     listener.set_nonblocking(true).unwrap();
     let mut accepted = None;
     assert!(
@@ -103,12 +103,6 @@ fn sigterm_stops_nostaro_watch_child() {
     let hello: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(hello["m"], "hello", "{hello}");
     writeln!(writer, "{}", json!({"id": hello["id"], "m": "ok"})).unwrap();
-    writeln!(
-        writer,
-        "{}",
-        json!({"id": "bind:00000000-0000-4000-8000-000000000002", "m": "bind", "binding_id": "00000000-0000-4000-8000-000000000002", "address": "nostr-agent"})
-    )
-    .unwrap();
     // mock core keeps draining frames so the gateway never blocks on the socket.
     std::thread::spawn(move || {
         let mut line = String::new();

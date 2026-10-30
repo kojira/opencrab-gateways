@@ -7,75 +7,6 @@ use tokio::sync::Notify;
 const VALID_CONFIG_B64: &str =
     "eyJhZ2VudF9pZCI6ImFnZW50Iiwic2VsZl9ib3RfaWQiOiIxMTExMTExMTExMTExMTExMTEifQ==";
 
-struct FakeGate;
-#[async_trait]
-impl GateReconciler for FakeGate {
-    async fn observe(
-        &self,
-        desired: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(if desired.enabled {
-            opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled
-        } else {
-            opencrab_process_supervisor::lifecycle::CoreObservation::ExactDisabled
-        })
-    }
-
-    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
-        Ok(VerifiedInstance {
-            revision: 4,
-            digest: "digest".into(),
-            bindings: desired.addresses.clone(),
-            enabled: desired.enabled,
-        })
-    }
-}
-
-struct OfflineGate;
-#[async_trait]
-impl GateReconciler for OfflineGate {
-    async fn observe(
-        &self,
-        _: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Unavailable)
-    }
-
-    async fn reconcile(&self, _: &InstanceRow) -> Result<VerifiedInstance> {
-        anyhow::bail!("core server is stopped")
-    }
-}
-
-struct FailingGate;
-#[async_trait]
-impl GateReconciler for FailingGate {
-    async fn observe(
-        &self,
-        _: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Mismatch)
-    }
-
-    async fn reconcile(&self, _: &InstanceRow) -> Result<VerifiedInstance> {
-        anyhow::bail!("core unavailable")
-    }
-}
-
-struct RecoveryGate(opencrab_process_supervisor::lifecycle::CoreObservation);
-#[async_trait]
-impl GateReconciler for RecoveryGate {
-    async fn observe(
-        &self,
-        _: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(self.0)
-    }
-
-    async fn reconcile(&self, _: &InstanceRow) -> Result<VerifiedInstance> {
-        anyhow::bail!("reconciliation not expected during startup matrix")
-    }
-}
-
 struct RecoveryFactory {
     observation: opencrab_process_supervisor::lifecycle::ProcessObservation,
     reaped: Arc<AtomicUsize>,
@@ -181,7 +112,7 @@ fn daemon(
     enabled: bool,
 ) -> (
     tempfile::TempDir,
-    DiscordDaemon<FakeGate, FakeFactory>,
+    DiscordDaemon<FakeFactory>,
     Arc<AtomicUsize>,
     Arc<Notify>,
 ) {
@@ -191,7 +122,7 @@ fn daemon(
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "agent",
-            "e30=",
+            VALID_CONFIG_B64,
             &["opaque-address".into()],
             "token-secret",
             enabled,
@@ -207,7 +138,7 @@ fn daemon(
     });
     (
         temp,
-        DiscordDaemon::new(store, [9; 32], Arc::new(FakeGate), factory).unwrap(),
+        DiscordDaemon::new(store, [9; 32], factory).unwrap(),
         started,
         exit,
     )
@@ -302,7 +233,7 @@ async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "agent",
-            "e30=",
+            VALID_CONFIG_B64,
             &["opaque-address".into()],
             "token-secret",
             true,
@@ -313,14 +244,7 @@ async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped
         .mark_provisioning("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation)
         .unwrap());
     assert!(store
-        .mark_verified(
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            generation,
-            4,
-            "digest",
-            &["binding".into()],
-            true,
-        )
+        .mark_verified("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation, true)
         .unwrap());
     drop(store);
 
@@ -328,7 +252,6 @@ async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped
     let daemon = DiscordDaemon::new(
         DiscordStore::open(&path).unwrap(),
         [9; 32],
-        Arc::new(OfflineGate),
         Arc::new(FakeFactory {
             started: started.clone(),
             exit: Arc::new(Notify::new()),
@@ -348,10 +271,8 @@ async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped
 }
 
 #[tokio::test]
-async fn s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observations() {
-    use opencrab_process_supervisor::lifecycle::{
-        CoreObservation, LifecycleState, ProcessObservation,
-    };
+async fn s5_discord_daemon_startup_recovery_matrix_uses_process_observations() {
+    use opencrab_process_supervisor::lifecycle::{LifecycleState, ProcessObservation};
     for state in [
         LifecycleState::Disabled,
         LifecycleState::Pending,
@@ -365,7 +286,15 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observa
         let enabled = state != LifecycleState::Disabled;
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let generation = store
-            .upsert_desired(id, "agent", "e30=", &[], "token", enabled, &[9; 32])
+            .upsert_desired(
+                id,
+                "agent",
+                VALID_CONFIG_B64,
+                &[],
+                "token",
+                enabled,
+                &[9; 32],
+            )
             .unwrap();
         if !matches!(state, LifecycleState::Pending) {
             store.mark_provisioning(id, generation).unwrap();
@@ -377,9 +306,7 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observa
                 | LifecycleState::Running
                 | LifecycleState::Error
         ) {
-            store
-                .mark_verified(id, generation, 1, "digest", &[], enabled)
-                .unwrap();
+            store.mark_verified(id, generation, enabled).unwrap();
         }
         if matches!(state, LifecycleState::Running) {
             store.record_started(id, generation, 4242, "nonce").unwrap();
@@ -400,11 +327,6 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observa
         let daemon = DiscordDaemon::new(
             store,
             [9; 32],
-            Arc::new(RecoveryGate(if enabled {
-                CoreObservation::ExactEnabled
-            } else {
-                CoreObservation::ExactDisabled
-            })),
             Arc::new(RecoveryFactory {
                 observation: if state == LifecycleState::Running {
                     ProcessObservation::ExactLive
@@ -441,27 +363,22 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observa
 
 #[tokio::test]
 async fn s5_discord_running_loss_and_stale_process_are_reaped_to_durable_error() {
-    use opencrab_process_supervisor::lifecycle::{
-        CoreObservation, LifecycleState, ProcessObservation,
-    };
+    use opencrab_process_supervisor::lifecycle::{LifecycleState, ProcessObservation};
     for observation in [ProcessObservation::Missing, ProcessObservation::StaleLive] {
         let temp = tempfile::tempdir().unwrap();
         let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let generation = store
-            .upsert_desired(id, "agent", "e30=", &[], "token", true, &[9; 32])
+            .upsert_desired(id, "agent", VALID_CONFIG_B64, &[], "token", true, &[9; 32])
             .unwrap();
         store.mark_provisioning(id, generation).unwrap();
-        store
-            .mark_verified(id, generation, 1, "digest", &[], true)
-            .unwrap();
+        store.mark_verified(id, generation, true).unwrap();
         store.record_started(id, generation, 4242, "nonce").unwrap();
         store.mark_running(id, generation, 4242, "nonce").unwrap();
         let reaped = Arc::new(AtomicUsize::new(0));
         let daemon = DiscordDaemon::new(
             store,
             [9; 32],
-            Arc::new(RecoveryGate(CoreObservation::ExactEnabled)),
             Arc::new(RecoveryFactory {
                 observation,
                 reaped: reaped.clone(),
@@ -489,7 +406,7 @@ async fn s5_discord_running_loss_and_stale_process_are_reaped_to_durable_error()
 }
 
 #[tokio::test]
-async fn s5_discord_reconciliation_failure_is_durable_and_does_not_kill_daemon() {
+async fn s5_discord_invalid_config_is_a_durable_error_and_does_not_kill_daemon() {
     let temp = tempfile::tempdir().unwrap();
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     store
@@ -506,7 +423,6 @@ async fn s5_discord_reconciliation_failure_is_durable_and_does_not_kill_daemon()
     let daemon = DiscordDaemon::new(
         store,
         [9; 32],
-        Arc::new(FailingGate),
         Arc::new(FakeFactory {
             started: Arc::new(AtomicUsize::new(0)),
             exit: Arc::new(Notify::new()),
@@ -538,7 +454,7 @@ async fn s5_discord_malformed_readiness_reaps_child_and_persists_retry() {
         .upsert_desired(
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "agent",
-            "e30=",
+            VALID_CONFIG_B64,
             &[],
             "token-secret",
             true,
@@ -549,14 +465,7 @@ async fn s5_discord_malformed_readiness_reaps_child_and_persists_retry() {
         .mark_provisioning("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation)
         .unwrap();
     store
-        .mark_verified(
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            generation,
-            1,
-            "digest",
-            &[],
-            true,
-        )
+        .mark_verified("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation, true)
         .unwrap();
     let store = Arc::new(Mutex::new(store));
     let socket = temp.path().join("ready.sock");
@@ -604,16 +513,21 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
     std::fs::write(&control, b"owned").unwrap();
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     let generation = store
-        .upsert_desired(instance_id, "agent", "e30=", &[], "token", false, &[9; 32])
+        .upsert_desired(
+            instance_id,
+            "agent",
+            VALID_CONFIG_B64,
+            &[],
+            "token",
+            false,
+            &[9; 32],
+        )
         .unwrap();
     store.mark_provisioning(instance_id, generation).unwrap();
-    store
-        .mark_verified(instance_id, generation, 1, "digest", &[], false)
-        .unwrap();
+    store.mark_verified(instance_id, generation, false).unwrap();
     let daemon = DiscordDaemon::new(
         store,
         [9; 32],
-        Arc::new(OfflineGate),
         Arc::new(ProductionFactory {
             child_binary: "/bin/true".into(),
             core_socket: temp.path().join("core.sock"),
@@ -694,9 +608,7 @@ fn d1079_production_placement_carries_attachment_outbox_root() {
         )
         .unwrap();
     store.mark_provisioning(instance_id, generation).unwrap();
-    store
-        .mark_verified(instance_id, generation, 1, "digest", &[], true)
-        .unwrap();
+    store.mark_verified(instance_id, generation, true).unwrap();
     let row = store.get(instance_id).unwrap().unwrap();
     factory
         .for_instance(&row, zeroize::Zeroizing::new(b"token".to_vec()), "nonce")

@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const net = require("node:net");
-const { parseObject, isInt, intLexeme, JsonSyntaxError } = require("./json");
+const { parseObject, JsonSyntaxError } = require("./json");
 const { parseUuid } = require("./wire");
 
 class ConfigError extends Error {
@@ -62,18 +62,33 @@ function validate(obj) {
       throw new ConfigError("duplicate instance_id is a double live; refuse startup");
     }
     seen.add(instanceId);
-    if (!isInt(inst.revision)) {
-      throw new ConfigError("revision must be positive");
+    if (typeof inst.agent_id !== "string" || inst.agent_id.length === 0) {
+      throw new ConfigError("agent_id must be nonempty");
     }
-    const revision = intLexeme(inst.revision);
     if (typeof inst.author_id !== "string" || inst.author_id.length === 0) {
       throw new ConfigError("author_id must be nonempty");
     }
     instances.push({
       instance_id: instanceId,
-      revision,
+      agent_id: inst.agent_id,
       author_id: inst.author_id,
     });
+  }
+  // D-1099: conversations this gateway already owns (session key -> instance).
+  const conversations = new Map();
+  if (obj.conversations !== undefined) {
+    if (!Array.isArray(obj.conversations)) {
+      throw new ConfigError("conversations must be a list");
+    }
+    for (const c of obj.conversations) {
+      if (!c || typeof c.session !== "string" || c.session.length === 0) {
+        throw new ConfigError("conversation session must be nonempty");
+      }
+      if (!seen.has(c.instance_id)) {
+        throw new ConfigError("conversation instance_id is not an instance of this placement");
+      }
+      conversations.set(c.session, c.instance_id);
+    }
   }
   return {
     http_bind: obj.http_bind,
@@ -81,6 +96,7 @@ function validate(obj) {
     port: bind.port,
     core_socket: obj.core_socket,
     instances,
+    conversations,
   };
 }
 

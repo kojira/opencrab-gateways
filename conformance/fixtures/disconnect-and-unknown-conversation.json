@@ -1,30 +1,16 @@
 {
-  "name": "disconnect-unacked",
+  "name": "disconnect-and-unknown-conversation",
   "prelude": "hello",
   "steps": [
     {
       "op": "http_post",
-      "path": "/api/web-conversations/web-agent-conv/messages",
+      "path": "/api/web-conversations/not-this-gateways/messages",
       "body": {
         "client_message_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         "text": "hello",
         "attachments": []
       },
-      "status": 503,
-      "body_expect": { "error": { "code": "instance_not_ready" } }
-    },
-    {
-      "op": "uds_send",
-      "frame": {
-        "id": "bind:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        "m": "bind",
-        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        "address": "web-agent-conv"
-      }
-    },
-    {
-      "op": "uds_recv",
-      "expect": { "m": "ok", "id": "bind:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }
+      "status": 404
     },
     {
       "op": "sse_open",

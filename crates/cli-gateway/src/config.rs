@@ -15,7 +15,6 @@ pub struct Placement {
 #[serde(deny_unknown_fields)]
 pub struct InstancePlacement {
     pub instance_id: String,
-    pub revision: u64,
     pub agent_id: String,
     pub author_id: String,
 }
@@ -40,9 +39,6 @@ impl Placement {
         for instance in &self.instances {
             canonical_uuid(&instance.instance_id)
                 .ok_or_else(|| anyhow::anyhow!("instance_id must be a canonical lowercase UUID"))?;
-            if instance.revision == 0 {
-                anyhow::bail!("revision must be positive");
-            }
             if instance.agent_id.is_empty() {
                 anyhow::bail!("agent_id must be nonempty");
             }
@@ -89,7 +85,6 @@ mod tests {
             core_socket: "/tmp/gate.sock".into(),
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-                revision: 1,
                 agent_id: "agent-a".into(),
                 author_id: "local-operator".into(),
             }],
@@ -100,7 +95,10 @@ mod tests {
     fn validates_and_selects_exact_agent() {
         let placement = valid();
         placement.validate().unwrap();
-        assert_eq!(placement.select_agent("agent-a").unwrap().revision, 1);
+        assert_eq!(
+            placement.select_agent("agent-a").unwrap().agent_id,
+            "agent-a"
+        );
         assert!(placement.select_agent("Agent A").is_err());
     }
 

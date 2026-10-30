@@ -11,11 +11,9 @@ use std::time::{Duration, Instant};
 
 const AGENT: &str = "e2eagent";
 const AUTHOR: &str = "e2e-owner";
-const LOGICAL: &str = "web-e2eagent-c1";
 const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
 const CLIENT_MSG: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const REPLY: &str = "e2e-reply-from-mock";
-const CONFIG_B64: &str = "eyJhdXRob3JfaWQiOiJlMmUtb3duZXIifQ==";
 
 struct Proc(Child);
 impl Drop for Proc {
@@ -433,14 +431,15 @@ fn send_said_turn_say_sse_over_real_processes() {
     .expect("model pricing");
     assert_eq!(st, 200, "model-pricing {body}");
 
-    let binding = provision_web(&sock, &[LOGICAL.to_string()]).remove(0);
-
+    // D-1099: nothing is registered in core first; the gateway's hello creates the instance.
     let placement = root.path().join("placement.json");
+    let conversations = root.path().join("web-conversations.db");
     std::fs::write(
         &placement,
         format!(
-            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
-            sock.display()
+            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","conversations_path":"{}","instances":[{{"instance_id":"{INSTANCE}","agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
+            sock.display(),
+            conversations.display()
         ),
     )
     .unwrap();
@@ -465,7 +464,32 @@ fn send_said_turn_say_sse_over_real_processes() {
         TcpStream::connect(("127.0.0.1", gw_port)).is_ok(),
         "web-gateway HTTP did not start"
     );
-    let sse_rx = spawn_sse(gw_port, LOGICAL);
+    // Create the conversation through the gateway (core `open`), as the dashboard does.
+    let start = Instant::now();
+    let created = loop {
+        if let Some((st, body)) = http(
+            gw_port,
+            "POST",
+            "/api/web-conversations",
+            None,
+            Some(&format!(r#"{{"agent_id":"{AGENT}","name":"e2e"}}"#)),
+            Duration::from_secs(5),
+        ) {
+            if st == 201 {
+                break body;
+            }
+            assert_eq!(st, 503, "unexpected create status: {st} {body}");
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "create never ready"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let created: serde_json::Value = serde_json::from_str(created.trim()).unwrap();
+    assert_eq!(created["state"], "ready", "{created}");
+    let session = created["session_id"].as_str().unwrap().to_string();
+    let sse_rx = spawn_sse(gw_port, &session);
 
     let post_body = format!(
         r#"{{"client_message_id":"{CLIENT_MSG}","text":"hello from e2e","attachments":[]}}"#
@@ -476,7 +500,7 @@ fn send_said_turn_say_sse_over_real_processes() {
         if let Some((st, body)) = http(
             gw_port,
             "POST",
-            &format!("/api/web-conversations/{LOGICAL}/messages"),
+            &format!("/api/web-conversations/{session}/messages"),
             None,
             Some(&post_body),
             Duration::from_secs(5),
@@ -485,10 +509,7 @@ fn send_said_turn_say_sse_over_real_processes() {
                 accepted = Some(body);
                 break;
             }
-            assert!(
-                st == 503,
-                "unexpected POST status before bind/said: {st} {body}"
-            );
+            assert!(st == 503, "unexpected POST status: {st} {body}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -565,18 +586,10 @@ fn send_said_turn_say_sse_over_real_processes() {
     drop(gw);
     drop(core);
     let conn = Connection::open(&db).expect("open db after stop");
-    let origins: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM external_origins WHERE binding_id = ?1 AND origin = ?2",
-            [binding.as_str(), &format!("web:{CLIENT_MSG}")],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(origins, 1, "external_origins");
     let inbound: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1 AND content = 'hello from e2e'",
-            [format!("extgate-{binding}")],
+            [session.clone()],
             |r| r.get(0),
         )
         .unwrap();
@@ -584,7 +597,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     let reply: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1 AND content = ?2",
-            [format!("extgate-{binding}"), REPLY.to_string()],
+            [session.clone(), REPLY.to_string()],
             |r| r.get(0),
         )
         .unwrap();
@@ -600,9 +613,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     let sources: Vec<String> = conn
         .prepare("SELECT metadata_json FROM memory_sessions WHERE session_id = ?1")
         .unwrap()
-        .query_map([format!("extgate-{binding}")], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_map([session.clone()], |r| r.get::<_, Option<String>>(0))
         .unwrap()
         .map(|r| r.unwrap().unwrap_or_default())
         .collect();
@@ -619,48 +630,4 @@ fn send_said_turn_say_sse_over_real_processes() {
         "reply source: {sources:?}"
     );
     let _ = std::fs::remove_file(&sock);
-}
-
-/// D-1098: declares the web instance (and its complete binding set) on core's gate socket the
-/// way a gateway does before `hello`. Returns the binding ids core reports, per address.
-fn provision_web(sock: &Path, addresses: &[String]) -> Vec<String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let start = Instant::now();
-    let provisioned = loop {
-        let attempt = runtime.block_on(
-            opencrab_gate_client::provision::ProvisionClient::new(sock.to_path_buf()).provision(
-                &opencrab_gate_client::provision::ProvisionDesired {
-                    instance_id: INSTANCE,
-                    kind_id: "web",
-                    agent_id: AGENT,
-                    enabled: true,
-                    config_b64: CONFIG_B64,
-                    addresses,
-                },
-            ),
-        );
-        match attempt {
-            Ok(provisioned) => break provisioned,
-            Err(error) if start.elapsed() > Duration::from_secs(15) => {
-                panic!("provision: {error:#}")
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    };
-    assert_eq!(provisioned.revision, 1, "the placement says revision 1");
-    addresses
-        .iter()
-        .map(|address| {
-            provisioned
-                .bindings
-                .iter()
-                .find(|binding| &binding.address == address)
-                .expect("provisioned binding")
-                .binding_id
-                .clone()
-        })
-        .collect()
 }

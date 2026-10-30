@@ -20,8 +20,8 @@ use crate::watch::{run_fake_watch_once, run_watch_loop, RESUBSCRIBE};
 use crate::watch_store::{WatchRegistry, WatchSetting};
 
 use super::{
-    flush_bundle, handle_line, snapshot, spawn_say_consumer, wait_until_bound, wait_until_unbound,
-    InstanceClient, SaidMetrics, SeenEvents,
+    flush_bundle, handle_line, snapshot, spawn_say_consumer, wait_until_connected,
+    wait_until_disconnected, InstanceClient, SaidMetrics, SeenEvents,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -43,8 +43,8 @@ pub(crate) fn supervise_lanes(
     let access: SharedAccess = Arc::new(std::sync::RwLock::new(base_access.clone()));
     tokio::spawn(async move {
         loop {
-            wait_until_bound(&client, &address).await;
-            tracing::info!(address = %address, "bind ack; starting watch");
+            wait_until_connected(&client).await;
+            tracing::info!(address = %address, "core connected; starting watch");
             let cancel = Arc::new(Notify::new());
             if overrides.fake_watch.is_none() {
                 start_follow_refresher(
@@ -86,7 +86,7 @@ pub(crate) fn supervise_lanes(
                     access.clone(),
                 );
                 let reloaded = tokio::select! {
-                    () = wait_until_unbound(&client, &address) => {
+                    () = wait_until_disconnected(&client) => {
                         bound = false;
                         false
                     }

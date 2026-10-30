@@ -1,5 +1,5 @@
-//! D-1097: an owner @mentioning the bot in a channel it does not have asks the daemon for that
-//! channel; nobody else, and nothing without a mention, does.
+//! D-1097: an owner @mentioning the bot in a channel it does not listen to enables that channel;
+//! nobody else, and nothing without a mention, does. D-1099: core is not asked.
 
 use super::owner_mention::wants_channel;
 use crate::config::AccessConfig;
@@ -74,7 +74,7 @@ fn d1097_only_an_owner_mention_in_an_unknown_channel_asks() {
     );
     assert!(
         !wants_channel(&access(), BOT, &message(OWNER, &[BOT]), true),
-        "the channel is already bound"
+        "the bot already listens to the channel"
     );
     let _ = address;
 }
@@ -82,6 +82,7 @@ fn d1097_only_an_owner_mention_in_an_unknown_channel_asks() {
 mod end_to_end {
     use super::*;
     use crate::channel_request::{serve, ChannelBinder};
+    use crate::run::owner_mention::{listening, Listening};
     use opencrab_gate_client::client::InstanceClient;
     use opencrab_gate_client::wire::{read_frame, write_json};
     use serde_json::{json, Value};
@@ -93,20 +94,12 @@ mod end_to_end {
 
     /// The daemon stand-in: records what the child tells it.
     #[derive(Default)]
-    struct Recorder(Mutex<Vec<(String, String)>>);
+    struct Recorder(Mutex<Vec<String>>);
 
     #[async_trait::async_trait]
     impl ChannelBinder for Recorder {
-        async fn record_address(
-            &self,
-            _instance: &str,
-            address: &str,
-            binding_id: &str,
-        ) -> anyhow::Result<()> {
-            self.0
-                .lock()
-                .unwrap()
-                .push((address.to_string(), binding_id.to_string()));
+        async fn record_address(&self, _instance: &str, address: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(address.to_string());
             Ok(())
         }
     }
@@ -118,6 +111,7 @@ mod end_to_end {
         writer: OwnedWriteHalf,
         recorder: Arc<Recorder>,
         socket: std::path::PathBuf,
+        listening: Listening,
     }
 
     async fn world() -> World {
@@ -130,13 +124,14 @@ mod end_to_end {
         let listener = tokio::net::UnixListener::bind(&core_path).unwrap();
         let path = core_path.clone();
         let connect = tokio::spawn(async move {
-            InstanceClient::connect(&path, INSTANCE.into(), 1, BOT.into(), "0".repeat(64))
+            InstanceClient::connect(&path, INSTANCE.into(), "agent".into(), BOT.into())
                 .await
                 .unwrap()
         });
         let (stream, _) = listener.accept().await.unwrap();
         let (mut reader, mut writer) = stream.into_split();
         let hello: Value = serde_json::from_slice(&read_frame(&mut reader).await.unwrap()).unwrap();
+        assert_eq!(hello["agent_id"], "agent", "hello names the agent");
         write_json(&mut writer, &json!({"id":hello["id"],"m":"ok"}))
             .await
             .unwrap();
@@ -157,6 +152,7 @@ mod end_to_end {
             writer,
             recorder,
             socket,
+            listening: listening(&[]),
         }
     }
 
@@ -170,12 +166,20 @@ mod end_to_end {
     fn receive(w: &World, line: String) -> tokio::task::JoinHandle<()> {
         let client = w.client.clone();
         let socket = w.socket.clone();
+        let listening = w.listening.clone();
         tokio::spawn(async move {
             let access = access();
-            let mention = (&*client, "agent", BOT, &access);
-            let enable = (Some(socket.as_path()), None);
+            let mention = ("agent", BOT, &access);
+            let enable = (&listening, Some(socket.as_path()), None);
             super::super::owner_mention::maybe_enable(mention, enable, &line).await;
-            crate::run::handle_incoming(&client, "agent", BOT, &access, &line, None, None).await;
+            crate::run::handle_incoming(
+                &client,
+                ("agent", BOT, &access, &listening),
+                &line,
+                None,
+                None,
+            )
+            .await;
         })
     }
 
@@ -189,150 +193,22 @@ mod end_to_end {
         .unwrap()
     }
 
+    /// D-1099: the owner's message goes straight to core as a said of the channel's session key
+    /// (nothing is registered in core first), and the daemon records the channel.
     #[tokio::test]
-    async fn d1097_owner_mention_in_a_new_channel_binds_then_delivers_that_message() {
+    async fn d1097_owner_mention_in_a_new_channel_delivers_that_message() {
         let mut w = world().await;
         let address = crate::map::address_for("agent", "100", "200");
         let task = receive(&w, line(OWNER, &[BOT]));
-
-        // The child asks core for the binding on its own connection.
-        let create = next(&mut w.reader).await;
-        assert_eq!(create["m"], "create_binding", "{create}");
-        assert_eq!(create["address"], address);
-        let binding = create["binding_id"].as_str().unwrap().to_string();
-        assert_eq!(
-            Some(binding.clone()),
-            super::super::owner_mention::binding_id_for(INSTANCE, &address)
-        );
-        write_json(&mut w.writer, &json!({"id":create["id"],"m":"ok"}))
-            .await
-            .unwrap();
-        // Core then binds it, as it does for any created binding.
-        write_json(
-            &mut w.writer,
-            &json!({"id":"bind-2","m":"bind","binding_id":binding,"address":address}),
-        )
-        .await
-        .unwrap();
-        let ack = next(&mut w.reader).await;
-        assert_eq!(
-            (ack["id"].as_str(), ack["m"].as_str()),
-            (Some("bind-2"), Some("ok"))
-        );
-
-        // The very message that asked becomes a said on the new binding.
-        let said = next(&mut w.reader).await;
-        assert_eq!(said["m"], "said");
-        assert_eq!(said["binding_id"], binding);
-        assert_eq!(said["author_id"], OWNER);
-        assert!(said["text"].as_str().unwrap().contains("hello"));
-        write_json(
-            &mut w.writer,
-            &json!({"id": said["id"], "m": "ok", "seq": 1}),
-        )
-        .await
-        .unwrap();
-        task.await.unwrap();
-        for _ in 0..200 {
-            if !w.recorder.0.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        // The daemon was told, so its store keeps the channel across restarts.
-        assert_eq!(
-            w.recorder.0.lock().unwrap().clone(),
-            vec![(address, binding)]
-        );
-    }
-
-    #[tokio::test]
-    async fn d1098_owner_mention_uses_the_binding_id_core_binds() {
-        let mut w = world().await;
-        let address = crate::map::address_for("agent", "100", "200");
-        let task = receive(&w, line(OWNER, &[BOT]));
-
-        // The child asks core for the binding on its own connection.
-        let create = next(&mut w.reader).await;
-        assert_eq!(create["m"], "create_binding", "{create}");
-        assert_eq!(create["address"], address);
-        assert_eq!(
-            create["binding_id"].as_str(),
-            super::super::owner_mention::binding_id_for(INSTANCE, &address).as_deref()
-        );
-        // D-1098: core reuses the instance's existing binding for the address (an older id,
-        // here not the uuid5), and binds that one.
-        let binding = "0b7e6a2c-41d3-4c8e-9f1a-2b3c4d5e6f70".to_string();
-        write_json(&mut w.writer, &json!({"id":create["id"],"m":"ok"}))
-            .await
-            .unwrap();
-        // Core then binds it, as it does for any created binding.
-        write_json(
-            &mut w.writer,
-            &json!({"id":"bind-2","m":"bind","binding_id":binding,"address":address}),
-        )
-        .await
-        .unwrap();
-        let ack = next(&mut w.reader).await;
-        assert_eq!(
-            (ack["id"].as_str(), ack["m"].as_str()),
-            (Some("bind-2"), Some("ok"))
-        );
-
-        // The very message that asked becomes a said on the new binding.
-        let said = next(&mut w.reader).await;
-        assert_eq!(said["m"], "said");
-        assert_eq!(said["binding_id"], binding);
-        assert_eq!(said["author_id"], OWNER);
-        assert!(said["text"].as_str().unwrap().contains("hello"));
-        write_json(
-            &mut w.writer,
-            &json!({"id": said["id"], "m": "ok", "seq": 1}),
-        )
-        .await
-        .unwrap();
-        task.await.unwrap();
-        for _ in 0..200 {
-            if !w.recorder.0.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        // The daemon is told core's id, so its store keeps the binding core actually holds.
-        assert_eq!(
-            w.recorder.0.lock().unwrap().clone(),
-            vec![(address, binding)]
-        );
-    }
-
-    /// Core writes `ok` and then `bind` back to back; the child may handle the bind before the
-    /// `create_binding` call resumes. With a reused id the client then sees an address already
-    /// bound to another id. The channel is bound all the same, so it is enabled with core's id.
-    #[tokio::test]
-    async fn d1098_owner_mention_enables_when_the_reused_bind_is_handled_first() {
-        let mut w = world().await;
-        let address = crate::map::address_for("agent", "100", "200");
-        let task = receive(&w, line(OWNER, &[BOT]));
-        let create = next(&mut w.reader).await;
-        assert_eq!(create["m"], "create_binding", "{create}");
-        let binding = "5d1c2b3a-41d3-4c8e-9f1a-2b3c4d5e6f71".to_string();
-        write_json(
-            &mut w.writer,
-            &json!({"id":"bind-2","m":"bind","binding_id":binding,"address":address}),
-        )
-        .await
-        .unwrap();
-        let ack = next(&mut w.reader).await;
-        assert_eq!(ack["m"], "ok", "{ack}");
-        write_json(&mut w.writer, &json!({"id":create["id"],"m":"ok"}))
-            .await
-            .unwrap();
         let said = next(&mut w.reader).await;
         assert_eq!(said["m"], "said", "{said}");
-        assert_eq!(said["binding_id"], binding);
+        assert_eq!(said["session"], address);
+        assert_eq!(said["ref"], "7", "the message id is its reference");
+        assert_eq!(said["author_id"], OWNER);
+        assert!(said["text"].as_str().unwrap().contains("hello"));
         write_json(
             &mut w.writer,
-            &json!({"id": said["id"], "m": "ok", "seq": 1}),
+            &json!({"id": said["id"], "m": "ok", "seq": 1, "session_id": address}),
         )
         .await
         .unwrap();
@@ -343,10 +219,8 @@ mod end_to_end {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert_eq!(
-            w.recorder.0.lock().unwrap().clone(),
-            vec![(address, binding)]
-        );
+        assert_eq!(w.recorder.0.lock().unwrap().clone(), vec![address.clone()]);
+        assert!(super::super::owner_mention::listens(&w.listening, &address));
     }
 
     #[tokio::test]

@@ -65,8 +65,9 @@ pub struct VoiceManagerConfig {
     pub agent_id: String,
     pub self_bot_id: String,
     pub access: AccessConfig,
-    /// この instance が受け持つ binding address（`discord-{agent}-{guild}-{channel}`）。
-    pub addresses: Vec<String>,
+    /// この bot が聞いている channel address（`discord-{agent}-{guild}-{channel}`＝core の
+    /// session key）。オーナーのメンションで増える（D-1097/D-1099）。
+    pub addresses: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     pub settings_path: PathBuf,
 }
 
@@ -177,17 +178,17 @@ impl VoiceManager {
 
     pub async fn join(
         self: &Arc<Self>,
-        binding_id: &str,
+        session_key: &str,
         vc_channel_id: Option<&str>,
         text_channel_id: Option<&str>,
     ) -> Result<Value, String> {
         let settings = load_settings(&self.config.settings_path).map_err(|e| format!("{e:#}"))?;
         self.synthesizer.refresh_if_changed(&settings.tts);
-        let (guild, own_channel) = self.conversation(binding_id).await?;
+        let (guild, own_channel) = self.conversation(session_key)?;
         let text_channel = text_channel_id.unwrap_or(&own_channel).to_string();
         let address =
             crate::map::address_for(&self.config.agent_id, &guild.to_string(), &text_channel);
-        if !self.config.addresses.contains(&address) || self.bound(&address).await.is_none() {
+        if !self.listens(&address) {
             return Err(format!(
                 "text channel {text_channel} is not a bound conversation in this guild"
             ));
@@ -272,8 +273,8 @@ impl VoiceManager {
             })
     }
 
-    pub async fn leave(&self, binding_id: &str) -> Result<Value, String> {
-        let (guild, _) = self.conversation(binding_id).await?;
+    pub async fn leave(&self, session_key: &str) -> Result<Value, String> {
+        let (guild, _) = self.conversation(session_key)?;
         let session = self.sessions.lock().unwrap().remove(&guild);
         self.playbacks.forget(guild);
         if let Some(session) = &session {
@@ -426,6 +427,7 @@ impl VoiceManager {
             start_turn: true,
             system_context: Some(VOICE_SYSTEM_CONTEXT.to_string()),
             reply_target: None,
+            reference: None,
             live_inbound_scope: LiveInboundScope::All,
             // Spoken turns run on the session's voice (realtime) model.
             model_profile: opencrab_gate_client::wire::TurnModelProfile::Realtime,
@@ -634,22 +636,23 @@ impl VoiceManager {
         }
     }
 
-    async fn conversation(&self, binding_id: &str) -> Result<(u64, String), String> {
-        let client = self.client.get().ok_or("voice is not connected to core")?;
-        for address in &self.config.addresses {
-            if client.binding_for_address(address).await.as_deref() != Some(binding_id) {
-                continue;
-            }
-            let (guild, channel) = parse_address(&self.config.agent_id, address)
-                .ok_or("this conversation is not a Discord channel")?;
-            let guild = parse_id(&guild).ok_or("voice needs a guild conversation, not a DM")?;
-            return Ok((guild, channel));
+    /// The guild and text channel of a session key of this bot.
+    fn conversation(&self, session_key: &str) -> Result<(u64, String), String> {
+        if !self.listens(session_key) {
+            return Err("this conversation is not a Discord channel of this gateway".into());
         }
-        Err("this conversation is not a Discord channel binding of this gateway".into())
+        let (guild, channel) = parse_address(&self.config.agent_id, session_key)
+            .ok_or("this conversation is not a Discord channel")?;
+        let guild = parse_id(&guild).ok_or("voice needs a guild conversation, not a DM")?;
+        Ok((guild, channel))
     }
 
-    async fn bound(&self, address: &str) -> Option<String> {
-        self.client.get()?.binding_for_address(address).await
+    fn listens(&self, address: &str) -> bool {
+        self.config
+            .addresses
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(address)
     }
 
     async fn label(&self, user: u64) -> Option<String> {

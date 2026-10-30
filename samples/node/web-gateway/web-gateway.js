@@ -2,7 +2,6 @@
 "use strict";
 
 const { loadPlacement, ConfigError } = require("./lib/placement");
-const { configDigest } = require("./lib/wire");
 const { spawn } = require("./lib/client");
 const { listenHttp } = require("./lib/http");
 
@@ -34,13 +33,11 @@ try {
 
 const instances = [];
 for (const inst of place.instances) {
-  const digest = configDigest(inst.author_id);
-  instances.push(
-    spawn(place.core_socket, inst.instance_id, inst.revision, inst.author_id, digest),
-  );
+  instances.push(spawn(place.core_socket, inst.instance_id, inst.agent_id, inst.author_id));
 }
 
-listenHttp({ host: place.host, port: place.port }, instances).catch((err) => {
+const gateway = { instances, conversations: place.conversations };
+listenHttp({ host: place.host, port: place.port }, gateway).catch((err) => {
   console.error(err);
   process.exit(1);
 });

@@ -1,6 +1,5 @@
 "use strict";
 
-const crypto = require("node:crypto");
 const { invariant } = require("./fail");
 const { parseObject, dump, isInt, intLexeme, JsonSyntaxError } = require("./json");
 
@@ -39,16 +38,8 @@ function optId(obj) {
   return parseRequestId(requireStr(obj, "id"));
 }
 
-function configBytes(authorId) {
-  invariant(typeof authorId === "string", "author_id");
-  return Buffer.from(dump({ author_id: authorId }), "utf8");
-}
-
-function configDigest(authorId) {
-  return crypto.createHash("sha256").update(configBytes(authorId)).digest("hex");
-}
-
-function helloFrame(id, instanceId, revisionLexeme, digest) {
+// D-1099: hello names the instance and its agent; core finds or creates the instance.
+function helloFrame(id, instanceId, agentId) {
   return {
     id,
     m: "hello",
@@ -57,16 +48,16 @@ function helloFrame(id, instanceId, revisionLexeme, digest) {
     final_delivery: "automatic",
     operations: [],
     instance_id: instanceId,
-    revision: { __int: true, lexeme: revisionLexeme },
-    config_digest: digest,
+    agent_id: agentId,
   };
 }
 
-function saidFrame(id, bindingId, origin, authorId, text, attachments) {
+// D-1099: a said names the gateway's session key; there is no binding.
+function saidFrame(id, session, origin, authorId, text, attachments) {
   return {
     id,
     m: "said",
-    binding_id: bindingId,
+    session,
     origin,
     author_id: authorId,
     text,
@@ -121,10 +112,6 @@ function parseCoreMsg(obj) {
   if (m === null) {
     return { type: "invalid", id: optId(obj), code: "bad_request", m: "" };
   }
-  if (m === "bind") {
-    const parsed = parseBind(obj);
-    return parsed || { type: "invalid", id: optId(obj), code: "bad_request", m };
-  }
   if (m === "say") {
     const parsed = parseSay(obj);
     return parsed || { type: "invalid", id: optId(obj), code: "bad_request", m };
@@ -143,34 +130,24 @@ function parseCoreMsg(obj) {
   return { type: "unknown", id: optId(obj), m };
 }
 
-function parseBind(obj) {
-  const id = parseRequestId(requireStr(obj, "id"));
-  const bindingId = parseUuid(requireStr(obj, "binding_id"));
-  const address = nonemptyStr(obj, "address");
-  if (!id || !bindingId || !address) {
-    return null;
-  }
-  return { type: "bind", id, bindingId, address };
-}
-
 function parseSay(obj) {
   const id = parseRequestId(requireStr(obj, "id"));
-  const bindingId = parseUuid(requireStr(obj, "binding_id"));
+  const session = nonemptyStr(obj, "session");
   const payload = obj.payload;
-  if (!id || !bindingId || !payload || typeof payload !== "object" || Array.isArray(payload) || isInt(payload)) {
+  if (!id || !session || !payload || typeof payload !== "object" || Array.isArray(payload) || isInt(payload)) {
     return null;
   }
-  return { type: "say", id, bindingId, payload };
+  return { type: "say", id, session, payload };
 }
 
 function parseActivity(obj) {
-  const bindingId = parseUuid(requireStr(obj, "binding_id"));
+  const session = nonemptyStr(obj, "session");
   const activityId = parseUuid(requireStr(obj, "activity_id"));
   const state = nonemptyStr(obj, "state");
-  if (!bindingId || !activityId || (state !== "started" && state !== "ended")) {
+  if (!session || !activityId || (state !== "started" && state !== "ended")) {
     return null;
   }
-  return { type: "activity", bindingId, activityId, state };
+  return { type: "activity", session, activityId, state };
 }
 
 function parseResponse(obj, m) {
@@ -208,8 +185,6 @@ module.exports = {
   MAX_FRAME,
   parseRequestId,
   parseUuid,
-  configBytes,
-  configDigest,
   helloFrame,
   saidFrame,
   okFrame,

@@ -83,7 +83,7 @@ mod nostr_daemon_provision {
     /// no core credential).
     #[tokio::test]
     async fn d1099_a_nostr_instance_reaches_hello_ok() {
-        let core = start_core(Arc::new(RoutedMock::new()) as Arc<dyn LlmProvider>).await;
+        let core = start_core(Arc::new(UnusedLlm) as Arc<dyn LlmProvider>).await;
         let dir = tempfile::Builder::new()
             .prefix("nd")
             .tempdir_in("/tmp")

@@ -1,9 +1,7 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Once, OnceLock};
+
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-
 
 use opencrab_llm::message::*;
 use opencrab_llm::router::LlmRouter;
@@ -12,18 +10,14 @@ use opencrab_server::AppState;
 
 use opencrab_extgate::{serve_uds, ExtgateState};
 use opencrab_gate_client::client::InstanceClient;
-use opencrab_nostr_gateway::config::InstancePlacement;
+
 use opencrab_nostr_gateway::harness::HarnessOverrides;
 use opencrab_nostr_gateway::run::spawn_instance;
 
-use tracing_subscriber::layer::{Context, SubscriberExt};
-use tracing_subscriber::Layer;
+
+
 
 const AGENT_ID: &str = "agent-qc";
-/// dry-run say を拾う tracing target（= `opencrab_nostr_gateway::post::DRY_RUN_LOG_TARGET`）。
-const DRY_RUN_TARGET: &str = "opencrab_nostrgate::dry_run";
-/// NO_REPLY 破棄ログを拾う tracing target（= `opencrab_actions::no_reply::NO_REPLY_LOG_TARGET`）。
-const NO_REPLY_TARGET: &str = "opencrab::no_reply";
 
 fn self_pk() -> String {
     "11".repeat(32)
@@ -33,138 +27,6 @@ fn author_pk() -> String {
 }
 
 // ==================== 観測: dry-run say キャプチャ ====================
-
-#[derive(Clone, Debug, Default)]
-struct CapturedSay {
-    kind: String,
-    body: String,
-}
-
-/// NO_REPLY 破棄ログ（`no_reply_trailing_discarded` WARN）の観測。
-#[derive(Clone, Debug, Default)]
-struct CapturedDiscard {
-    discarded: String,
-}
-
-static BUFFER: OnceLock<Arc<Mutex<Vec<CapturedSay>>>> = OnceLock::new();
-static DISCARD_BUFFER: OnceLock<Arc<Mutex<Vec<CapturedDiscard>>>> = OnceLock::new();
-static INIT: Once = Once::new();
-
-/// グローバル subscriber を 1 回だけ張り、共有バッファを返す。
-///
-/// tracing の thread-local `with_default` は `tokio::spawn` の別スレッドへ伝播しないため、
-/// dry-run ログ（consumer タスクが別スレッドで吐く）を拾うにはグローバル default が必須。
-fn install_capture() -> Arc<Mutex<Vec<CapturedSay>>> {
-    let buf = BUFFER
-        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
-        .clone();
-    let discard = DISCARD_BUFFER
-        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
-        .clone();
-    INIT.call_once(|| {
-        let layer = CaptureLayer {
-            buf: buf.clone(),
-            discard,
-        };
-        let subscriber = tracing_subscriber::registry().with(layer);
-        // 既に別の default が張られていても壊さない（best-effort）。
-        let _ = tracing::subscriber::set_global_default(subscriber);
-    });
-    buf
-}
-
-/// 破棄ログの共有バッファ（`install_capture` が張った後に読む）。
-fn discard_buffer() -> Arc<Mutex<Vec<CapturedDiscard>>> {
-    DISCARD_BUFFER
-        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
-        .clone()
-}
-
-struct CaptureLayer {
-    buf: Arc<Mutex<Vec<CapturedSay>>>,
-    discard: Arc<Mutex<Vec<CapturedDiscard>>>,
-}
-
-#[derive(Default)]
-struct SayVisitor {
-    kind: Option<String>,
-    body: Option<String>,
-}
-
-impl SayVisitor {
-    fn set(&mut self, name: &str, value: String) {
-        match name {
-            "kind" => self.kind = Some(value),
-            "body" => self.body = Some(value),
-            _ => {}
-        }
-    }
-}
-
-impl tracing::field::Visit for SayVisitor {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.set(field.name(), value.to_string());
-    }
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        // deliver_say は body を `%`（Display）で出す。Debug ラッパの `{:?}` は Display
-        // 文字列そのまま（引用符なし）になる。
-        self.set(field.name(), format!("{value:?}"));
-    }
-}
-
-/// `no_reply_trailing_discarded` WARN の構造化フィールドを拾う。
-#[derive(Default)]
-struct DiscardVisitor {
-    discarded: Option<String>,
-}
-
-impl DiscardVisitor {
-    fn set(&mut self, name: &str, value: String) {
-        if name == "discarded" {
-            self.discarded = Some(value);
-        }
-    }
-}
-
-impl tracing::field::Visit for DiscardVisitor {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.set(field.name(), value.to_string());
-    }
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.set(field.name(), format!("{value:?}"));
-    }
-}
-
-impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-        match event.metadata().target() {
-            DRY_RUN_TARGET => {
-                let mut v = SayVisitor::default();
-                event.record(&mut v);
-                self.buf.lock().unwrap().push(CapturedSay {
-                    kind: v.kind.unwrap_or_default(),
-                    body: v.body.unwrap_or_default(),
-                });
-            }
-            NO_REPLY_TARGET => {
-                let mut v = DiscardVisitor::default();
-                event.record(&mut v);
-                self.discard.lock().unwrap().push(CapturedDiscard {
-                    discarded: v.discarded.unwrap_or_default(),
-                });
-            }
-            _ => {}
-        }
-    }
-}
-
-fn captured(buf: &Arc<Mutex<Vec<CapturedSay>>>) -> Vec<CapturedSay> {
-    buf.lock().unwrap().clone()
-}
-
-fn discards(buf: &Arc<Mutex<Vec<CapturedDiscard>>>) -> Vec<CapturedDiscard> {
-    buf.lock().unwrap().clone()
-}
 
 /// 述語が真になるまで最大 ~5s ポーリングする。
 async fn wait_until(pred: impl Fn() -> bool) -> bool {
@@ -186,78 +48,11 @@ async fn wait_until_for(timeout: Duration, pred: impl Fn() -> bool) -> bool {
     }
 }
 
-fn body_index(buf: &Arc<Mutex<Vec<CapturedSay>>>, needle: &str) -> Option<usize> {
-    captured(buf).iter().position(|c| c.body.contains(needle))
-}
-
-// ==================== fixture ====================
-
-struct Fixture {
-    path: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("watch.jsonl");
-        std::fs::write(&path, "").unwrap();
-        Self { path, _dir: dir }
-    }
-
-    fn append_line(&self, line: &str) {
-        use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&self.path)
-            .unwrap();
-        writeln!(f, "{line}").unwrap();
-    }
-}
-
-/// 自分宛て `#p` の kind:1 メンション 1 行（WatchEvent JSONL）。`content` にルーティング用の
-/// マーカーを載せる（extgate は V1 アンカーを剥がした本文＝この content を会話へ記録する）。
-fn mention_event(id: &str, content: &str) -> String {
-    serde_json::json!({
-        "id": id,
-        "pubkey": author_pk(),
-        "npub": null,
-        "note_id": null,
-        "created_at": 1i64,
-        "kind": 1,
-        "content": content,
-        "tags": [["p", self_pk()]],
-    })
-    .to_string()
-}
-
-// ==================== FIFO mock（単発ターン用: (a)/(c)） ====================
-
-struct FifoMock {
-    responses: Mutex<std::collections::VecDeque<ChatResponse>>,
-    system_prompts: Mutex<Vec<String>>,
-}
-
-impl FifoMock {
-    fn new() -> Self {
-        Self {
-            responses: Mutex::new(std::collections::VecDeque::new()),
-            system_prompts: Mutex::new(Vec::new()),
-        }
-    }
-    fn push_text(&self, text: &str) {
-        self.responses
-            .lock()
-            .unwrap()
-            .push_back(text_response(text));
-    }
-    fn system_prompts(&self) -> Vec<String> {
-        self.system_prompts.lock().unwrap().clone()
-    }
-}
+/// An LLM that is never called: the remaining cases only connect gateways to core.
+struct UnusedLlm;
 
 #[async_trait::async_trait]
-impl LlmProvider for FifoMock {
+impl LlmProvider for UnusedLlm {
     fn name(&self) -> &str {
         "mock"
     }
@@ -267,102 +62,12 @@ impl LlmProvider for FifoMock {
     async fn available_models(&self) -> anyhow::Result<Vec<opencrab_llm::traits::ModelInfo>> {
         Ok(vec![])
     }
-    async fn chat_completion(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        self.system_prompts
-            .lock()
-            .unwrap()
-            .push(system_of(&request));
-        self.responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| anyhow::anyhow!("FifoMock: no more queued responses"))
+    async fn chat_completion(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        Err(anyhow::anyhow!("UnusedLlm: no turn expected"))
     }
 }
 
 // ==================== 共通 helpers ====================
-
-fn system_of(request: &ChatRequest) -> String {
-    request
-        .messages
-        .iter()
-        .filter(|m| m.role == Role::System)
-        .filter_map(|m| m.text_content())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// 全メッセージ本文を連結（ルーティング用の会話マーカー検出に使う）。
-fn request_text(request: &ChatRequest) -> String {
-    request
-        .messages
-        .iter()
-        .filter_map(|m| m.text_content())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn has_tool_role(request: &ChatRequest) -> bool {
-    request.messages.iter().any(|m| m.role == Role::Tool)
-}
-
-fn text_response(text: &str) -> ChatResponse {
-    ChatResponse {
-        id: uuid::Uuid::new_v4().to_string(),
-        model: "mock-model".to_string(),
-        choices: vec![Choice {
-            index: 0,
-            message: Message::assistant(text),
-            finish_reason: Some(FinishReason::Stop),
-        }],
-        usage: Usage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            total_tokens: 15,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        },
-        created: 0,
-    }
-}
-
-fn tool_call_response(name: &str, args: serde_json::Value) -> ChatResponse {
-    tool_calls_response(vec![(name, args)])
-}
-
-fn tool_calls_response(calls: Vec<(&str, serde_json::Value)>) -> ChatResponse {
-    let msg = Message {
-        role: Role::Assistant,
-        content: None,
-        name: None,
-        function_call: None,
-        tool_calls: Some(
-            calls
-                .into_iter()
-                .map(|(name, args)| ToolCall {
-                    id: format!("tc-{}", uuid::Uuid::new_v4()),
-                    call_type: "function".to_string(),
-                    function: FunctionCall {
-                        name: name.to_string(),
-                        arguments: args.to_string(),
-                    },
-                })
-                .collect(),
-        ),
-        tool_call_id: None,
-    };
-    ChatResponse {
-        id: uuid::Uuid::new_v4().to_string(),
-        model: "mock-model".to_string(),
-        choices: vec![Choice {
-            index: 0,
-            message: msg,
-            finish_reason: Some(FinishReason::ToolCalls),
-        }],
-        usage: Usage::default(),
-        created: 0,
-    }
-}
 
 /// mock モデルの予算 envelope を満たす（#826 fail-loud 対策）。
 fn register_mock_pricing(db: &opencrab_db::Db) {
@@ -456,7 +161,6 @@ fn build_app_state(db: opencrab_db::Db, provider: Arc<dyn LlmProvider>) -> AppSt
 
 struct Core {
     extgate: Arc<ExtgateState>,
-    state: AppState,
     sock: PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -499,59 +203,9 @@ async fn start_core(provider: Arc<dyn LlmProvider>) -> Core {
 
     Core {
         extgate,
-        state,
         sock,
         _dir: dir,
     }
-}
-
-/// `spawn_instance`（fake_watch＋dry_run）を起動して core の hello 受理を待ち、この instance の
-/// session key（`nostr-<agent>`）の core session を開く（D-1099: 事前登録なし）。返り値の
-/// `session_id` は core の session（新規 key ではその key）。
-async fn wire_instance(
-    core: &Core,
-    fixture: &Fixture,
-    config_bytes: Vec<u8>,
-) -> (Arc<InstanceClient>, String, String) {
-    let instance_id = uuid::Uuid::new_v4().to_string();
-    let address = format!("nostr-{AGENT_ID}");
-    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
-
-    let place = InstancePlacement {
-        instance_id: instance_id.clone(),
-        agent_id: AGENT_ID.to_string(),
-        address: address.clone(),
-        config_b64,
-    };
-    let overrides = HarnessOverrides {
-        fake_watch: Some(fixture.path.clone()),
-        dry_run: true,
-    };
-    let client = spawn_instance(
-        core.sock.clone(),
-        &place,
-        &config_bytes,
-        None,
-        // Harness: one instance per process, but no credential to declare.
-        opencrab_nostr_gateway::run_env::SecretOwner::ThisInstance,
-        PathBuf::from("/nonexistent/nostaro"),
-        overrides,
-        None,
-    )
-    .expect("spawn_instance");
-
-    // hello 受理を待つ（watch lane はここから起動する）。
-    let mut live = false;
-    for _ in 0..250 {
-        if client.connection_live().await {
-            live = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(live, "hello が受理されない");
-    let session_id = client.open(&address, None).await.expect("open");
-    (client, address, session_id)
 }
 
 fn nostr_config(watches: Option<serde_json::Value>) -> Vec<u8> {

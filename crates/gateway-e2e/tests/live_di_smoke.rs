@@ -320,8 +320,8 @@ async fn run_gate(
         .ok()
         .filter(|v| !v.is_empty())
         .expect("gate モードは LIVE_GATE_SOCK（gate UDS の絶対パス）が必要（環境固有パスはソースに埋めない）");
-    // 1) gate instance（kind=discord・中立 config）を新規採番し、gate UDS の `provision`
-    //    で instance と binding を宣言する（資格情報なし・D-1098）。guild/channel/self_bot は
+    // 1) gate instance を新規採番する。core への事前登録は無く、hello で instance が作られ、
+    //    最初の said で session が開く（資格情報なし・D-1099）。guild/channel/self_bot は
     //    **合成 fixture**（実 Discord の ID ではない・ルーティング用のダミー）。invoke は外部へ
     //    出ないので任意の合成値でよい。実在の識別子は使わない。
     let instance_id = uuid::Uuid::new_v4().to_string();
@@ -329,19 +329,6 @@ async fn run_gate(
     let channel = "600"; // 合成 fixture
     let self_bot_id = "111"; // 合成 fixture
     let address = format!("discord-{agent}-{guild}-{channel}");
-    let config_b64 = opencrab_extgate::encode_config_b64(br#"{"delivery_mode":"tool_driven"}"#);
-    let provisioned =
-        opencrab_gate_client::provision::ProvisionClient::new(std::path::PathBuf::from(&sock))
-            .provision(&opencrab_gate_client::provision::ProvisionDesired {
-                instance_id: &instance_id,
-                kind_id: "discord",
-                agent_id: agent,
-                enabled: true,
-                config_b64: &config_b64,
-                addresses: std::slice::from_ref(&address),
-            })
-            .await
-            .expect("provision（core 稼働・socket path・agent id を確認）");
 
     // 2) LLM 呼び出し回数の基準（ターン前の llm-logs id 集合）。
     let before_ids = llm_log_ids(http, agent).await;
@@ -354,9 +341,8 @@ async fn run_gate(
     let client = InstanceClient::spawn_with_operations(
         std::path::PathBuf::from(&sock),
         instance_id.clone(),
-        provisioned.revision,
+        agent.to_string(),
         self_bot_id.to_string(),
-        provisioned.config_digest,
         SayPolicy::AcceptToLiveQueue,
         Some(opencrab_discord_gateway::ops::operation_declarations(false)),
         opencrab_gate_client::RuntimeCapabilities {
@@ -365,19 +351,16 @@ async fn run_gate(
         handler,
     );
 
-    // bind ack を待つ。
-    let mut bound = false;
+    // hello 受理を待つ。
+    let mut live = false;
     for _ in 0..300 {
-        if client.binding_for_address(&address).await.is_some() {
-            bound = true;
+        if client.connection_live().await {
+            live = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(
-        bound,
-        "binding が ack されない（core 稼働・socket path を確認）"
-    );
+    assert!(live, "hello が受理されない（core 稼働・socket path を確認）");
 
     // 4) 「ユーザー発話」を 1 件送る。origin は毎回ユニーク（dedup 回避）。caller=Owner を明示する。
     let origin = format!("discord:message:v1:{channel}:{}", now_millis());
@@ -387,6 +370,7 @@ async fn run_gate(
         start_turn: true,
         system_context: None,
         reply_target: None,
+        reference: None,
         live_inbound_scope: opencrab_gate_client::wire::LiveInboundScope::All,
         model_profile: opencrab_gate_client::wire::TurnModelProfile::Default,
         agent_prelude: None,
@@ -478,9 +462,8 @@ async fn run_gate(
         .iter()
         .filter(|id| !before_ids.contains(*id))
         .count();
-    // The binding core reports for the address (it may be one the instance already had).
-    let binding_id = &provisioned.bindings[0].binding_id;
-    let session_id = opencrab_extgate::session_id_for_binding(binding_id);
+    // The core session of the address (D-1099: a new key is its own session id).
+    let session_id = client.open(&address, None).await.expect("open");
     let saved = session_logs(http, &session_id).await;
 
     let ops: Vec<(String, String)> = invokes

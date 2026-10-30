@@ -81,23 +81,18 @@ async fn fire_heartbeat_via_scheduler_seam(core: &Core, session_id: &str, messag
     }
 }
 
-/// 専用チャンネルで instance+binding を張り gateway を起動して ack を待つ（heartbeat 用・binding_id を返す）。
+/// 専用チャンネルを聞く gateway を起動し、そのチャンネルの core session を開く（heartbeat 用・
+/// session_id を返す）。D-1099: 事前登録は無く、session は `open` で作られる。
 async fn wire_hb(core: &Core, fixture: &Fixture, channel: &str) -> (Arc<InstanceClient>, String) {
     let instance_id = uuid::Uuid::new_v4().to_string();
     let config_bytes = discord_config();
     let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
 
-    let binding_id = provision(core, &instance_id, "discord", &config_b64, std::slice::from_ref(&addr))
-        .await
-        .remove(0);
-
     let place = InstancePlacement {
         instance_id: instance_id.clone(),
-        revision: 1,
         addresses: vec![addr.clone()],
         config_b64,
-        core_config_b64: None,
         channel_socket: None,
     };
     let overrides = HarnessOverrides {
@@ -107,28 +102,25 @@ async fn wire_hb(core: &Core, fixture: &Fixture, channel: &str) -> (Arc<Instance
     let client = spawn_instance(core.sock.clone(), &place, &config_bytes, None, overrides, None)
         .expect("spawn_instance");
 
-    let mut bound = false;
-    for _ in 0..250 {
-        if client.binding_for_address(&addr).await.is_some() {
-            bound = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(bound, "binding が ack されない（heartbeat ch {channel}）");
-    (client, binding_id)
+    wait_connected(&client, &addr).await;
+    let session_id = client.open(&addr, None).await.expect("open");
+    (client, session_id)
 }
 
-/// instance+binding を DB に置くが gateway は起動しない（H4: gateway 停止中＝binding 未接続）。
+/// チャンネルの session を開いてから gateway を止める（H4: gateway 停止中＝未接続）。
 async fn provision_hb_no_gateway(core: &Core, channel: &str) -> String {
-    let instance_id = uuid::Uuid::new_v4().to_string();
-    let config_bytes = discord_config();
-    let config_b64 = opencrab_extgate::encode_config_b64(&config_bytes);
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
-    let binding_id = provision(core, &instance_id, "discord", &config_b64, std::slice::from_ref(&addr))
-        .await
-        .remove(0);
-    binding_id
+    let client = opencrab_gate_client::client::InstanceClient::connect(
+        &core.sock,
+        uuid::Uuid::new_v4().to_string(),
+        AGENT_ID.to_string(),
+        SELF_BOT.to_string(),
+    )
+    .await
+    .expect("connect");
+    let session_id = client.open(&addr, None).await.expect("open");
+    drop(client);
+    session_id
 }
 
 struct HbTwoSayMock {
@@ -179,8 +171,7 @@ async fn heartbeat_h1_two_posts_flag_only_on_last() {
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
-    let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB1).await;
-    let session_id = format!("extgate-{binding_id}");
+    let (_client, session_id) = wire_hb(&core, &fixture, CH_HB1).await;
     let message = format!("{M_HB1} 巡回して報告することがあれば 2 回に分けて投稿して");
 
     fire_heartbeat_via_scheduler_seam(&core, &session_id, &message).await;
@@ -342,8 +333,7 @@ async fn heartbeat_h2_no_reply_stays_silent() {
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
-    let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB2).await;
-    let session_id = format!("extgate-{binding_id}");
+    let (_client, session_id) = wire_hb(&core, &fixture, CH_HB2).await;
     let message = format!("{M_HB2} 特に無ければ何もしないで");
 
     fire_heartbeat_via_scheduler_seam(&core, &session_id, &message).await;
@@ -431,8 +421,7 @@ async fn heartbeat_h3_declaration_then_subtask_then_report() {
     *core.state.tools_config.write().unwrap() = shell_enabled_tools_config();
 
     let fixture = Fixture::new();
-    let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB3).await;
-    let session_id = format!("extgate-{binding_id}");
+    let (_client, session_id) = wire_hb(&core, &fixture, CH_HB3).await;
     let message = format!("{M_HB3} 宣言してから subtask で作業して、終わったら報告して");
 
     fire_heartbeat_via_scheduler_seam(&core, &session_id, &message).await;
@@ -553,8 +542,7 @@ async fn heartbeat_other_parent_subtask_does_not_suppress_completed_flag() {
     let core = start_core(Arc::new(HbCrossSessionMock) as Arc<dyn LlmProvider>).await;
 
     let fixture = Fixture::new();
-    let (_client, binding_id) = wire_hb(&core, &fixture, CH_HB5).await;
-    let session_id = format!("extgate-{binding_id}");
+    let (_client, session_id) = wire_hb(&core, &fixture, CH_HB5).await;
     let message = format!("{M_HB5} 完了報告を投稿して");
 
     let other_parent_session = "extgate-other-parent";
@@ -661,8 +649,7 @@ async fn heartbeat_h4_unbound_gateway_fires_nothing() {
     let core = start_core(mock.clone() as Arc<dyn LlmProvider>).await;
 
     // gateway は起動しない（binding 行だけ DB に置く＝未接続）。
-    let binding_id = provision_hb_no_gateway(&core, CH_HB4).await;
-    let session_id = format!("extgate-{binding_id}");
+    let session_id = provision_hb_no_gateway(&core, CH_HB4).await;
     fire_heartbeat_via_scheduler_seam(&core, &session_id, "HBFOURMARK 未接続時の発火を検証する")
         .await;
     tokio::time::sleep(Duration::from_millis(800)).await;

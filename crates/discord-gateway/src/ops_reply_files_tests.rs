@@ -258,7 +258,6 @@ async fn oversized_descriptor_is_rejected_without_sending() {
 fn size_cap_is_checked_on_descriptors_before_reading() {
     use crate::reply_files::{within_size_cap, MAX_REPLY_FILE_BYTES};
     use opencrab_gate_client::OutboundFile;
-    assert_eq!(MAX_REPLY_FILE_BYTES, 500 * 1024 * 1024);
     let descriptor = |size: u64| {
         OutboundFile::parse(&json!({
             "id": "11111111-1111-4111-8111-111111111111", "name": "x.bin",

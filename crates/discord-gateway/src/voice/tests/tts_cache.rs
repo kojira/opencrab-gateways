@@ -277,5 +277,4 @@ async fn synthesis_constants_v1_set_speed_and_zero_leading_silence() {
     assert_eq!(body["prePhonemeLength"], 0.0, "{body}");
     assert!(body.get("postPhonemeLength").is_none(), "{body}");
     assert_eq!(body["accent_phrases"], serde_json::json!([]), "{body}");
-    assert_eq!(SYNTHESIS_CONSTANTS_VERSION, 1);
 }

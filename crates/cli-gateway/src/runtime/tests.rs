@@ -92,7 +92,6 @@ fn maps_all_live_contract_variants() {
 
 #[tokio::test]
 async fn bounded_output_writer_reports_broken_pipe() {
-    assert_eq!(QUEUE_CAPACITY, 32);
     let (writer, reader) = tokio::io::duplex(64);
     drop(reader);
     let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);

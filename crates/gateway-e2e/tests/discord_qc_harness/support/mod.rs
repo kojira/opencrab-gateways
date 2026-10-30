@@ -19,14 +19,10 @@ pub(crate) use tracing_subscriber::Layer;
 pub(crate) const AGENT_ID: &str = "agent-discord-qc";
 pub(crate) const GUILD: &str = "500";
 pub(crate) const CHANNEL: &str = "600";
-/// #915: typing 隔離テスト専用チャンネル（他テストは 600 のみ使う）。並列 CI でも typing を分離。
-pub(crate) const CHANNEL_TY: &str = "601";
 pub(crate) const SELF_BOT: &str = "111"; // bot 自身の user id（自分の投稿除外）。
 pub(crate) const AUTHOR: &str = "222"; // owner の Discord user id（generic admission で caller=Owner）。
 /// dry-run を拾う tracing target（= `opencrab_discord_gateway::transport::DRY_RUN_LOG_TARGET`）。
 pub(crate) const DRY_RUN_TARGET: &str = "opencrab_discordgate::dry_run";
-pub(crate) const SYS_ACCEPTED: &str = "👀";
-pub(crate) const SYS_COMPLETED: &str = "🏁";
 
 pub(crate) fn address() -> String {
     format!("discord-{AGENT_ID}-{GUILD}-{CHANNEL}")
@@ -34,14 +30,12 @@ pub(crate) fn address() -> String {
 
 mod capture;
 mod fixture;
-mod folding_mock;
 mod harness;
 mod responses;
 mod routed_mock;
 
 pub(crate) use capture::*;
 pub(crate) use fixture::*;
-pub(crate) use folding_mock::*;
 pub(crate) use harness::*;
 pub(crate) use responses::*;
 pub(crate) use routed_mock::*;

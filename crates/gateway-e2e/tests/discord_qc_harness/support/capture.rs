@@ -6,12 +6,7 @@ use super::*;
 pub(crate) struct Captured {
     pub(crate) kind: String,
     pub(crate) body: String,
-    pub(crate) emoji: String,
     pub(crate) channel: String,
-    pub(crate) message: String,
-    /// #915: reply の own 投稿 id（dry-run が合成・say の message id と同じ形）。reply 以外は空。
-    /// `message`（＝返信先 origin id）は従来どおり維持し、🏁 の相関はこの reply_id で行う。
-    pub(crate) reply_id: String,
 }
 
 static BUFFER: OnceLock<Arc<Mutex<Vec<Captured>>>> = OnceLock::new();
@@ -36,17 +31,6 @@ pub(crate) fn install_capture() -> Arc<Mutex<Vec<Captured>>> {
         let _ = tracing::subscriber::set_global_default(subscriber);
     });
     buf
-}
-
-/// WARN イベントのうち指定 `session_id` フィールドを持つものの件数（#925 H4 fail-loud）。
-pub(crate) fn warns_with_session(session_id: &str) -> usize {
-    WARN_BUFFER
-        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|s| s.as_str() == session_id)
-        .count()
 }
 
 struct CaptureLayer {
@@ -76,10 +60,7 @@ impl tracing::field::Visit for WarnVisitor {
 struct Visitor {
     kind: Option<String>,
     body: Option<String>,
-    emoji: Option<String>,
     channel: Option<String>,
-    message: Option<String>,
-    reply_id: Option<String>,
 }
 
 impl Visitor {
@@ -87,10 +68,7 @@ impl Visitor {
         match name {
             "kind" => self.kind = Some(value),
             "body" => self.body = Some(value),
-            "emoji" => self.emoji = Some(value),
             "channel" => self.channel = Some(value),
-            "message" => self.message = Some(value),
-            "reply_id" => self.reply_id = Some(value),
             _ => {}
         }
     }
@@ -114,10 +92,7 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
             self.buf.lock().unwrap().push(Captured {
                 kind: v.kind.unwrap_or_default(),
                 body: v.body.unwrap_or_default(),
-                emoji: v.emoji.unwrap_or_default(),
                 channel: v.channel.unwrap_or_default(),
-                message: v.message.unwrap_or_default(),
-                reply_id: v.reply_id.unwrap_or_default(),
             });
             return;
         }

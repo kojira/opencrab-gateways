@@ -122,7 +122,6 @@ impl SpawnerFactory for ProductionFactory {
         credential: zeroize::Zeroizing<Vec<u8>>,
         start_nonce: &str,
     ) -> Result<Arc<dyn ChildSpawner>> {
-        let revision = row.core_revision.context("verified revision missing")?;
         std::fs::create_dir_all(&self.placement_dir)?;
         let path = self.placement_dir.join(format!("{}.json", row.instance_id));
         let control_socket = self
@@ -137,9 +136,8 @@ impl SpawnerFactory for ProductionFactory {
             "channel_socket": self.channel_socket(row),
             "control_socket": control_socket,
             "start_nonce": start_nonce,
-            "instances": [{"instance_id":row.instance_id,"revision":revision,
-                "addresses":row.addresses,"config_b64":row.config_b64,
-                "core_config_b64": super::core_config_b64_for_runtime_config(&row.config_b64)?}]
+            "instances": [{"instance_id":row.instance_id,
+                "addresses":row.addresses,"config_b64":row.config_b64}]
         });
         let temporary = path.with_extension("json.tmp");
         std::fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;

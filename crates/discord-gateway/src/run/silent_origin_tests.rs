@@ -111,7 +111,7 @@ async fn event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras()
 
     let recording = Arc::new(RecordingTransport::new());
     let transport: Arc<dyn DiscordTransport> = recording.clone();
-    let targets: BindingDeliveryTargets =
+    let targets: SessionDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let consumer = spawn_say_consumer(
         client,

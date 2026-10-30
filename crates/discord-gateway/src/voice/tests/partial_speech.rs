@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use super::e2e::{core, manager_with, wait_played, Core, FakePlayer, BINDING};
 use super::mock_http::{self, Recorded};
 use crate::config::SystemReactions;
-use crate::ops::BindingDeliveryTargets;
+use crate::ops::SessionDeliveryTargets;
 use crate::transport::testfake::RecordingTransport;
 use crate::voice::session::VoiceManager;
 
@@ -43,7 +43,7 @@ async fn setup(join: bool) -> Setup {
     if join {
         manager.join(BINDING, Some("555"), None).await.unwrap();
     }
-    let targets: BindingDeliveryTargets =
+    let targets: SessionDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let consumer = crate::run::spawn_say_consumer(
         core.client.clone(),

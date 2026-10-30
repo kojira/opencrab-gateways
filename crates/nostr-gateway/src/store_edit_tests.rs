@@ -35,7 +35,7 @@ fn seeded() -> (tempfile::TempDir, NostrStore, u64) {
         .unwrap();
     store.mark_provisioning(ID, generation).unwrap();
     store
-        .mark_verified(ID, generation, 3, "digest", &["b".into()], true)
+        .mark_verified(ID, generation, true)
         .unwrap();
     (temp, store, generation)
 }

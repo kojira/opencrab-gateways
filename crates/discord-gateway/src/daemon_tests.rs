@@ -313,14 +313,7 @@ async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped
         .mark_provisioning("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation)
         .unwrap());
     assert!(store
-        .mark_verified(
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            generation,
-            4,
-            "digest",
-            &["binding".into()],
-            true,
-        )
+        .mark_verified("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation, true)
         .unwrap());
     drop(store);
 
@@ -378,7 +371,7 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_and_core_observa
                 | LifecycleState::Error
         ) {
             store
-                .mark_verified(id, generation, 1, "digest", &[], enabled)
+                .mark_verified(id, generation, enabled)
                 .unwrap();
         }
         if matches!(state, LifecycleState::Running) {
@@ -453,7 +446,7 @@ async fn s5_discord_running_loss_and_stale_process_are_reaped_to_durable_error()
             .unwrap();
         store.mark_provisioning(id, generation).unwrap();
         store
-            .mark_verified(id, generation, 1, "digest", &[], true)
+            .mark_verified(id, generation, true)
             .unwrap();
         store.record_started(id, generation, 4242, "nonce").unwrap();
         store.mark_running(id, generation, 4242, "nonce").unwrap();
@@ -549,14 +542,7 @@ async fn s5_discord_malformed_readiness_reaps_child_and_persists_retry() {
         .mark_provisioning("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation)
         .unwrap();
     store
-        .mark_verified(
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            generation,
-            1,
-            "digest",
-            &[],
-            true,
-        )
+        .mark_verified("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation, true)
         .unwrap();
     let store = Arc::new(Mutex::new(store));
     let socket = temp.path().join("ready.sock");
@@ -608,7 +594,7 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
         .unwrap();
     store.mark_provisioning(instance_id, generation).unwrap();
     store
-        .mark_verified(instance_id, generation, 1, "digest", &[], false)
+        .mark_verified(instance_id, generation, false)
         .unwrap();
     let daemon = DiscordDaemon::new(
         store,
@@ -695,7 +681,7 @@ fn d1079_production_placement_carries_attachment_outbox_root() {
         .unwrap();
     store.mark_provisioning(instance_id, generation).unwrap();
     store
-        .mark_verified(instance_id, generation, 1, "digest", &[], true)
+        .mark_verified(instance_id, generation, true)
         .unwrap();
     let row = store.get(instance_id).unwrap().unwrap();
     factory

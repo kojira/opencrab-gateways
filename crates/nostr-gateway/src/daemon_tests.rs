@@ -294,14 +294,7 @@ async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped()
         .mark_provisioning("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation)
         .unwrap());
     assert!(store
-        .mark_verified(
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            generation,
-            4,
-            "digest",
-            &["binding".into()],
-            true,
-        )
+        .mark_verified("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", generation, true)
         .unwrap());
     drop(store);
 
@@ -379,7 +372,7 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_and_core_observati
                 | LifecycleState::Error
         ) {
             store
-                .mark_verified(id, generation, 1, "digest", &[], enabled)
+                .mark_verified(id, generation, enabled)
                 .unwrap();
         }
         if matches!(state, LifecycleState::Running) {
@@ -454,7 +447,7 @@ async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
             .unwrap();
         store.mark_provisioning(id, generation).unwrap();
         store
-            .mark_verified(id, generation, 1, "digest", &[], true)
+            .mark_verified(id, generation, true)
             .unwrap();
         store.record_started(id, generation, 4242, "nonce").unwrap();
         store.mark_running(id, generation, 4242, "nonce").unwrap();

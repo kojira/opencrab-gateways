@@ -14,7 +14,6 @@ pub mod admin_settings;
 pub mod attachment;
 pub mod channel_request;
 pub mod config;
-pub mod core_provisioning;
 pub mod daemon;
 pub mod harness;
 pub mod legacy_import;

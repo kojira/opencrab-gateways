@@ -110,22 +110,10 @@ async fn run() -> anyhow::Result<()> {
         place.declared_run_env(),
     )?;
     if let (Some(control), Some(nonce)) = (control, start_nonce) {
-        let addresses = inst.addresses.clone();
+        // Ready once core accepted the hello (D-1099: there is nothing else to wait for).
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
-            loop {
-                if client.connection_live().await {
-                    let mut all_bound = true;
-                    for address in &addresses {
-                        if client.remembered_binding(address).await.is_none() {
-                            all_bound = false;
-                            break;
-                        }
-                    }
-                    if all_bound {
-                        break;
-                    }
-                }
+            while !client.connection_live().await {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             if let Ok(mut stream) = tokio::net::UnixStream::connect(control).await {

@@ -56,27 +56,14 @@ impl Placement {
 #[derive(Debug, Clone, Deserialize)]
 pub struct InstancePlacement {
     pub instance_id: String,
-    pub revision: u64,
-    /// この agent の whitelisted channel session（`discord-{agent}-{guild}-{channel}`）の集合。
-    /// gateway はこれらの say を drain し bind を待つ。実受理は core の ack が正（binding_for_address）。
+    /// この bot が聞く channel（`discord-{agent}-{guild}-{channel}`）。それぞれが core の session key
+    /// になる。オーナーのメンションで実行中に増える（D-1097/D-1099）。
     pub addresses: Vec<String>,
     pub config_b64: String,
-    /// D-1097: the config core holds for this instance (fixed and neutral). The hello digest is
-    /// its digest. Absent = the digest of `config_b64` (placements written before D-1097).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub core_config_b64: Option<String>,
     /// D-1097: the channel-request socket, copied from [`Placement::channel_socket`] for the
     /// running instance. Not part of the instance entry on disk.
     #[serde(skip)]
     pub channel_socket: Option<std::path::PathBuf>,
-}
-
-impl InstancePlacement {
-    /// The `config_digest` this instance presents on hello.
-    pub fn hello_digest(&self) -> anyhow::Result<String> {
-        let core = self.core_config_b64.as_deref().unwrap_or(&self.config_b64);
-        Ok(config_digest(&decode_config_b64(core)?))
-    }
 }
 
 /// instance の非秘密 config。bot token は含めない（env 注入のみ）。
@@ -208,9 +195,6 @@ impl Placement {
         }
         let mut seen = std::collections::BTreeSet::new();
         for inst in &self.instances {
-            if inst.revision == 0 {
-                anyhow::bail!("revision must be positive");
-            }
             // D-1097: in daemon mode (a channel socket is given) the bot may start with no
             // channel yet; an owner mention enables the first one. Instance mode keeps the rule.
             if inst.addresses.is_empty() && self.channel_socket.is_none() {
@@ -376,10 +360,8 @@ mod tests {
             channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-                revision: 1,
                 addresses: vec!["discord-agent-x-100-200".into()],
                 config_b64: encode(&sample_config()),
-                core_config_b64: None,
                 channel_socket: None,
             }],
         };
@@ -403,10 +385,8 @@ mod tests {
             channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-                revision: 1,
                 addresses: vec!["discord-agent-x-100-200".into()],
                 config_b64: encode(&sample_config()),
-                core_config_b64: None,
                 channel_socket: None,
             }],
         };
@@ -426,10 +406,8 @@ mod tests {
             channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-                revision: 1,
                 addresses: vec![],
                 config_b64: encode(&sample_config()),
-                core_config_b64: None,
                 channel_socket: None,
             }],
         };
@@ -480,10 +458,8 @@ mod tests {
             channel_socket: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-                revision: 1,
                 addresses: vec!["discord-agent-x--200".into()],
                 config_b64: encode(&sample_config()),
-                core_config_b64: None,
                 channel_socket: None,
             }],
         };
@@ -543,10 +519,8 @@ mod tests {
     fn multiple_instances_are_rejected_before_starting_receivers() {
         let instance = |instance_id: &str| InstancePlacement {
             instance_id: instance_id.into(),
-            revision: 1,
             addresses: vec!["discord-agent-x-100-200".into()],
             config_b64: encode(&sample_config()),
-            core_config_b64: None,
             channel_socket: None,
         };
         let p = Placement {
@@ -574,7 +548,6 @@ mod tests {
             "core_socket": core_socket,
             "instances": [{
                 "instance_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-                "revision": 1,
                 "addresses": ["discord-agent-x-100-200"],
                 "config_b64": encode(&sample_config()),
             }],
@@ -617,45 +590,5 @@ mod tests {
             let place: Placement = serde_json::from_value(value).unwrap();
             assert!(place.validate().is_err(), "{place:?}");
         }
-    }
-}
-
-#[cfg(test)]
-mod core_config_tests {
-    use super::*;
-
-    /// D-1097 D2: a placement without `core_config_b64` keeps the previous hello digest (the
-    /// digest of `config_b64`), so a placement written before the change still connects.
-    #[test]
-    fn d1097_hello_digest_falls_back_to_the_discord_config() {
-        use base64::Engine as _;
-        let config = base64::engine::general_purpose::STANDARD
-            .encode(br#"{"agent_id":"a","self_bot_id":"111111111111111111"}"#);
-        let place = InstancePlacement {
-            instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-            revision: 1,
-            addresses: vec!["discord-a-1-2".into()],
-            config_b64: config.clone(),
-            core_config_b64: None,
-            channel_socket: None,
-        };
-        assert_eq!(
-            place.hello_digest().unwrap(),
-            config_digest(&decode_config_b64(&config).unwrap())
-        );
-        let neutral = base64::engine::general_purpose::STANDARD.encode(br#"{"kind":"x"}"#);
-        let place = InstancePlacement {
-            core_config_b64: Some(neutral.clone()),
-            ..place
-        };
-        assert_eq!(
-            place.hello_digest().unwrap(),
-            config_digest(&decode_config_b64(&neutral).unwrap())
-        );
-        let broken = InstancePlacement {
-            core_config_b64: Some("not base64".into()),
-            ..place
-        };
-        assert!(broken.hello_digest().is_err());
     }
 }

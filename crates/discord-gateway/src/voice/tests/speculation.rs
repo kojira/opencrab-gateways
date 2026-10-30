@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use super::e2e::{core, loud_pcm, manager_with, Core, FakePlayer, BINDING};
 use super::mock_http::{self, Recorded};
 use crate::config::SystemReactions;
-use crate::ops::BindingDeliveryTargets;
+use crate::ops::SessionDeliveryTargets;
 use crate::transport::testfake::RecordingTransport;
 use crate::voice::aizuchi::{AIZUCHI_STATEMENT, PREWARM_PHRASES};
 use crate::voice::audio::{EndReason, EndVerdict, SegmenterEvent};
@@ -53,7 +53,7 @@ async fn setup(stt: Vec<(u64, &'static str)>) -> Setup {
     .await
     .expect("prewarm did not finish");
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let targets: BindingDeliveryTargets =
+    let targets: SessionDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let consumer = crate::run::spawn_say_consumer(
         core.client.clone(),

@@ -424,14 +424,7 @@ mod tests {
             .mark_provisioning(&row.instance_id, generation)
             .unwrap());
         assert!(store
-            .mark_verified(
-                &row.instance_id,
-                generation,
-                3,
-                "digest",
-                &["binding".into()],
-                true
-            )
+            .mark_verified(&row.instance_id, generation, true)
             .unwrap());
         drop(store);
         let bytes = std::fs::read(&path).unwrap();
@@ -524,7 +517,7 @@ mod tests {
             .mark_provisioning(&pending.instance_id, generation)
             .unwrap();
         store
-            .mark_verified(&pending.instance_id, generation, 2, "digest", &[], false)
+            .mark_verified(&pending.instance_id, generation, false)
             .unwrap();
         let disabled = store.get(&pending.instance_id).unwrap().unwrap();
         assert_eq!(disabled.lifecycle_state, LifecycleState::Disabled);

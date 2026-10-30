@@ -11,7 +11,7 @@ use tokio::net::UnixListener;
 
 use super::mock_http;
 use crate::config::{AccessConfig, SystemReactions};
-use crate::ops::{BindingDeliveryTargets, DiscordInvokeHandler};
+use crate::ops::{SessionDeliveryTargets, DiscordInvokeHandler};
 use crate::transport::{DiscordTransport, DryRunTransport};
 use crate::voice::session::{VoiceManager, VoiceManagerConfig, VoicePlayer, VOICE_SYSTEM_CONTEXT};
 
@@ -149,7 +149,7 @@ pub(super) fn manager_with(
                 owners: vec!["30".into()],
                 ..Default::default()
             },
-            addresses: vec![core.address.clone()],
+            addresses: std::sync::Arc::new(std::sync::RwLock::new([core.address.clone()].into_iter().collect())),
             settings_path,
         },
         player,
@@ -275,7 +275,7 @@ async fn posted_say_and_reply_are_spoken_in_order() {
     assert!(player.played.lock().unwrap().is_empty());
 
     m.join(BINDING, Some("555"), None).await.unwrap();
-    let targets: BindingDeliveryTargets =
+    let targets: SessionDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let transport: Arc<dyn DiscordTransport> = Arc::new(DryRunTransport);
     let consumer = crate::run::spawn_say_consumer(

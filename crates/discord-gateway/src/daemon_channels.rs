@@ -1,15 +1,17 @@
 //! D-1097: channel requests from the daemon's children (an owner @mentioned a bot in a
 //! channel it does not have yet). See [`crate::channel_request`].
+//!
+//! D-1099: which channels a bot listens to is gateway state only. The daemon records the address
+//! in its store; core is not told anything (the first said of that channel opens its session).
 
-use super::{DiscordDaemon, GateReconciler, SpawnerFactory};
+use super::{DiscordDaemon, SpawnerFactory};
 use crate::store::InstanceRow;
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
 
-impl<R, F> DiscordDaemon<R, F>
+impl<F> DiscordDaemon<F>
 where
-    R: GateReconciler + 'static,
     F: SpawnerFactory + 'static,
 {
     /// D-1097: from now on every started child gets a channel-request socket served by `binder`
@@ -40,14 +42,9 @@ where
         }
     }
 
-    /// D-1097: records an address the child already bound through its own core connection
-    /// (`create_binding`), so it survives a restart and the next reconcile keeps the binding.
-    pub fn record_bound_address(
-        &self,
-        instance_id: &str,
-        address: &str,
-        binding_id: &str,
-    ) -> Result<()> {
+    /// Records a channel address the child started listening to, so it survives a restart.
+    /// The address must be a channel of this instance's agent.
+    pub fn record_address(&self, instance_id: &str, address: &str) -> Result<()> {
         let store = self
             .store
             .lock()
@@ -57,8 +54,7 @@ where
             crate::config::parse_address_owner(&row.agent_id, address),
             "address does not belong to this agent"
         );
-        anyhow::ensure!(!binding_id.is_empty(), "binding id required");
-        store.add_bound_address(instance_id, address, binding_id)?;
+        store.add_address(instance_id, address)?;
         Ok(())
     }
 
@@ -71,21 +67,15 @@ where
 
 /// The daemon as the channel binder of its own children (held weakly, so it never keeps the
 /// daemon alive).
-pub struct DaemonChannels<R, F>(pub std::sync::Weak<DiscordDaemon<R, F>>);
+pub struct DaemonChannels<F>(pub std::sync::Weak<DiscordDaemon<F>>);
 
 #[async_trait]
-impl<R, F> crate::channel_request::ChannelBinder for DaemonChannels<R, F>
+impl<F> crate::channel_request::ChannelBinder for DaemonChannels<F>
 where
-    R: GateReconciler + 'static,
     F: SpawnerFactory + 'static,
 {
-    async fn record_address(
-        &self,
-        instance_id: &str,
-        address: &str,
-        binding_id: &str,
-    ) -> Result<()> {
+    async fn record_address(&self, instance_id: &str, address: &str) -> Result<()> {
         let daemon = self.0.upgrade().context("daemon stopped")?;
-        daemon.record_bound_address(instance_id, address, binding_id)
+        daemon.record_address(instance_id, address)
     }
 }

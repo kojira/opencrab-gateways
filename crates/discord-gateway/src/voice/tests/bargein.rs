@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use super::e2e::{core, loud_pcm, manager_with, Core, FakePlayer, BINDING};
 use super::mock_http::{self, Recorded};
 use crate::config::SystemReactions;
-use crate::ops::BindingDeliveryTargets;
+use crate::ops::SessionDeliveryTargets;
 use crate::transport::testfake::RecordingTransport;
 use crate::voice::audio::{EndVerdict, SegmenterEvent};
 use crate::voice::session::VoiceManager;
@@ -45,7 +45,7 @@ async fn setup(stt: Vec<(u64, &'static str)>, synthesis_delay_ms: u64) -> Setup 
     let transport = Arc::new(RecordingTransport::default());
     let manager = manager_with(&core, path, player.clone(), transport.clone());
     manager.join(BINDING, Some("555"), None).await.unwrap();
-    let targets: BindingDeliveryTargets =
+    let targets: SessionDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let consumer = crate::run::spawn_say_consumer(
         core.client.clone(),

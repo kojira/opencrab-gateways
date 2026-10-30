@@ -1,4 +1,5 @@
-//! Discord-owned lifecycle daemon. Core is reached only through a generic control trait.
+//! Discord-owned lifecycle daemon. It never talks to core: each bot child connects to core's
+//! gate socket itself and says `hello` with its instance and agent (D-1099).
 
 use crate::store::{DiscordStore, InstanceRow};
 use anyhow::{Context as _, Result};
@@ -15,7 +16,7 @@ use std::sync::{Arc, Mutex};
 pub struct DaemonConfig {
     pub database_path: PathBuf,
     pub admin_socket: PathBuf,
-    /// Core's gate socket: the daemon provisions instances on it and the children connect to it.
+    /// Core's gate socket, handed to the children (the daemon itself does not connect).
     pub core_socket: PathBuf,
     pub child_binary: PathBuf,
     pub placement_dir: PathBuf,
@@ -42,14 +43,10 @@ fn default_reconcile_millis() -> u64 {
     1_000
 }
 
-/// D-1097 D2: the one config core holds for every Discord instance.
-pub const DEFAULT_CORE_CONFIG_B64: &str = "eyJkZWxpdmVyeV9tb2RlIjoidG9vbF9kcml2ZW4ifQ==";
-
-/// The config to register in core for an instance whose Discord config is `config_b64`. The
-/// Discord config is only validated here; core never sees it.
-pub fn core_config_b64_for_runtime_config(config_b64: &str) -> Result<String> {
+/// Validates a Discord instance config (the daemon refuses to start a bot it cannot run).
+pub fn validate_runtime_config(config_b64: &str) -> Result<()> {
     crate::config::parse_instance_config(&crate::config::decode_config_b64(config_b64)?)?;
-    Ok(DEFAULT_CORE_CONFIG_B64.to_string())
+    Ok(())
 }
 
 fn retry_deadline(row: &InstanceRow) -> i64 {
@@ -106,28 +103,6 @@ impl DaemonConfig {
         Ok(())
     }
 }
-
-#[derive(Debug, Clone)]
-pub struct VerifiedInstance {
-    pub revision: u64,
-    pub digest: String,
-    pub bindings: Vec<String>,
-    pub enabled: bool,
-}
-
-#[async_trait]
-pub trait GateReconciler: Send + Sync {
-    async fn observe(
-        &self,
-        desired: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation>;
-
-    /// Makes core hold `desired` (instance and complete binding set) and returns what the
-    /// child's `hello` must carry.
-    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance>;
-}
-
-pub use crate::core_provisioning::ProvisionReconciler;
 
 pub trait SpawnerFactory: Send + Sync {
     fn observe_process(
@@ -199,10 +174,9 @@ impl StoreObserver {
     }
 }
 
-pub struct DiscordDaemon<R, F> {
+pub struct DiscordDaemon<F> {
     store: Arc<Mutex<DiscordStore>>,
     key: Arc<[u8; 32]>,
-    reconciler: Arc<R>,
     factory: Arc<F>,
     supervisors: Arc<ProcessSupervisorSet>,
     startup_recovered: std::sync::atomic::AtomicBool,
@@ -212,21 +186,14 @@ pub struct DiscordDaemon<R, F> {
     channel_binder: Mutex<Option<Arc<dyn crate::channel_request::ChannelBinder>>>,
 }
 
-impl<R, F> DiscordDaemon<R, F>
+impl<F> DiscordDaemon<F>
 where
-    R: GateReconciler + 'static,
     F: SpawnerFactory + 'static,
 {
-    pub fn new(
-        store: DiscordStore,
-        key: [u8; 32],
-        reconciler: Arc<R>,
-        factory: Arc<F>,
-    ) -> Result<Self> {
+    pub fn new(store: DiscordStore, key: [u8; 32], factory: Arc<F>) -> Result<Self> {
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             key: Arc::new(key),
-            reconciler,
             factory,
             supervisors: ProcessSupervisorSet::new(SupervisorConfig::daemon_owned()),
             startup_recovered: std::sync::atomic::AtomicBool::new(false),
@@ -254,12 +221,10 @@ where
                 .factory
                 .observe_process(&row)
                 .unwrap_or(ProcessObservation::Unknown);
-            let core = self
-                .reconciler
-                .observe(&row)
-                .await
-                .unwrap_or(CoreObservation::Unavailable);
-            let decision = row.lifecycle().recover(now, process, core);
+            // D-1099: core holds nothing to compare against.
+            let decision = row
+                .lifecycle()
+                .recover(now, process, CoreObservation::Unavailable);
             if !matches!(decision, StartupDecision::AdoptRunning) {
                 let _ = self.factory.reap_stale(&row);
                 let _ = self.factory.cleanup_artifacts(&row);
@@ -330,32 +295,26 @@ where
                     {
                         continue;
                     }
-                    let verified = match self.reconciler.reconcile(&row).await {
-                        Ok(value) => value,
-                        Err(error) => {
-                            self.factory.cleanup_artifacts(&row)?;
-                            self.store.lock().unwrap().mark_error(
-                                &row.instance_id,
-                                row.desired_generation,
-                                "reconciliation_failed",
-                                retry_deadline(&row),
-                            )?;
-                            tracing::warn!(instance_id = %row.instance_id, error = %error, "instance reconciliation failed");
-                            continue;
-                        }
-                    };
+                    if let Err(error) = validate_runtime_config(&row.config_b64) {
+                        self.factory.cleanup_artifacts(&row)?;
+                        self.store.lock().unwrap().mark_error(
+                            &row.instance_id,
+                            row.desired_generation,
+                            "invalid_config",
+                            retry_deadline(&row),
+                        )?;
+                        tracing::warn!(instance_id = %row.instance_id, error = %error, "instance config invalid");
+                        continue;
+                    }
                     anyhow::ensure!(
                         self.store.lock().unwrap().mark_verified(
                             &row.instance_id,
                             row.desired_generation,
-                            verified.revision,
-                            &verified.digest,
-                            &verified.bindings,
-                            verified.enabled,
+                            row.enabled,
                         )?,
                         "stale lifecycle verification commit"
                     );
-                    if verified.enabled {
+                    if row.enabled {
                         if let Err(error) = self.start_ready(&row.instance_id).await {
                             self.factory.cleanup_artifacts(&row)?;
                             self.store.lock().unwrap().mark_error(
@@ -568,10 +527,6 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let daemon = Arc::new(DiscordDaemon::new(
         store,
         raw,
-        Arc::new(ProvisionReconciler::new(
-            config.core_socket.clone(),
-            "discord",
-        )),
         Arc::new(ProductionFactory {
             child_binary: config.child_binary.clone(),
             core_socket: config.core_socket.clone(),

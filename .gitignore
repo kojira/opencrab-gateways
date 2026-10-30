@@ -26,3 +26,6 @@ web/blob-report/
 .server.log
 .web.log
 .core/
+# Python のバイトコードは追跡しない
+__pycache__/
+*.pyc

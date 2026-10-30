@@ -23,9 +23,6 @@ CREATE TABLE IF NOT EXISTS instances (
   desired_generation INTEGER NOT NULL,
   applied_generation INTEGER,
   lifecycle_state TEXT NOT NULL,
-  core_revision INTEGER,
-  core_digest TEXT,
-  binding_inventory_json TEXT NOT NULL DEFAULT '[]',
   process_id INTEGER,
   process_nonce TEXT,
   failure_count INTEGER NOT NULL DEFAULT 0,
@@ -75,9 +72,6 @@ pub struct InstanceRow {
     pub desired_generation: u64,
     pub applied_generation: Option<u64>,
     pub lifecycle_state: LifecycleState,
-    pub core_revision: Option<u64>,
-    pub core_digest: Option<String>,
-    pub core_bindings: Vec<String>,
     pub process_id: Option<u32>,
     pub process_nonce: Option<String>,
     pub failure_count: u32,
@@ -107,6 +101,7 @@ impl NostrStore {
     /// Offline S8 upgrades an old gateway database inside its destination transaction.
     pub fn initialize_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA)?;
+        drop_core_columns(conn)?;
         Ok(())
     }
 
@@ -172,16 +167,15 @@ impl NostrStore {
     pub fn get(&self, instance_id: &str) -> Result<Option<InstanceRow>> {
         let Some(mut row) = self.conn.query_row(
             "SELECT instance_id,agent_id,NULL,config_b64,addresses_json,credential_envelope,
-                    NULL,enabled,desired_generation,applied_generation,lifecycle_state,core_revision,
-                    core_digest,binding_inventory_json,process_id,process_nonce,failure_count,retry_at_unix_ms
+                    NULL,enabled,desired_generation,applied_generation,lifecycle_state,
+                    process_id,process_nonce,failure_count,retry_at_unix_ms
              FROM instances WHERE instance_id=?1",
             params![instance_id],
             |row| {
                 let state: String = row.get(10)?;
                 let desired: i64 = row.get(8)?;
                 let applied: Option<i64> = row.get(9)?;
-                let revision: Option<i64> = row.get(11)?;
-                let failures: i64 = row.get(16)?;
+                let failures: i64 = row.get(13)?;
                 Ok(InstanceRow {
                     instance_id: row.get(0)?, agent_id: row.get(1)?,
                     config_b64: row.get(3)?,
@@ -190,13 +184,10 @@ impl NostrStore {
                     desired_generation: u64::try_from(desired).unwrap_or(0),
                     applied_generation: applied.and_then(|v| u64::try_from(v).ok()),
                     lifecycle_state: LifecycleState::from_str(&state).unwrap_or(LifecycleState::Error),
-                    core_revision: revision.and_then(|v| u64::try_from(v).ok()),
-                    core_digest: row.get(12)?,
-                    core_bindings: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
-                    process_id: row.get::<_, Option<i64>>(14)?.and_then(|value| u32::try_from(value).ok()),
-                    process_nonce: row.get(15)?,
+                    process_id: row.get::<_, Option<i64>>(11)?.and_then(|value| u32::try_from(value).ok()),
+                    process_nonce: row.get(12)?,
                     failure_count: u32::try_from(failures).unwrap_or(u32::MAX),
-                    retry_at_unix_ms: row.get(17)?,
+                    retry_at_unix_ms: row.get(14)?,
                     access: AccessConfig::default(),
                 })
             },
@@ -270,29 +261,19 @@ impl NostrStore {
         self.transition(instance_id, generation, "pending", "provisioning")
     }
 
-    pub fn mark_verified(
-        &self,
-        instance_id: &str,
-        generation: u64,
-        revision: u64,
-        digest: &str,
-        bindings: &[String],
-        enabled: bool,
-    ) -> Result<bool> {
+    /// The gateway accepted the generation: the child may start (or stay stopped when disabled).
+    pub fn mark_verified(&self, instance_id: &str, generation: u64, enabled: bool) -> Result<bool> {
         let state = if enabled { "ready" } else { "disabled" };
         Ok(self.conn.execute(
-            "UPDATE instances SET applied_generation=?2,lifecycle_state=?3,core_revision=?4,
-             core_digest=?5,binding_inventory_json=?6,process_id=NULL,process_nonce=NULL,
-             failure_count=0,retry_at_unix_ms=NULL,updated_at=?7
+            "UPDATE instances SET applied_generation=?2,lifecycle_state=?3,
+             process_id=NULL,process_nonce=NULL,
+             failure_count=0,retry_at_unix_ms=NULL,updated_at=?4
              WHERE instance_id=?1 AND desired_generation=?2 AND lifecycle_state='provisioning'
-               AND enabled=?8",
+               AND enabled=?5",
             params![
                 instance_id,
                 generation,
                 state,
-                revision,
-                digest,
-                serde_json::to_string(bindings)?,
                 chrono::Utc::now().to_rfc3339(),
                 enabled
             ],
@@ -523,4 +504,19 @@ mod tests {
         assert_eq!(disabled.lifecycle_state, LifecycleState::Disabled);
         assert!(!disabled.lifecycle().child_may_start());
     }
+}
+
+/// D-1099: core keeps no per-instance state for gateways any more, so the store drops the
+/// columns that mirrored core (revision, digest, binding ids). Idempotent.
+fn drop_core_columns(conn: &Connection) -> Result<()> {
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(instances)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<_, _>>()?;
+    for column in ["core_revision", "core_digest", "binding_inventory_json"] {
+        if columns.iter().any(|c| c == column) {
+            conn.execute_batch(&format!("ALTER TABLE instances DROP COLUMN {column}"))?;
+        }
+    }
+    Ok(())
 }

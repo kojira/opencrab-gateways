@@ -94,17 +94,16 @@ async fn run() -> anyhow::Result<()> {
             overrides.clone(),
             place.attachment_outbox_root.clone(),
         )?;
-        readiness.push((client, inst.address.clone()));
+        readiness.push(client);
     }
     if let (Some(control), Some(nonce)) = (control, start_nonce) {
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt as _;
             loop {
+                // Ready once core accepted every hello (D-1099: nothing else to wait for).
                 let mut ready = true;
-                for (client, address) in &readiness {
-                    if !client.connection_live().await
-                        || client.remembered_binding(address).await.is_none()
-                    {
+                for client in &readiness {
+                    if !client.connection_live().await {
                         ready = false;
                         break;
                     }

@@ -8,24 +8,6 @@ use tokio::sync::Notify;
 
 const ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
-struct Gate;
-#[async_trait]
-impl GateReconciler for Gate {
-    async fn observe(
-        &self,
-        _: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled)
-    }
-    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
-        Ok(VerifiedInstance {
-            revision: 1,
-            digest: "d".into(),
-            bindings: desired.addresses.clone(),
-            enabled: desired.enabled,
-        })
-    }
-}
 
 struct Child {
     kills: Arc<AtomicUsize>,
@@ -133,13 +115,11 @@ async fn access_edit_restarts_the_child_with_the_new_owner() {
     let daemon = NostrDaemon::new(
         store,
         [9; 32],
-        Arc::new(Gate),
         Arc::new(RecordingFactory {
             started_with: started_with.clone(),
             kills: kills.clone(),
             spawned: spawned.clone(),
-        }),
-    )
+        }),)
     .unwrap();
     daemon.reconcile_once().await.unwrap();
     // Wait for the supervisor to actually run the first child before editing.

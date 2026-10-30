@@ -14,14 +14,12 @@ pub struct Placement {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InstancePlacement {
     pub instance_id: String,
-    pub revision: u64,
+    /// The agent this instance speaks for (sent on `hello`, D-1099).
+    pub agent_id: String,
+    /// The core session key of this instance's conversation (`nostr-<agent>`).
     pub address: String,
     /// Gateway-owned runtime config. Core must not interpret this payload.
     pub config_b64: String,
-    /// Optional core-owned opaque config used only for hello digest compatibility.
-    /// If absent, legacy placements use `config_b64` for both runtime and hello digest.
-    #[serde(default)]
-    pub core_config_b64: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -140,8 +138,8 @@ impl Placement {
         }
         let mut seen = std::collections::BTreeSet::new();
         for inst in &self.instances {
-            if inst.revision == 0 {
-                anyhow::bail!("revision must be positive");
+            if inst.agent_id.is_empty() {
+                anyhow::bail!("agent_id must be nonempty");
             }
             if inst.address.is_empty() {
                 anyhow::bail!("address must be nonempty");
@@ -153,9 +151,6 @@ impl Placement {
             let bytes = decode_config_b64(&inst.config_b64)?;
             let cfg = parse_instance_config(&bytes)?;
             validate_instance_config(&cfg)?;
-            if let Some(core_config_b64) = &inst.core_config_b64 {
-                let _ = decode_config_b64(core_config_b64)?;
-            }
         }
         Ok(())
     }
@@ -326,7 +321,7 @@ mod tests {
             attachment_outbox_root: None,
             instances: vec![InstancePlacement {
                 instance_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
-                revision: 1,
+                agent_id: "a1".into(),
                 address: "nostr-a1".into(),
                 config_b64: {
                     use base64::Engine;
@@ -340,7 +335,6 @@ mod tests {
                         .unwrap(),
                     )
                 },
-                core_config_b64: Some("e30=".into()),
             }],
         };
         p.validate().unwrap();

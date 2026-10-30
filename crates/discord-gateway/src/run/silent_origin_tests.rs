@@ -79,9 +79,8 @@ async fn event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras()
         InstanceClient::connect(
             &connect_path,
             "11111111-1111-4111-8111-111111111111".into(),
-            1,
+            "agent".into(),
             "bot".into(),
-            "0".repeat(64),
         )
         .await
         .unwrap()
@@ -97,17 +96,7 @@ async fn event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras()
     let client = connect.await.unwrap();
     let agent_id = "agent";
     let address = crate::map::address_for(agent_id, "20", "10");
-    let binding = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    write_json(
-        &mut writer,
-        &json!({"id":"bind-1","m":"bind","binding_id":binding,"address":address}),
-    )
-    .await
-    .unwrap();
-    let bind_ok =
-        serde_json::from_slice::<serde_json::Value>(&read_frame(&mut reader).await.unwrap())
-            .unwrap();
-    assert_eq!(bind_ok["m"], "ok");
+    let binding = address.clone();
 
     let recording = Arc::new(RecordingTransport::new());
     let transport: Arc<dyn DiscordTransport> = recording.clone();
@@ -130,10 +119,10 @@ async fn event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras()
     );
     let activity_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     for frame in [
-        json!({"m":"activity","binding_id":binding,"activity_id":activity_id,"state":"started"}),
-        json!({"m":"activity","binding_id":binding,"activity_id":activity_id,"state":"read","origin":"discord:message:v1:10:100"}),
-        json!({"m":"activity","binding_id":binding,"activity_id":activity_id,"state":"read","origin":"discord:message:v1:10:200"}),
-        json!({"id":"visible-a","m":"say","binding_id":binding,"payload":{"text":"visible A"}}),
+        json!({"m":"activity","session":binding,"activity_id":activity_id,"state":"started"}),
+        json!({"m":"activity","session":binding,"activity_id":activity_id,"state":"read","origin":"discord:message:v1:10:100"}),
+        json!({"m":"activity","session":binding,"activity_id":activity_id,"state":"read","origin":"discord:message:v1:10:200"}),
+        json!({"id":"visible-a","m":"say","session":binding,"payload":{"text":"visible A"}}),
     ] {
         write_json(&mut writer, &frame).await.unwrap();
     }
@@ -145,7 +134,7 @@ async fn event_loop_reacts_to_a_visible_b_silent_and_completion_without_extras()
         &mut writer,
         &json!({
             "m":"activity",
-            "binding_id":binding,
+            "session":binding,
             "activity_id":activity_id,
             "state":"ended",
             "completed_target":"visible-a",

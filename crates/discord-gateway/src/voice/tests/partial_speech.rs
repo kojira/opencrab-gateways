@@ -71,7 +71,7 @@ impl Setup {
     async fn partial(&mut self, stream_id: &str, text: &str) {
         write_json(
             &mut self.core.writer,
-            &json!({"m":"partial","binding_id":BINDING,"stream_id":stream_id,"text":text}),
+            &json!({"m":"partial","session":BINDING,"stream_id":stream_id,"text":text}),
         )
         .await
         .unwrap();
@@ -85,7 +85,7 @@ impl Setup {
         }
         write_json(
             &mut self.core.writer,
-            &json!({"id":id,"m":"say","binding_id":BINDING,"payload":payload}),
+            &json!({"id":id,"m":"say","session":BINDING,"payload":payload}),
         )
         .await
         .unwrap();

@@ -746,7 +746,7 @@ pub(crate) fn spawn_say_consumer(
 
 mod caller;
 mod model_command;
-mod owner_mention;
+pub(crate) mod owner_mention;
 mod reactions;
 #[cfg(test)]
 mod silent_origin_tests;

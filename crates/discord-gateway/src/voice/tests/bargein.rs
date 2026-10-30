@@ -84,7 +84,7 @@ impl Setup {
     }
 
     async fn partial(&mut self, text: &str) {
-        self.send(json!({"m":"partial","binding_id":BINDING,"stream_id":STREAM,"text":text}))
+        self.send(json!({"m":"partial","session":BINDING,"stream_id":STREAM,"text":text}))
             .await;
     }
 
@@ -94,7 +94,7 @@ impl Setup {
 
     /// core の say。gateway の ok を待つ。間に来る provisional には ok を返して読み飛ばす。
     async fn say_on(&mut self, id: &str, text: &str, stream_id: &str) {
-        self.send(json!({"id":id,"m":"say","binding_id":BINDING,
+        self.send(json!({"id":id,"m":"say","session":BINDING,
                          "payload":{"text":text,"stream_id":stream_id}}))
             .await;
         loop {
@@ -238,7 +238,7 @@ async fn g6_speech_while_the_bot_plays_sends_one_interrupt_with_what_was_heard()
 
     s.speak(30, 0);
     let interrupt = s.next_interrupt().await;
-    assert_eq!(interrupt["binding_id"], BINDING, "{interrupt}");
+    assert_eq!(interrupt["session"], BINDING, "{interrupt}");
     assert_eq!(interrupt["delivered"], "一文目です。", "{interrupt}");
     assert_eq!(*s.player.stopped.lock().unwrap(), vec![20u64]);
 

@@ -1,5 +1,5 @@
-//! D-1097 D1/D2: a settings change rebuilds only the changed instance's child, and core keeps
-//! seeing the same neutral config (no core revision for a Discord-only change).
+//! D-1097 D1: a settings change rebuilds only the changed instance's child. D-1099: the daemon
+//! never talks to core.
 
 use super::*;
 use opencrab_process_supervisor::{ChildSpawner, SupervisedChild};
@@ -9,32 +9,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const A: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const B: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const KEY: [u8; 32] = [9; 32];
-
-#[derive(Default)]
-struct RecordingGate {
-    configs: Mutex<Vec<String>>,
-}
-
-#[async_trait]
-impl GateReconciler for RecordingGate {
-    async fn observe(
-        &self,
-        _: &InstanceRow,
-    ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-        Ok(opencrab_process_supervisor::lifecycle::CoreObservation::Mismatch)
-    }
-
-    async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
-        let core = core_config_b64_for_runtime_config(&desired.config_b64)?;
-        self.configs.lock().unwrap().push(core);
-        Ok(VerifiedInstance {
-            revision: 1,
-            digest: "neutral".into(),
-            bindings: desired.addresses.clone(),
-            enabled: desired.enabled,
-        })
-    }
-}
 
 #[derive(Default)]
 struct CountingFactory {
@@ -102,7 +76,7 @@ fn config(owners: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn d1097_a_settings_change_rebuilds_only_that_child_with_the_same_core_config() {
+async fn d1097_a_settings_change_rebuilds_only_that_child() {
     let temp = tempfile::tempdir().unwrap();
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     for (id, agent) in [(A, "agent"), (B, "other")] {
@@ -126,9 +100,8 @@ async fn d1097_a_settings_change_rebuilds_only_that_child_with_the_same_core_con
             )
             .unwrap();
     }
-    let gate = Arc::new(RecordingGate::default());
     let factory = Arc::new(CountingFactory::default());
-    let daemon = DiscordDaemon::new(store, KEY, gate.clone(), factory.clone()).unwrap();
+    let daemon = DiscordDaemon::new(store, KEY, factory.clone()).unwrap();
     daemon.reconcile_once().await.unwrap();
     assert_eq!(factory.starts.lock().unwrap().get(A), Some(&1));
     assert_eq!(factory.starts.lock().unwrap().get(B), Some(&1));
@@ -153,12 +126,6 @@ async fn d1097_a_settings_change_rebuilds_only_that_child_with_the_same_core_con
         Some(&1),
         "the other instance is untouched"
     );
-    let configs = gate.configs.lock().unwrap().clone();
-    assert_eq!(configs.len(), 3);
-    assert!(
-        configs.iter().all(|c| c == DEFAULT_CORE_CONFIG_B64),
-        "core only ever sees the neutral config: {configs:?}"
-    );
     daemon.shutdown().await;
 }
 
@@ -178,13 +145,7 @@ async fn d1097_disabling_stops_the_running_bot_and_enabling_restarts_it() {
         )
         .unwrap();
     let factory = Arc::new(CountingFactory::default());
-    let daemon = DiscordDaemon::new(
-        store,
-        KEY,
-        Arc::new(RecordingGate::default()),
-        factory.clone(),
-    )
-    .unwrap();
+    let daemon = DiscordDaemon::new(store, KEY, factory.clone()).unwrap();
     daemon.reconcile_once().await.unwrap();
     for _ in 0..100 {
         tokio::task::yield_now().await;
@@ -227,30 +188,10 @@ async fn d1097_disabling_stops_the_running_bot_and_enabling_restarts_it() {
     daemon.shutdown().await;
 }
 
-/// D-1097 owner mention (child-created binding): recording an address the child already bound
-/// through its own core connection stores it without asking core anything, so the next
-/// reconcile keeps the binding instead of deleting it.
+/// D-1097/D-1099 owner mention: the daemon records a channel the child started listening to,
+/// without a rebuild, and it is still there after a restart. Core is not involved.
 #[tokio::test]
-async fn d1097_record_bound_address_persists_without_calling_core() {
-    #[derive(Default)]
-    struct NoBind;
-    #[async_trait]
-    impl GateReconciler for NoBind {
-        async fn observe(
-            &self,
-            _: &InstanceRow,
-        ) -> Result<opencrab_process_supervisor::lifecycle::CoreObservation> {
-            Ok(opencrab_process_supervisor::lifecycle::CoreObservation::ExactEnabled)
-        }
-        async fn reconcile(&self, desired: &InstanceRow) -> Result<VerifiedInstance> {
-            Ok(VerifiedInstance {
-                revision: 1,
-                digest: "neutral".into(),
-                bindings: desired.addresses.clone(),
-                enabled: desired.enabled,
-            })
-        }
-    }
+async fn d1097_record_address_persists_without_a_rebuild() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("owner.db");
     let store = DiscordStore::open(&path).unwrap();
@@ -265,14 +206,7 @@ async fn d1097_record_bound_address_persists_without_calling_core() {
             &KEY,
         )
         .unwrap();
-    let gate = Arc::new(NoBind);
-    let daemon = DiscordDaemon::new(
-        store,
-        KEY,
-        gate.clone(),
-        Arc::new(CountingFactory::default()),
-    )
-    .unwrap();
+    let daemon = DiscordDaemon::new(store, KEY, Arc::new(CountingFactory::default())).unwrap();
     daemon.reconcile_once().await.unwrap();
     let generation = daemon
         .store()
@@ -282,18 +216,13 @@ async fn d1097_record_bound_address_persists_without_calling_core() {
         .unwrap()
         .unwrap()
         .desired_generation;
-    daemon
-        .record_bound_address(A, "discord-agent-1-3", "child-binding-id")
-        .unwrap();
-    assert!(daemon
-        .record_bound_address(A, "discord-other-1-3", "x")
-        .is_err());
+    daemon.record_address(A, "discord-agent-1-3").unwrap();
+    assert!(daemon.record_address(A, "discord-other-1-3").is_err());
     let row = daemon.store().lock().unwrap().get(A).unwrap().unwrap();
     assert_eq!(
         row.addresses,
         vec!["discord-agent-1-2", "discord-agent-1-3"]
     );
-    assert!(row.core_bindings.contains(&"child-binding-id".to_string()));
     assert_eq!(row.desired_generation, generation, "no rebuild");
     daemon.shutdown().await;
     drop(daemon);
@@ -305,7 +234,7 @@ async fn d1097_record_bound_address_persists_without_calling_core() {
             .unwrap()
             .addresses,
         vec!["discord-agent-1-2", "discord-agent-1-3"],
-        "still bound after a restart"
+        "still listened after a restart"
     );
 }
 

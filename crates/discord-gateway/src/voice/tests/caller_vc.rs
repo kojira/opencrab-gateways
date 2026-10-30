@@ -113,8 +113,17 @@ async fn speaks(s: &mut Setup, message_id: &str, author: &str, bot: bool) {
             owners: vec!["30".into()],
             ..Default::default()
         };
-        crate::run::handle_incoming(&client, "agent", "999", &access, &line, None, Some(&voice))
-            .await;
+        let listening = crate::run::owner_mention::listening(&[crate::map::address_for(
+            "agent", "20", "10",
+        )]);
+        crate::run::handle_incoming(
+            &client,
+            ("agent", "999", &access, &listening),
+            &line,
+            None,
+            Some(&voice),
+        )
+        .await;
     });
     let said: Value =
         serde_json::from_slice(&read_frame(&mut s.core.reader).await.unwrap()).unwrap();

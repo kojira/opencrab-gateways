@@ -136,14 +136,14 @@ impl Setup {
 
     async fn provisional_partial(&mut self, provisional_id: &Value, text: &str) {
         self.send(
-            json!({"m":"partial","binding_id":BINDING,"stream_id":STREAM,"text":text,
+            json!({"m":"partial","session":BINDING,"stream_id":STREAM,"text":text,
                          "provisional_id":provisional_id}),
         )
         .await;
     }
 
     async fn say(&mut self, id: &str, text: &str) {
-        self.send(json!({"id":id,"m":"say","binding_id":BINDING,
+        self.send(json!({"id":id,"m":"say","session":BINDING,
                          "payload":{"text":text,"stream_id":STREAM}}))
             .await;
         let ok: Value =
@@ -260,7 +260,7 @@ async fn g_s1_s2_held_reply_plays_after_the_aizuchi_on_promotion() {
 
     // G-S2: 昇格したら相づち、保留した文の順に流し、最終 say は残りだけを読む。
     s.send(
-        json!({"m":"provisional_result","binding_id":BINDING,"provisional_id":id,
+        json!({"m":"provisional_result","session":BINDING,"provisional_id":id,
                   "promoted":true}),
     )
     .await;
@@ -321,7 +321,7 @@ async fn a_changed_onset_transcript_replaces_and_an_unpromoted_hold_is_dropped()
 
     // 昇格しなければ相づちだけ流して保留を捨て、通常のターンの partial と say で読む。
     s.send(
-        json!({"m":"provisional_result","binding_id":BINDING,"provisional_id":id,
+        json!({"m":"provisional_result","session":BINDING,"provisional_id":id,
                   "promoted":false}),
     )
     .await;
@@ -349,7 +349,7 @@ async fn only_the_promotion_result_plays_the_aizuchi_then_the_held_speech() {
     s.settle().await;
     assert_eq!(s.played_count(), 0, "the said ok must not play the aizuchi");
     s.send(
-        json!({"m":"provisional_result","binding_id":BINDING,"provisional_id":id,
+        json!({"m":"provisional_result","session":BINDING,"provisional_id":id,
                   "promoted":true}),
     )
     .await;

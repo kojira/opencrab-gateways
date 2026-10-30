@@ -8,7 +8,6 @@ use tokio::net::UnixListener;
 use tokio::process::Command;
 
 const INSTANCE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const BINDING_ID: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const ADDRESS: &str = "extgate-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 fn binary() -> &'static str {
@@ -53,22 +52,10 @@ fn command(placement: &Path) -> Command {
 async fn mock_core(listener: UnixListener) {
     let (mut stream, _) = listener.accept().await.unwrap();
     let hello: Value = serde_json::from_slice(&read_frame(&mut stream).await.unwrap()).unwrap();
+    assert_eq!(hello["agent_id"], "agent-a");
     write_json(&mut stream, &json!({"id": hello["id"], "m": "ok"}))
         .await
         .unwrap();
-    write_json(
-        &mut stream,
-        &json!({
-            "id": "bind:process",
-            "m": "bind",
-            "binding_id": BINDING_ID,
-            "address": ADDRESS
-        }),
-    )
-    .await
-    .unwrap();
-    let bind_ok: Value = serde_json::from_slice(&read_frame(&mut stream).await.unwrap()).unwrap();
-    assert_eq!(bind_ok, json!({"id": "bind:process", "m": "ok"}));
     while read_frame(&mut stream).await.is_ok() {}
 }
 

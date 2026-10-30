@@ -17,6 +17,9 @@ pub(crate) struct UploadPolicy {
     endpoint: String,
     request_timeout: Duration,
     pub phase_timeout: Duration,
+    /// Tests talk to a 127.0.0.1 server. Looking up the system proxy (macOS can block for
+    /// ~25 s on the first lookup in a process) would eat the tests' short deadlines.
+    skip_system_proxy: bool,
 }
 
 impl Default for UploadPolicy {
@@ -25,18 +28,21 @@ impl Default for UploadPolicy {
             endpoint: ENDPOINT.into(),
             request_timeout: Duration::from_secs(60),
             phase_timeout: Duration::from_secs(180),
+            skip_system_proxy: false,
         }
     }
 }
 
 impl UploadPolicy {
     pub fn client(&self) -> Result<Client, ()> {
-        Client::builder()
+        let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .timeout(self.request_timeout)
-            .build()
-            .map_err(|_| ())
+            .timeout(self.request_timeout);
+        if self.skip_system_proxy {
+            builder = builder.no_proxy();
+        }
+        builder.build().map_err(|_| ())
     }
 
     #[cfg(test)]
@@ -46,6 +52,7 @@ impl UploadPolicy {
             endpoint,
             request_timeout,
             phase_timeout,
+            skip_system_proxy: true,
         }
     }
 

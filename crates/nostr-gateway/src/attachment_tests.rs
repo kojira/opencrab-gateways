@@ -266,6 +266,8 @@ async fn reply_and_say_upload_verified_bytes_then_publish_once_with_ordered_urls
         } else {
             payload["user"] = json!(id.to_uppercase());
         }
+        // The upload is signed at the start of the call; the publisher runs after it.
+        let signed_after = nostr::Timestamp::now().as_u64();
         let result = f
             .handler
             .handle("call", "binding", operation, &payload)
@@ -331,12 +333,7 @@ async fn reply_and_say_upload_verified_bytes_then_publish_once_with_ordered_urls
                     ["payload", hash]
                 ])
             );
-            assert!(
-                nostr::Timestamp::now()
-                    .as_u64()
-                    .abs_diff(event.created_at.as_u64())
-                    < 5
-            );
+            assert!(event.created_at.as_u64().abs_diff(signed_after) < 5);
         }
     }
 }

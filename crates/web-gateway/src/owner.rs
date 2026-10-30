@@ -3,7 +3,6 @@
 use crate::store::WebStore;
 use crate::v3::client::InstanceClient;
 use crate::v3::http::{router, HttpState};
-use crate::v3::wire::config_digest;
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -16,6 +15,9 @@ pub struct OwnerConfig {
     pub admin_socket: PathBuf,
     #[serde(default)]
     pub admin_instance_ids: Vec<String>,
+    /// D-1099: the gateway's conversations (session key → instance). Absent = next to the store.
+    #[serde(default)]
+    pub conversations_path: Option<PathBuf>,
 }
 
 impl OwnerConfig {
@@ -53,13 +55,11 @@ pub async fn run(config: OwnerConfig) -> Result<()> {
     let mut instances = Vec::new();
     let mut agent_clients = std::collections::HashMap::new();
     for row in rows {
-        let digest = config_digest(&row.author_id);
         let client = InstanceClient::spawn(
             PathBuf::from(&socket),
             row.instance_id,
-            row.revision,
+            row.agent_id.clone(),
             row.author_id,
-            digest,
         );
         anyhow::ensure!(
             agent_clients.insert(row.agent_id, client.clone()).is_none(),
@@ -70,11 +70,19 @@ pub async fn run(config: OwnerConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("bind {bind}"))?;
+    let conversations_path = config
+        .conversations_path
+        .clone()
+        .unwrap_or_else(|| config.database_path.with_file_name("web-conversations.db"));
+    let conversations = Arc::new(crate::conversations::Conversations::open(Some(
+        &conversations_path,
+    ))?);
     axum::serve(
         listener,
         router(HttpState {
             instances,
             agent_clients,
+            conversations,
         }),
     )
     .await?;
@@ -111,6 +119,7 @@ mod tests {
             database_path,
             admin_socket: admin_socket.clone(),
             admin_instance_ids: Vec::new(),
+            conversations_path: None,
         };
         let owner = tokio::spawn(run(config.clone()));
         for _ in 0..100 {

@@ -6,7 +6,7 @@ use anyhow::Context;
 use opencrab_web_gateway::v3::client::InstanceClient;
 use opencrab_web_gateway::v3::config::Placement;
 use opencrab_web_gateway::v3::http::{router, HttpState};
-use opencrab_web_gateway::v3::wire::config_digest;
+use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -53,13 +53,11 @@ async fn run() -> anyhow::Result<()> {
     let mut instances = Vec::new();
     let mut agent_clients = std::collections::HashMap::new();
     for inst in &place.instances {
-        let digest = config_digest(&inst.author_id);
         let client = InstanceClient::spawn(
             socket.clone(),
             inst.instance_id.clone(),
-            inst.revision,
+            inst.agent_id.clone(),
             inst.author_id.clone(),
-            digest,
         );
         if agent_clients
             .insert(inst.agent_id.clone(), client.clone())
@@ -75,9 +73,15 @@ async fn run() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind {}", place.http_bind))?;
     tracing::info!(addr = %place.http_bind, "web-gateway listening");
+    let conversations = Arc::new(
+        opencrab_web_gateway::conversations::Conversations::open(
+            place.conversations_path.as_deref(),
+        )?,
+    );
     let app = router(HttpState {
         instances,
         agent_clients,
+        conversations,
     });
     axum::serve(listener, app).await.context("serve")?;
     Ok(())

@@ -18,8 +18,8 @@
 //! memory_sessions 保存件数/本文 ／ LLM 呼び出し回数・イテレーション数 ／
 //! 残留マーカー（NO_REPLY/継続）／ ゲート反応（🤐/❌）。
 //!
-//! QC core を汚さない: gate 経路は専用 instance を毎回新規採番し、gate UDS の `provision`
-//! （資格情報なし・D-1098）で instance と binding を宣言する。agent は env で指定する専用テスト bot。
+//! QC core を汚さない: gate 経路は専用 instance を毎回新規採番し、gate UDS の hello と said だけで
+//! つなぐ（事前登録・資格情報なし・D-1099）。agent は env で指定する専用テスト bot。
 //! のすたろう/くらぶの session には触れない。said は caller=Owner を明示して送る。
 //!
 //! 実在の識別子（agent id・owner id・snowflake 等）はソースに埋めない。すべて env で与える

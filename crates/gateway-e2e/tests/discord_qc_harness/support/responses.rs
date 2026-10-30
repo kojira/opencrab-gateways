@@ -105,4 +105,3 @@ pub(crate) fn reply_with_content_response(text: &str, content: &str) -> ChatResp
     resp.choices[0].message.content = Some(MessageContent::Text(content.to_string()));
     resp
 }
-

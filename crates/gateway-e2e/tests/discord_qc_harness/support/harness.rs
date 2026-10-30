@@ -160,4 +160,3 @@ pub(crate) fn discord_config() -> Vec<u8> {
     }))
     .unwrap()
 }
-

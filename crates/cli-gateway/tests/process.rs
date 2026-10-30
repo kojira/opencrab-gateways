@@ -23,7 +23,6 @@ fn write_placement(dir: &Path, socket: &Path) -> PathBuf {
             "core_socket": socket,
             "instances": [{
                 "instance_id": INSTANCE_ID,
-                "revision": 1,
                 "agent_id": "agent-a",
                 "author_id": "local-operator"
             }]

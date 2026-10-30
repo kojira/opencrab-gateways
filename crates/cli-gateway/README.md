@@ -9,24 +9,23 @@ A standalone, text-only terminal gateway over the generic V3 Unix-socket protoco
   "core_socket": "/absolute/path/to/gate.sock",
   "instances": [{
     "instance_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "revision": 1,
     "agent_id": "agent-a",
     "author_id": "local-operator"
   }]
 }
 ```
 
-The instance and its agent mapping must already be provisioned in core. The placement contains no credential.
+Core needs nothing registered first: the gateway says hello with its instance and agent. The placement contains no credential.
 
 ## Run
 
-Create a core-owned binding and print its reusable `extgate-<uuid>` address:
+Open a new core session and print its reusable `extgate-<uuid>` session key:
 
 ```sh
 opencrab-cli-gateway --placement cli-placement.json --agent agent-a --new "Terminal chat" --mode repl
 ```
 
-Attach to that exact address:
+Attach to that exact session key:
 
 ```sh
 opencrab-cli-gateway --placement cli-placement.json --agent agent-a \

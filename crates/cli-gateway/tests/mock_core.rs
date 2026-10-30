@@ -11,14 +11,14 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
 const INSTANCE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const BINDING_ID: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+/// The session key core uses for the conversation (D-1099).
+const BINDING_ID: &str = "extgate-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const MESSAGE_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ADDRESS: &str = "extgate-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 fn options(socket: PathBuf, session: SessionArg) -> RunOptions {
     let instance = InstancePlacement {
         instance_id: INSTANCE_ID.into(),
-        revision: 1,
         agent_id: "agent-a".into(),
         author_id: "local-operator".into(),
     };
@@ -44,26 +44,14 @@ async fn hello(stream: &mut UnixStream) {
     let frame = read_value(stream).await;
     assert_eq!(frame["m"], "hello");
     assert_eq!(frame["instance_id"], INSTANCE_ID);
+    assert_eq!(frame["agent_id"], "agent-a");
     write_json(stream, &json!({"id": frame["id"], "m": "ok"}))
         .await
         .unwrap();
 }
 
-async fn bind(stream: &mut UnixStream, binding_id: &str, address: &str) {
-    write_json(
-        stream,
-        &json!({
-            "id": "bind:1",
-            "m": "bind",
-            "binding_id": binding_id,
-            "address": address
-        }),
-    )
-    .await
-    .unwrap();
-    let response = read_value(stream).await;
-    assert_eq!(response, json!({"id": "bind:1", "m": "ok"}));
-}
+/// D-1099: core needs nothing after hello; kept so the cases read as before.
+async fn bind(_stream: &mut UnixStream, _session: &str, _address: &str) {}
 
 async fn assert_said_and_accept(stream: &mut UnixStream, address: &str) {
     let said = read_value(stream).await;
@@ -77,7 +65,7 @@ async fn assert_said_and_accept(stream: &mut UnixStream, address: &str) {
     assert!(said["attachments"].as_array().unwrap().is_empty());
     assert!(!said.as_object().unwrap().contains_key("system_context"));
     assert!(!said.as_object().unwrap().contains_key("reply_target"));
-    let _ = address;
+    assert_eq!(said["session"], address);
     write_json(stream, &json!({"id": said["id"], "m": "ok", "seq": 7}))
         .await
         .unwrap();
@@ -231,10 +219,11 @@ async fn disconnect_reconnects_and_never_replays_uncertain_input() {
 }
 
 #[tokio::test]
-async fn unbound_reconnect_rejects_oversized_input_without_posting() {
+async fn disconnected_rejects_oversized_input_without_posting() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("gate.sock");
     let listener = UnixListener::bind(&socket).unwrap();
+    let server_socket = socket.clone();
     let warmup_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     let next_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
     let (unbound_tx, unbound_rx) = tokio::sync::oneshot::channel();
@@ -250,11 +239,14 @@ async fn unbound_reconnect_rejects_oversized_input_without_posting() {
             .await
             .unwrap();
         drop(first);
-        let (mut second, _) = listener.accept().await.unwrap();
-        hello(&mut second).await;
+        // Core is unreachable (no socket) until the oversized input has been answered.
+        drop(listener);
+        std::fs::remove_file(&server_socket).unwrap();
         unbound_tx.send(()).unwrap();
         bind_rx.await.unwrap();
-        bind(&mut second, BINDING_ID, ADDRESS).await;
+        let listener = UnixListener::bind(&server_socket).unwrap();
+        let (mut second, _) = listener.accept().await.unwrap();
+        hello(&mut second).await;
         rebound_tx.send(()).unwrap();
         let said = read_value(&mut second).await;
         assert_eq!(said["origin"], format!("cli:{next_id}"));
@@ -340,23 +332,24 @@ async fn unbound_reconnect_rejects_oversized_input_without_posting() {
 }
 
 #[tokio::test]
-async fn new_session_uses_generated_equal_address_and_binding_then_announces_it() {
+async fn new_session_opens_a_generated_session_key_then_announces_it() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("gate.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         hello(&mut stream).await;
-        let create = read_value(&mut stream).await;
-        assert_eq!(create["m"], "create_binding");
-        assert_eq!(create["session_theme"], "Terminal chat");
-        let binding_id = create["binding_id"].as_str().unwrap().to_string();
-        let address = create["address"].as_str().unwrap().to_string();
-        assert_eq!(address, format!("extgate-{binding_id}"));
-        write_json(&mut stream, &json!({"id": create["id"], "m": "ok"}))
-            .await
-            .unwrap();
-        bind(&mut stream, &binding_id, &address).await;
+        let open = read_value(&mut stream).await;
+        assert_eq!(open["m"], "open");
+        assert_eq!(open["title"], "Terminal chat");
+        let key = open["session"].as_str().unwrap().to_string();
+        assert!(key.starts_with("extgate-"), "{key}");
+        write_json(
+            &mut stream,
+            &json!({"id": open["id"], "m": "ok", "session_id": key}),
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
     let (records, result) = run_case(
@@ -489,7 +482,7 @@ async fn background_completion_no_reply_and_failure_keep_core_order() {
         write_json(
             &mut stream,
             &json!({
-                "m": "activity", "binding_id": BINDING_ID,
+                "m": "activity", "session": BINDING_ID,
                 "activity_id": first_activity, "state": "started"
             }),
         )
@@ -498,7 +491,7 @@ async fn background_completion_no_reply_and_failure_keep_core_order() {
         write_json(
             &mut stream,
             &json!({
-                "m": "activity", "binding_id": BINDING_ID,
+                "m": "activity", "session": BINDING_ID,
                 "activity_id": first_activity, "state": "ended",
                 "silent_origins": [format!("cli:{MESSAGE_ID}")]
             }),
@@ -509,7 +502,7 @@ async fn background_completion_no_reply_and_failure_keep_core_order() {
         write_json(
             &mut stream,
             &json!({
-                "m": "activity", "binding_id": BINDING_ID,
+                "m": "activity", "session": BINDING_ID,
                 "activity_id": background, "state": "started"
             }),
         )
@@ -518,7 +511,7 @@ async fn background_completion_no_reply_and_failure_keep_core_order() {
         write_json(
             &mut stream,
             &json!({
-                "id": "delivery:background", "m": "say", "binding_id": BINDING_ID,
+                "id": "delivery:background", "m": "say", "session": BINDING_ID,
                 "payload": {"text": "background result"}
             }),
         )
@@ -528,7 +521,7 @@ async fn background_completion_no_reply_and_failure_keep_core_order() {
         write_json(
             &mut stream,
             &json!({
-                "m": "activity", "binding_id": BINDING_ID,
+                "m": "activity", "session": BINDING_ID,
                 "activity_id": background, "state": "ended",
                 "completed_target": "delivery:background", "silent_origins": []
             }),
@@ -539,7 +532,7 @@ async fn background_completion_no_reply_and_failure_keep_core_order() {
         write_json(
             &mut stream,
             &json!({
-                "m": "activity", "binding_id": BINDING_ID,
+                "m": "activity", "session": BINDING_ID,
                 "activity_id": failed, "state": "started"
             }),
         )
@@ -548,7 +541,7 @@ async fn background_completion_no_reply_and_failure_keep_core_order() {
         write_json(
             &mut stream,
             &json!({
-                "m": "turn_failed", "binding_id": BINDING_ID,
+                "m": "turn_failed", "session": BINDING_ID,
                 "origin": format!("cli:{MESSAGE_ID}")
             }),
         )

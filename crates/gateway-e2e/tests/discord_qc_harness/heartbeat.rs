@@ -107,19 +107,32 @@ async fn wire_hb(core: &Core, fixture: &Fixture, channel: &str) -> (Arc<Instance
     (client, session_id)
 }
 
-/// チャンネルの session を開いてから gateway を止める（H4: gateway 停止中＝未接続）。
+/// チャンネルの session を開いてから接続を閉じる（H4: gateway 停止中＝未接続）。raw socket で
+/// hello と open だけを送り、socket を閉じて確実に切断する。
 async fn provision_hb_no_gateway(core: &Core, channel: &str) -> String {
+    use opencrab_gate_client::wire::{hello_frame, open_frame, read_frame, write_json};
     let addr = format!("discord-{AGENT_ID}-{GUILD}-{channel}");
-    let client = opencrab_gate_client::client::InstanceClient::connect(
-        &core.sock,
-        uuid::Uuid::new_v4().to_string(),
-        AGENT_ID.to_string(),
-        SELF_BOT.to_string(),
-    )
-    .await
-    .expect("connect");
-    let session_id = client.open(&addr, None).await.expect("open");
-    drop(client);
+    let mut stream = tokio::net::UnixStream::connect(&core.sock).await.unwrap();
+    let instance = uuid::Uuid::new_v4().to_string();
+    write_json(&mut stream, &hello_frame("h", &instance, AGENT_ID))
+        .await
+        .unwrap();
+    let ok: serde_json::Value = serde_json::from_slice(&read_frame(&mut stream).await.unwrap()).unwrap();
+    assert_eq!(ok["m"], "ok", "{ok}");
+    write_json(&mut stream, &open_frame("o", &addr, None))
+        .await
+        .unwrap();
+    let opened: serde_json::Value =
+        serde_json::from_slice(&read_frame(&mut stream).await.unwrap()).unwrap();
+    let session_id = opened["session_id"].as_str().expect("session").to_string();
+    drop(stream);
+    // core が切断を検知して instance を live から外すまで待つ。
+    for _ in 0..100 {
+        if !core.extgate.lock_registry().unwrap().is_live(&instance) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     session_id
 }
 

@@ -165,33 +165,45 @@ impl NostrStore {
     }
 
     pub fn get(&self, instance_id: &str) -> Result<Option<InstanceRow>> {
-        let Some(mut row) = self.conn.query_row(
-            "SELECT instance_id,agent_id,NULL,config_b64,addresses_json,credential_envelope,
+        let Some(mut row) = self
+            .conn
+            .query_row(
+                "SELECT instance_id,agent_id,NULL,config_b64,addresses_json,credential_envelope,
                     NULL,enabled,desired_generation,applied_generation,lifecycle_state,
                     process_id,process_nonce,failure_count,retry_at_unix_ms
              FROM instances WHERE instance_id=?1",
-            params![instance_id],
-            |row| {
-                let state: String = row.get(10)?;
-                let desired: i64 = row.get(8)?;
-                let applied: Option<i64> = row.get(9)?;
-                let failures: i64 = row.get(13)?;
-                Ok(InstanceRow {
-                    instance_id: row.get(0)?, agent_id: row.get(1)?,
-                    config_b64: row.get(3)?,
-                    addresses: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
-                    credential_envelope: row.get(5)?, enabled: row.get(7)?,
-                    desired_generation: u64::try_from(desired).unwrap_or(0),
-                    applied_generation: applied.and_then(|v| u64::try_from(v).ok()),
-                    lifecycle_state: LifecycleState::from_str(&state).unwrap_or(LifecycleState::Error),
-                    process_id: row.get::<_, Option<i64>>(11)?.and_then(|value| u32::try_from(value).ok()),
-                    process_nonce: row.get(12)?,
-                    failure_count: u32::try_from(failures).unwrap_or(u32::MAX),
-                    retry_at_unix_ms: row.get(14)?,
-                    access: AccessConfig::default(),
-                })
-            },
-        ).optional()? else { return Ok(None); };
+                params![instance_id],
+                |row| {
+                    let state: String = row.get(10)?;
+                    let desired: i64 = row.get(8)?;
+                    let applied: Option<i64> = row.get(9)?;
+                    let failures: i64 = row.get(13)?;
+                    Ok(InstanceRow {
+                        instance_id: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        config_b64: row.get(3)?,
+                        addresses: serde_json::from_str(&row.get::<_, String>(4)?)
+                            .unwrap_or_default(),
+                        credential_envelope: row.get(5)?,
+                        enabled: row.get(7)?,
+                        desired_generation: u64::try_from(desired).unwrap_or(0),
+                        applied_generation: applied.and_then(|v| u64::try_from(v).ok()),
+                        lifecycle_state: LifecycleState::from_str(&state)
+                            .unwrap_or(LifecycleState::Error),
+                        process_id: row
+                            .get::<_, Option<i64>>(11)?
+                            .and_then(|value| u32::try_from(value).ok()),
+                        process_nonce: row.get(12)?,
+                        failure_count: u32::try_from(failures).unwrap_or(u32::MAX),
+                        retry_at_unix_ms: row.get(14)?,
+                        access: AccessConfig::default(),
+                    })
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
         row.access = self.access_config(instance_id)?;
         Ok(Some(row))
     }
@@ -370,6 +382,21 @@ impl NostrStore {
     }
 }
 
+/// D-1099: core keeps no per-instance state for gateways any more, so the store drops the
+/// columns that mirrored core (revision, digest, binding ids). Idempotent.
+fn drop_core_columns(conn: &Connection) -> Result<()> {
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(instances)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<_, _>>()?;
+    for column in ["core_revision", "core_digest", "binding_inventory_json"] {
+        if columns.iter().any(|c| c == column) {
+            conn.execute_batch(&format!("ALTER TABLE instances DROP COLUMN {column}"))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "store_edit_tests.rs"]
 mod edit_tests;
@@ -504,19 +531,4 @@ mod tests {
         assert_eq!(disabled.lifecycle_state, LifecycleState::Disabled);
         assert!(!disabled.lifecycle().child_may_start());
     }
-}
-
-/// D-1099: core keeps no per-instance state for gateways any more, so the store drops the
-/// columns that mirrored core (revision, digest, binding ids). Idempotent.
-fn drop_core_columns(conn: &Connection) -> Result<()> {
-    let columns: Vec<String> = conn
-        .prepare("PRAGMA table_info(instances)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<_, _>>()?;
-    for column in ["core_revision", "core_digest", "binding_inventory_json"] {
-        if columns.iter().any(|c| c == column) {
-            conn.execute_batch(&format!("ALTER TABLE instances DROP COLUMN {column}"))?;
-        }
-    }
-    Ok(())
 }

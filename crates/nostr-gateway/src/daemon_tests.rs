@@ -252,7 +252,8 @@ async fn s5_nostr_restart_starts_persisted_ready_child_while_server_is_stopped()
             started: started.clone(),
             exit: Arc::new(Notify::new()),
             kills: Arc::new(AtomicUsize::new(0)),
-        }),)
+        }),
+    )
     .unwrap();
     daemon.reconcile_once().await.unwrap();
     for _ in 0..100 {
@@ -313,9 +314,7 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_observations() {
                 | LifecycleState::Running
                 | LifecycleState::Error
         ) {
-            store
-                .mark_verified(id, generation, enabled)
-                .unwrap();
+            store.mark_verified(id, generation, enabled).unwrap();
         }
         if matches!(state, LifecycleState::Running) {
             store.record_started(id, generation, 4242, "nonce").unwrap();
@@ -346,7 +345,8 @@ async fn s5_nostr_daemon_startup_recovery_matrix_uses_process_observations() {
                 cleaned: cleaned.clone(),
                 exit: Arc::new(Notify::new()),
                 kills: Arc::new(AtomicUsize::new(0)),
-            }),)
+            }),
+        )
         .unwrap();
         daemon.recover_startup().await.unwrap();
         let recovered = daemon.store().lock().unwrap().get(id).unwrap().unwrap();
@@ -380,9 +380,7 @@ async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
             .upsert_desired(id, "agent", "e30=", &[], "token", true, &[9; 32])
             .unwrap();
         store.mark_provisioning(id, generation).unwrap();
-        store
-            .mark_verified(id, generation, true)
-            .unwrap();
+        store.mark_verified(id, generation, true).unwrap();
         store.record_started(id, generation, 4242, "nonce").unwrap();
         store.mark_running(id, generation, 4242, "nonce").unwrap();
         let reaped = Arc::new(AtomicUsize::new(0));
@@ -395,7 +393,8 @@ async fn s5_nostr_running_loss_and_stale_process_are_reaped_to_durable_error() {
                 cleaned: Arc::new(AtomicUsize::new(0)),
                 exit: Arc::new(Notify::new()),
                 kills: Arc::new(AtomicUsize::new(0)),
-            }),)
+            }),
+        )
         .unwrap();
         daemon.recover_startup().await.unwrap();
         assert_eq!(
@@ -475,8 +474,14 @@ fn production_placement_uses_gateway_access_and_names_the_agent() {
     relative.attachment_outbox_root = Some("relative".into());
     assert!(relative.validate().is_err());
     let instance = &value["instances"][0];
-    assert!(instance.get("core_config_b64").is_none(), "core keeps no config");
-    assert_eq!(instance["agent_id"], "agent", "the child says hello with its agent");
+    assert!(
+        instance.get("core_config_b64").is_none(),
+        "core keeps no config"
+    );
+    assert_eq!(
+        instance["agent_id"], "agent",
+        "the child says hello with its agent"
+    );
     let cfg = parse_instance_config(
         &decode_config_b64(instance["config_b64"].as_str().unwrap()).unwrap(),
     )

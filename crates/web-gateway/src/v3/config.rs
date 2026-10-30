@@ -64,7 +64,11 @@ impl Placement {
             if seed.session.is_empty() {
                 anyhow::bail!("conversation session must be nonempty");
             }
-            if !self.instances.iter().any(|i| i.instance_id == seed.instance_id) {
+            if !self
+                .instances
+                .iter()
+                .any(|i| i.instance_id == seed.instance_id)
+            {
                 anyhow::bail!("conversation instance_id is not an instance of this placement");
             }
         }

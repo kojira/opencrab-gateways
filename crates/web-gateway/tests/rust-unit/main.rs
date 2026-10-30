@@ -102,7 +102,12 @@ impl MockCore {
 }
 
 async fn connect_client(sock: &std::path::Path) -> Arc<InstanceClient> {
-    InstanceClient::connect(sock, INSTANCE.to_string(), AGENT.to_string(), AUTHOR.to_string())
+    InstanceClient::connect(
+        sock,
+        INSTANCE.to_string(),
+        AGENT.to_string(),
+        AUTHOR.to_string(),
+    )
     .await
     .expect("connect")
 }
@@ -342,7 +347,9 @@ async fn rust_unit_create_opens_a_session_and_records_the_conversation() {
                 .method("POST")
                 .uri("/api/web-conversations")
                 .header("content-type", "application/json")
-                .body(Body::from(format!(r#"{{"agent_id":"{AGENT}","name":"n"}}"#)))
+                .body(Body::from(format!(
+                    r#"{{"agent_id":"{AGENT}","name":"n"}}"#
+                )))
                 .unwrap(),
         ),
     );

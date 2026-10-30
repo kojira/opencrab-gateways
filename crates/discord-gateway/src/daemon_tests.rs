@@ -256,7 +256,8 @@ async fn s5_discord_restart_starts_persisted_ready_child_while_server_is_stopped
             started: started.clone(),
             exit: Arc::new(Notify::new()),
             kills: Arc::new(AtomicUsize::new(0)),
-        }),)
+        }),
+    )
     .unwrap();
     daemon.reconcile_once().await.unwrap();
     for _ in 0..100 {
@@ -285,7 +286,15 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_observations() {
         let enabled = state != LifecycleState::Disabled;
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let generation = store
-            .upsert_desired(id, "agent", VALID_CONFIG_B64, &[], "token", enabled, &[9; 32])
+            .upsert_desired(
+                id,
+                "agent",
+                VALID_CONFIG_B64,
+                &[],
+                "token",
+                enabled,
+                &[9; 32],
+            )
             .unwrap();
         if !matches!(state, LifecycleState::Pending) {
             store.mark_provisioning(id, generation).unwrap();
@@ -297,9 +306,7 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_observations() {
                 | LifecycleState::Running
                 | LifecycleState::Error
         ) {
-            store
-                .mark_verified(id, generation, enabled)
-                .unwrap();
+            store.mark_verified(id, generation, enabled).unwrap();
         }
         if matches!(state, LifecycleState::Running) {
             store.record_started(id, generation, 4242, "nonce").unwrap();
@@ -330,7 +337,8 @@ async fn s5_discord_daemon_startup_recovery_matrix_uses_process_observations() {
                 cleaned: cleaned.clone(),
                 exit: Arc::new(Notify::new()),
                 kills: Arc::new(AtomicUsize::new(0)),
-            }),)
+            }),
+        )
         .unwrap();
         daemon.recover_startup().await.unwrap();
         let recovered = daemon.store().lock().unwrap().get(id).unwrap().unwrap();
@@ -364,9 +372,7 @@ async fn s5_discord_running_loss_and_stale_process_are_reaped_to_durable_error()
             .upsert_desired(id, "agent", VALID_CONFIG_B64, &[], "token", true, &[9; 32])
             .unwrap();
         store.mark_provisioning(id, generation).unwrap();
-        store
-            .mark_verified(id, generation, true)
-            .unwrap();
+        store.mark_verified(id, generation, true).unwrap();
         store.record_started(id, generation, 4242, "nonce").unwrap();
         store.mark_running(id, generation, 4242, "nonce").unwrap();
         let reaped = Arc::new(AtomicUsize::new(0));
@@ -379,7 +385,8 @@ async fn s5_discord_running_loss_and_stale_process_are_reaped_to_durable_error()
                 cleaned: Arc::new(AtomicUsize::new(0)),
                 exit: Arc::new(Notify::new()),
                 kills: Arc::new(AtomicUsize::new(0)),
-            }),)
+            }),
+        )
         .unwrap();
         daemon.recover_startup().await.unwrap();
         assert_eq!(
@@ -420,7 +427,8 @@ async fn s5_discord_invalid_config_is_a_durable_error_and_does_not_kill_daemon()
             started: Arc::new(AtomicUsize::new(0)),
             exit: Arc::new(Notify::new()),
             kills: Arc::new(AtomicUsize::new(0)),
-        }),)
+        }),
+    )
     .unwrap();
     assert!(daemon.reconcile_once().await.is_ok());
     assert_eq!(
@@ -505,12 +513,18 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
     std::fs::write(&control, b"owned").unwrap();
     let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
     let generation = store
-        .upsert_desired(instance_id, "agent", VALID_CONFIG_B64, &[], "token", false, &[9; 32])
+        .upsert_desired(
+            instance_id,
+            "agent",
+            VALID_CONFIG_B64,
+            &[],
+            "token",
+            false,
+            &[9; 32],
+        )
         .unwrap();
     store.mark_provisioning(instance_id, generation).unwrap();
-    store
-        .mark_verified(instance_id, generation, false)
-        .unwrap();
+    store.mark_verified(instance_id, generation, false).unwrap();
     let daemon = DiscordDaemon::new(
         store,
         [9; 32],
@@ -522,7 +536,8 @@ async fn s5_discord_disabled_recovery_removes_daemon_owned_placement_and_control
             attachment_outbox_root: None,
             database_path: temp.path().join("owner.db"),
             voice_settings: temp.path().join("voice/settings.json"),
-        }),)
+        }),
+    )
     .unwrap();
     daemon.reconcile_once().await.unwrap();
     assert!(!placement.exists());
@@ -593,9 +608,7 @@ fn d1079_production_placement_carries_attachment_outbox_root() {
         )
         .unwrap();
     store.mark_provisioning(instance_id, generation).unwrap();
-    store
-        .mark_verified(instance_id, generation, true)
-        .unwrap();
+    store.mark_verified(instance_id, generation, true).unwrap();
     let row = store.get(instance_id).unwrap().unwrap();
     factory
         .for_instance(&row, zeroize::Zeroizing::new(b"token".to_vec()), "nonce")

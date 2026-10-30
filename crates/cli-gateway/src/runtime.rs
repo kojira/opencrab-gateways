@@ -5,9 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use opencrab_gate_client::client::{
-    InstanceClient, LiveEvent, OpenError, PostRefuse, SaidOutcome,
-};
+use opencrab_gate_client::client::{InstanceClient, LiveEvent, OpenError, PostRefuse, SaidOutcome};
 use opencrab_gate_client::wire::{
     said_frame_with_context, LiveInboundScope, SaidCaller, SaidContext, MAX_FRAME,
 };

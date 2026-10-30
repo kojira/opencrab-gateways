@@ -113,9 +113,8 @@ async fn speaks(s: &mut Setup, message_id: &str, author: &str, bot: bool) {
             owners: vec!["30".into()],
             ..Default::default()
         };
-        let listening = crate::run::owner_mention::listening(&[crate::map::address_for(
-            "agent", "20", "10",
-        )]);
+        let listening =
+            crate::run::owner_mention::listening(&[crate::map::address_for("agent", "20", "10")]);
         crate::run::handle_incoming(
             &client,
             ("agent", "999", &access, &listening),

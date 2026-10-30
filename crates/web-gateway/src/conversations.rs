@@ -92,7 +92,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("conversations.db");
         let conversations = Conversations::open(Some(&path)).unwrap();
-        conversations.record("web-1", "instance-a", "web-1").unwrap();
+        conversations
+            .record("web-1", "instance-a", "web-1")
+            .unwrap();
         assert_eq!(conversations.owner("web-2").unwrap(), None);
         drop(conversations);
         let reopened = Conversations::open(Some(&path)).unwrap();

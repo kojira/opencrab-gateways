@@ -11,7 +11,7 @@ use tokio::net::UnixListener;
 
 use super::mock_http;
 use crate::config::{AccessConfig, SystemReactions};
-use crate::ops::{SessionDeliveryTargets, DiscordInvokeHandler};
+use crate::ops::{DiscordInvokeHandler, SessionDeliveryTargets};
 use crate::transport::{DiscordTransport, DryRunTransport};
 use crate::voice::session::{VoiceManager, VoiceManagerConfig, VoicePlayer, VOICE_SYSTEM_CONTEXT};
 
@@ -142,7 +142,9 @@ pub(super) fn manager_with(
                 owners: vec!["30".into()],
                 ..Default::default()
             },
-            addresses: std::sync::Arc::new(std::sync::RwLock::new([core.address.clone()].into_iter().collect())),
+            addresses: std::sync::Arc::new(std::sync::RwLock::new(
+                [core.address.clone()].into_iter().collect(),
+            )),
             settings_path,
         },
         player,

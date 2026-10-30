@@ -20,8 +20,8 @@ use crate::watch::{run_fake_watch_once, run_watch_loop, RESUBSCRIBE};
 use crate::watch_store::{WatchRegistry, WatchSetting};
 
 use super::{
-    flush_bundle, handle_line, snapshot, spawn_say_consumer, wait_until_connected, wait_until_disconnected,
-    InstanceClient, SaidMetrics, SeenEvents,
+    flush_bundle, handle_line, snapshot, spawn_say_consumer, wait_until_connected,
+    wait_until_disconnected, InstanceClient, SaidMetrics, SeenEvents,
 };
 
 #[allow(clippy::too_many_arguments)]

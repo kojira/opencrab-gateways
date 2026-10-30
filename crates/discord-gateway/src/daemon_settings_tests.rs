@@ -265,9 +265,7 @@ fn d1097_a_bot_without_a_channel_gets_a_valid_child_placement() {
     crate::admin_settings::store_create(&store, A, &plan, &KEY).unwrap();
     let generation = store.get(A).unwrap().unwrap().desired_generation;
     store.mark_provisioning(A, generation).unwrap();
-    store
-        .mark_verified(A, generation, true)
-        .unwrap();
+    store.mark_verified(A, generation, true).unwrap();
     let row = store.get(A).unwrap().unwrap();
     factory
         .for_instance(

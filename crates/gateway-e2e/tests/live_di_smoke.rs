@@ -360,7 +360,10 @@ async fn run_gate(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(live, "hello が受理されない（core 稼働・socket path を確認）");
+    assert!(
+        live,
+        "hello が受理されない（core 稼働・socket path を確認）"
+    );
 
     // 4) 「ユーザー発話」を 1 件送る。origin は毎回ユニーク（dedup 回避）。caller=Owner を明示する。
     let origin = format!("discord:message:v1:{channel}:{}", now_millis());

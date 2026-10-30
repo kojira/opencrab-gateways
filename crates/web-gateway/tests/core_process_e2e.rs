@@ -480,7 +480,10 @@ fn send_said_turn_say_sse_over_real_processes() {
             }
             assert_eq!(st, 503, "unexpected create status: {st} {body}");
         }
-        assert!(start.elapsed() < Duration::from_secs(15), "create never ready");
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "create never ready"
+        );
         std::thread::sleep(Duration::from_millis(50));
     };
     let created: serde_json::Value = serde_json::from_str(created.trim()).unwrap();
@@ -610,9 +613,7 @@ fn send_said_turn_say_sse_over_real_processes() {
     let sources: Vec<String> = conn
         .prepare("SELECT metadata_json FROM memory_sessions WHERE session_id = ?1")
         .unwrap()
-        .query_map([session.clone()], |r| {
-            r.get::<_, Option<String>>(0)
-        })
+        .query_map([session.clone()], |r| r.get::<_, Option<String>>(0))
         .unwrap()
         .map(|r| r.unwrap().unwrap_or_default())
         .collect();

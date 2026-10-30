@@ -21,7 +21,7 @@ use crate::harness::HarnessOverrides;
 use crate::map::{address_for, address_of, map_message, parse_address, parse_event_line};
 use crate::model::{InteractionAction, ModelInteractionEvent, COMMAND_TIMEOUT};
 use crate::ops::{
-    operation_declarations, targets_for, SessionDeliveryTargets, DiscordInvokeHandler,
+    operation_declarations, targets_for, DiscordInvokeHandler, SessionDeliveryTargets,
 };
 use crate::post::{deliver_say, SayDelivery};
 use crate::receive::{run_fake_events_once, run_serenity_receive, OnLine};

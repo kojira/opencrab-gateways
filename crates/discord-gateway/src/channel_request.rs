@@ -72,9 +72,7 @@ async fn answer(
     let mut line = String::new();
     tokio::io::BufReader::new(read).read_line(&mut line).await?;
     let result = match serde_json::from_str::<Request>(&line) {
-        Ok(request) => {
-            binder.record_address(instance_id, &request.address).await
-        }
+        Ok(request) => binder.record_address(instance_id, &request.address).await,
         Err(_) => Err(anyhow::anyhow!("bad_request")),
     };
     let reply = match result {

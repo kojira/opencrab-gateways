@@ -95,7 +95,10 @@ mod tests {
     fn validates_and_selects_exact_agent() {
         let placement = valid();
         placement.validate().unwrap();
-        assert_eq!(placement.select_agent("agent-a").unwrap().agent_id, "agent-a");
+        assert_eq!(
+            placement.select_agent("agent-a").unwrap().agent_id,
+            "agent-a"
+        );
         assert!(placement.select_agent("Agent A").is_err());
     }
 

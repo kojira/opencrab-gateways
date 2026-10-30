@@ -10,8 +10,8 @@ use http_body_util::BodyExt;
 use opencrab_web_gateway::v3::client::InstanceClient;
 use opencrab_web_gateway::v3::http::{router, HttpState};
 use opencrab_web_gateway::v3::wire::{
-    config_digest, hello_frame, ok_frame, parse_frame_bytes, read_frame, write_json, CoreMsg,
-    FrameError, MAX_FRAME,
+    hello_frame, ok_frame, parse_frame_bytes, read_frame, write_json, CoreMsg, FrameError,
+    MAX_FRAME,
 };
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -24,7 +24,8 @@ mod harvest;
 mod invariants;
 
 const INSTANCE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const BINDING: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const AGENT: &str = "agent";
+/// The web conversation's session key (D-1099: core sessions are keyed by it).
 const ADDRESS: &str = "web-agent-conv";
 const AUTHOR: &str = "owner-1";
 const CLIENT_MSG: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -101,43 +102,53 @@ impl MockCore {
 }
 
 async fn connect_client(sock: &std::path::Path) -> Arc<InstanceClient> {
-    InstanceClient::connect(
-        sock,
-        INSTANCE.to_string(),
-        1,
-        AUTHOR.to_string(),
-        config_digest(AUTHOR),
-    )
+    InstanceClient::connect(sock, INSTANCE.to_string(), AGENT.to_string(), AUTHOR.to_string())
     .await
     .expect("connect")
 }
 
+/// Core answers the hello. D-1099: nothing else is needed before saids (no bind).
 async fn hello_and_bind(mock: &mut MockCore) {
     let hello = mock.recv().await;
     assert_eq!(hello["m"], "hello");
     assert_eq!(hello["protocol"], 3);
     assert_eq!(hello["instance_id"], INSTANCE);
+    assert_eq!(hello["agent_id"], AGENT);
     mock.send(&json!({"id": hello["id"], "m": "ok"})).await;
-    mock.send(&json!({
-        "id": format!("bind:{BINDING}"),
-        "m": "bind",
-        "binding_id": BINDING,
-        "address": ADDRESS,
-    }))
-    .await;
-    let ack = mock.recv().await;
-    assert_eq!(ack["m"], "ok");
-    assert_eq!(ack["id"], format!("bind:{BINDING}"));
 }
 
 async fn wait_bound(client: &InstanceClient) {
     for _ in 0..50 {
-        if client.binding_for_address(ADDRESS).await.is_some() {
+        if client.connection_live().await {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("bind not acknowledged");
+    panic!("hello not acknowledged");
+}
+
+/// HTTP state whose conversation registry already owns [`ADDRESS`] for `client`.
+fn state_with_conversation(client: Arc<InstanceClient>) -> HttpState {
+    let conversations =
+        opencrab_web_gateway::conversations::Conversations::open(None).expect("registry");
+    conversations
+        .record(ADDRESS, &client.instance_id, ADDRESS)
+        .expect("record");
+    HttpState {
+        instances: vec![client],
+        agent_clients: std::collections::HashMap::new(),
+        conversations: Arc::new(conversations),
+    }
+}
+
+fn empty_state() -> HttpState {
+    HttpState {
+        instances: Vec::new(),
+        agent_clients: std::collections::HashMap::new(),
+        conversations: Arc::new(
+            opencrab_web_gateway::conversations::Conversations::open(None).expect("registry"),
+        ),
+    }
 }
 
 fn post_body() -> Vec<u8> {
@@ -167,7 +178,7 @@ async fn rust_unit_hello_bind_said_dedup() {
     assert_eq!(said1["m"], "said");
     assert_eq!(said1["origin"], origin());
     assert_eq!(said1["author_id"], AUTHOR);
-    assert_eq!(said1["binding_id"], BINDING);
+    assert_eq!(said1["session"], ADDRESS);
     mock.send(&json!({"id": said1["id"], "m": "ok", "seq": 1}))
         .await;
     match post_a.await.unwrap().unwrap() {
@@ -202,10 +213,7 @@ async fn rust_unit_conversation_status_is_owned_by_web_gateway() {
     hello_and_bind(&mut mock).await;
     let client = connect.await.unwrap();
     wait_bound(&client).await;
-    let app = router(HttpState {
-        instances: vec![client],
-        agent_clients: std::collections::HashMap::new(),
-    });
+    let app = router(state_with_conversation(client));
 
     let ready = app
         .clone()
@@ -236,10 +244,7 @@ async fn rust_unit_conversation_status_is_owned_by_web_gateway() {
 
 #[tokio::test]
 async fn d_1006_web_01_existing_routes_do_not_require_bearer() {
-    let app = router(HttpState {
-        instances: Vec::new(),
-        agent_clients: std::collections::HashMap::new(),
-    });
+    let app = router(empty_state());
     for (method, uri, body, expected) in [
         (
             "POST",
@@ -257,13 +262,13 @@ async fn d_1006_web_01_existing_routes_do_not_require_bearer() {
             "POST",
             "/api/web-conversations/missing/messages",
             r#"{"client_message_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","text":"hello","attachments":[]}"#,
-            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::NOT_FOUND,
         ),
         (
             "GET",
             "/api/web-conversations/missing/events",
             "",
-            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::NOT_FOUND,
         ),
     ] {
         let response = app
@@ -294,10 +299,7 @@ async fn d_1006_web_01_http_message_keeps_historical_owner_frame() {
     hello_and_bind(&mut mock).await;
     let client = connect.await.unwrap();
     wait_bound(&client).await;
-    let app = router(HttpState {
-        instances: vec![client],
-        agent_clients: std::collections::HashMap::new(),
-    });
+    let app = router(state_with_conversation(client));
     let request = Request::builder()
         .method("POST")
         .uri(format!("/api/web-conversations/{ADDRESS}/messages"))
@@ -319,42 +321,55 @@ async fn d_1006_web_01_http_message_keeps_historical_owner_frame() {
     );
 }
 
+/// D-1099: creating a web conversation asks core to `open` a session key and records which
+/// instance owns it; the new conversation is ready at once.
 #[tokio::test]
-async fn rust_unit_created_binding_is_provisioning_before_bind() {
+async fn rust_unit_create_opens_a_session_and_records_the_conversation() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("core.sock");
     let mut mock = MockCore::spawn(sock.clone());
     let connect = tokio::spawn(async move { connect_client(&sock).await });
-    let hello = mock.recv().await;
-    mock.send(&json!({"id": hello["id"], "m": "ok"})).await;
+    hello_and_bind(&mut mock).await;
     let client = connect.await.unwrap();
+    wait_bound(&client).await;
+    let mut state = empty_state();
+    state.instances = vec![client.clone()];
+    state.agent_clients.insert(AGENT.to_string(), client);
+    let app = router(state);
+    let pending = tokio::spawn(
+        app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/web-conversations")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"agent_id":"{AGENT}","name":"n"}}"#)))
+                .unwrap(),
+        ),
+    );
+    let open = mock.recv().await;
+    assert_eq!(open["m"], "open", "{open}");
+    let key = open["session"].as_str().unwrap().to_string();
+    assert!(key.starts_with("extgate-"), "{key}");
+    assert_eq!(open["title"], "n");
+    mock.send(&json!({"id": open["id"], "m": "ok", "session_id": key}))
+        .await;
+    let response = pending.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["state"], "ready");
+    assert_eq!(body["session_id"], key);
 
-    let create = {
-        let client = client.clone();
-        tokio::spawn(async move { client.create_binding(BINDING, ADDRESS, "name").await })
-    };
-    let request = mock.recv().await;
-    assert_eq!(request["m"], "create_binding");
-    mock.send(&json!({"id": request["id"], "m": "ok"})).await;
-    create.await.unwrap().unwrap();
-
-    let app = router(HttpState {
-        instances: vec![client],
-        agent_clients: std::collections::HashMap::new(),
-    });
-    let response = app
+    let status = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/web-conversations/{ADDRESS}"))
+                .uri(format!("/api/web-conversations/{key}"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body["state"], "provisioning");
+    assert_eq!(status.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -370,7 +385,7 @@ async fn rust_unit_say_ok_external_rejected_close() {
     mock.send(&json!({
         "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
         "m": "say",
-        "binding_id": BINDING,
+        "session": ADDRESS,
         "payload": {"text": "reply", "ignored": true},
     }))
     .await;
@@ -393,7 +408,7 @@ async fn rust_unit_say_ok_external_rejected_close() {
     mock.send(&json!({
         "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
         "m": "say",
-        "binding_id": BINDING,
+        "session": ADDRESS,
         "payload": {"text": ""},
     }))
     .await;
@@ -434,7 +449,7 @@ async fn rust_unit_activity_started_ended() {
 
     mock.send(&json!({
         "m": "activity",
-        "binding_id": BINDING,
+        "session": ADDRESS,
         "activity_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
         "state": "started",
     }))
@@ -452,7 +467,7 @@ async fn rust_unit_activity_started_ended() {
 
     mock.send(&json!({
         "m": "activity",
-        "binding_id": BINDING,
+        "session": ADDRESS,
         "activity_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
         "state": "ended",
     }))
@@ -504,18 +519,6 @@ async fn rust_unit_frame_too_large_and_duplicate_close() {
     write_json(&mut writer, &json!({"id": hello_id, "m": "ok"}))
         .await
         .unwrap();
-    write_json(
-        &mut writer,
-        &json!({
-            "id": format!("bind:{BINDING}"),
-            "m": "bind",
-            "binding_id": BINDING,
-            "address": ADDRESS,
-        }),
-    )
-    .await
-    .unwrap();
-    let _ = read_frame(&mut reader).await;
     let client = connect.await.unwrap();
     wait_bound(&client).await;
 
@@ -542,10 +545,7 @@ async fn rust_unit_http_post_202_not_admitted_busy_and_old_routes_404() {
     hello_and_bind(&mut mock).await;
     let client = connect.await.unwrap();
     wait_bound(&client).await;
-    let app = router(HttpState {
-        instances: vec![client.clone()],
-        agent_clients: std::collections::HashMap::new(),
-    });
+    let app = router(state_with_conversation(client.clone()));
 
     let req_null = Request::builder()
         .method("POST")
@@ -646,42 +646,31 @@ async fn rust_unit_http_post_202_not_admitted_busy_and_old_routes_404() {
     assert_eq!(post_rooms.status(), StatusCode::NOT_FOUND);
 }
 
+/// An owned conversation answers 503 while core is gone; a conversation the gateway does not own
+/// is 404 (D-1099: the gateway's own registry decides, not core binds).
 #[tokio::test]
-async fn rust_unit_disconnect_and_unacked_503() {
+async fn rust_unit_disconnect_503_and_unknown_conversation_404() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("core.sock");
     let mut mock = MockCore::spawn(sock.clone());
     let connect = tokio::spawn(async move { connect_client(&sock).await });
-    let hello = mock.recv().await;
-    mock.send(&json!({"id": hello["id"], "m": "ok"})).await;
+    hello_and_bind(&mut mock).await;
     let client = connect.await.unwrap();
-    let app = router(HttpState {
-        instances: vec![client.clone()],
-        agent_clients: std::collections::HashMap::new(),
-    });
-    let res = app
+    wait_bound(&client).await;
+    let app = router(state_with_conversation(client.clone()));
+    let unknown = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/web-conversations/{ADDRESS}/messages"))
+                .uri("/api/web-conversations/not-ours/messages")
                 .header("content-type", "application/json")
                 .body(Body::from(post_body()))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-    mock.send(&json!({
-        "id": format!("bind:{BINDING}"),
-        "m": "bind",
-        "binding_id": BINDING,
-        "address": ADDRESS,
-    }))
-    .await;
-    let _ = mock.recv().await;
-    wait_bound(&client).await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     mock.close().await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     let res = app
@@ -698,37 +687,9 @@ async fn rust_unit_disconnect_and_unacked_503() {
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
-#[tokio::test]
-async fn rust_unit_bind_same_address_different_binding_closes() {
-    let dir = tempfile::tempdir().unwrap();
-    let sock = dir.path().join("core.sock");
-    let mut mock = MockCore::spawn(sock.clone());
-    let connect = tokio::spawn(async move { connect_client(&sock).await });
-    hello_and_bind(&mut mock).await;
-    let client = connect.await.unwrap();
-    wait_bound(&client).await;
-    mock.send(&json!({
-        "id": "bind:other",
-        "m": "bind",
-        "binding_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-        "address": ADDRESS,
-    }))
-    .await;
-    let ev = tokio::time::timeout(Duration::from_secs(2), client.next_live(ADDRESS))
-        .await
-        .expect("live")
-        .expect("event");
-    match ev {
-        opencrab_web_gateway::v3::client::LiveEvent::Error { code, .. } => {
-            assert_eq!(code, "binding_conflict");
-        }
-        other => panic!("{other:?}"),
-    }
-}
-
 #[test]
 fn rust_unit_frame_grammar_unit() {
-    let _ = hello_frame("h", INSTANCE, 1, &config_digest(AUTHOR));
+    let _ = hello_frame("h", INSTANCE, AGENT);
     let _ = ok_frame("x");
     assert!(matches!(
         parse_frame_bytes(br#"{"m":1}"#).unwrap_or(CoreMsg::Invalid {

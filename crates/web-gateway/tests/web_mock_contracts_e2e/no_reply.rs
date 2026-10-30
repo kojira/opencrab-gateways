@@ -12,9 +12,8 @@ fn no_reply_is_withheld_not_said() {
     let mock = spawn_mock(|_req, _gate| text_resp("NO_REPLY"));
     let h = setup(mock.port, "noreply", false, "[tools]\nenabled = false\n");
     let session = &h.session;
-    let binding = &h.binding;
     let db = &h.db;
-    let ext_session = format!("extgate-{binding}");
+    let ext_session = h.core_session.clone();
 
     // SSE を張ってから投稿し、このターンのイベントを拾う。
     let sse_rx = spawn_sse_collect(h.gw_port, session);

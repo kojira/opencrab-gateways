@@ -73,11 +73,13 @@ async fn run() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind {}", place.http_bind))?;
     tracing::info!(addr = %place.http_bind, "web-gateway listening");
-    let conversations = Arc::new(
-        opencrab_web_gateway::conversations::Conversations::open(
-            place.conversations_path.as_deref(),
-        )?,
-    );
+    let conversations = opencrab_web_gateway::conversations::Conversations::open(
+        place.conversations_path.as_deref(),
+    )?;
+    for seed in &place.conversations {
+        conversations.adopt(&seed.session, &seed.instance_id)?;
+    }
+    let conversations = Arc::new(conversations);
     let app = router(HttpState {
         instances,
         agent_clients,

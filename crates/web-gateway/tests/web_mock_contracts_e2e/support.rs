@@ -10,7 +10,6 @@ const AGENT: &str = "e2eagent";
 const AUTHOR: &str = "e2e-owner";
 const INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
 // base64 of `{"author_id":"e2e-owner"}`。web author=owner に解決させ caller=Owner にする。
-const CONFIG_B64: &str = "eyJhdXRob3JfaWQiOiJlMmUtb3duZXIifQ==";
 
 struct Proc(Child);
 impl Drop for Proc {
@@ -344,8 +343,9 @@ fn spawn_gateway(root: &Path, sock: &Path, gw_port: u16) -> Proc {
     std::fs::write(
         &placement,
         format!(
-            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","instances":[{{"instance_id":"{INSTANCE}","revision":1,"agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
-            sock.display()
+            r#"{{"http_bind":"127.0.0.1:{gw_port}","core_socket":"{}","conversations_path":"{}","instances":[{{"instance_id":"{INSTANCE}","agent_id":"{AGENT}","author_id":"{AUTHOR}"}}]}}"#,
+            sock.display(),
+            root.join("web-conversations.db").display()
         ),
     )
     .unwrap();
@@ -361,7 +361,8 @@ fn spawn_gateway(root: &Path, sock: &Path, gw_port: u16) -> Proc {
 }
 
 /// テスト共通の土台。core+gateway を実プロセスで立て、connected create（201 ready）で
-/// 会話（session_id / binding_id）を作って返す。
+/// 会話を作って返す。`session` は gateway の URL に使う session、`core_session` は core の
+/// memory_sessions の session_id（D-1099 では同じ値）。
 struct Harness {
     _core: Proc,
     _gw: Proc,
@@ -369,7 +370,7 @@ struct Harness {
     sock: PathBuf,
     gw_port: u16,
     session: String,
-    binding: String,
+    core_session: String,
     _dir: tempfile::TempDir,
 }
 
@@ -443,26 +444,31 @@ fn setup(mock_port: u16, tag: &str, auto_dispatch: bool, tools_block: &str) -> H
     .expect("model pricing");
     assert_eq!(st, 200, "model-pricing {body}");
 
-    provision_web(&sock, &[]);
-
     let gw = spawn_gateway(root.path(), &sock, gw_port);
     assert!(wait_tcp(gw_port, Duration::from_secs(15)), "gateway http");
 
-    // connected create: gateway 接続済みなら 201 ready で binding+session を返す。
-    let (st, body) = http(
-        gw_port,
-        "POST",
-        "/api/web-conversations",
-        None,
-        Some(&format!(r#"{{"agent_id":"{AGENT}","name":"E2E"}}"#)),
-        Duration::from_secs(70),
-    )
-    .expect("create web-conversation");
-    assert_eq!(st, 201, "{body}");
-    let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
-    assert_eq!(v["state"], "ready", "{body}");
+    // connected create: gateway 接続済みなら 201 ready（core `open`）。接続待ちの間は 503。
+    let start = Instant::now();
+    let v: serde_json::Value = loop {
+        if let Some((st, body)) = http(
+            gw_port,
+            "POST",
+            "/api/web-conversations",
+            None,
+            Some(&format!(r#"{{"agent_id":"{AGENT}","name":"E2E"}}"#)),
+            Duration::from_secs(10),
+        ) {
+            if st == 201 {
+                break serde_json::from_str(body.trim()).unwrap();
+            }
+            assert_eq!(st, 503, "{body}");
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "create never ready");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(v["state"], "ready", "{v}");
     let session = v["session_id"].as_str().unwrap().to_string();
-    let binding = v["binding_id"].as_str().unwrap().to_string();
+    let core_session = session.clone();
 
     Harness {
         _core: core,
@@ -471,7 +477,7 @@ fn setup(mock_port: u16, tag: &str, auto_dispatch: bool, tools_block: &str) -> H
         sock,
         gw_port,
         session,
-        binding,
+        core_session,
         _dir: root,
     }
 }
@@ -635,48 +641,4 @@ fn spawn_sse_collect(port: u16, session: &str) -> std::sync::mpsc::Receiver<Stri
         let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
     rx
-}
-
-/// D-1098: declares the web instance (and its complete binding set) on core's gate socket the
-/// way a gateway does before `hello`. Returns the binding ids core reports, per address.
-fn provision_web(sock: &Path, addresses: &[String]) -> Vec<String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let start = Instant::now();
-    let provisioned = loop {
-        let attempt = runtime.block_on(
-            opencrab_gate_client::provision::ProvisionClient::new(sock.to_path_buf()).provision(
-                &opencrab_gate_client::provision::ProvisionDesired {
-                    instance_id: INSTANCE,
-                    kind_id: "web",
-                    agent_id: AGENT,
-                    enabled: true,
-                    config_b64: CONFIG_B64,
-                    addresses,
-                },
-            ),
-        );
-        match attempt {
-            Ok(provisioned) => break provisioned,
-            Err(error) if start.elapsed() > Duration::from_secs(15) => {
-                panic!("provision: {error:#}")
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    };
-    assert_eq!(provisioned.revision, 1, "the placement says revision 1");
-    addresses
-        .iter()
-        .map(|address| {
-            provisioned
-                .bindings
-                .iter()
-                .find(|binding| &binding.address == address)
-                .expect("provisioned binding")
-                .binding_id
-                .clone()
-        })
-        .collect()
 }

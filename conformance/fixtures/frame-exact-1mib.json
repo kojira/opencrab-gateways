@@ -1,6 +1,6 @@
 {
   "name": "frame-exact-1mib",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "sse_open",
@@ -10,7 +10,7 @@
     {
       "op": "uds_send_padded_say",
       "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "session": "web-agent-conv",
       "frame_size": 1048576
     },
     {

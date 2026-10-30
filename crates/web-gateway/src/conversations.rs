@@ -54,6 +54,20 @@ impl Conversations {
         Ok(())
     }
 
+    /// Takes over a conversation made before this registry existed (placement seed). An entry
+    /// already recorded is kept as it is, so a repeated start changes nothing.
+    pub fn adopt(&self, session_key: &str, instance_id: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("conversations poisoned"))?
+            .execute(
+                "INSERT INTO conversations(session_key,instance_id,session_id,created_at)
+                 VALUES(?1,?2,?1,?3) ON CONFLICT(session_key) DO NOTHING",
+                params![session_key, instance_id, chrono::Utc::now().to_rfc3339()],
+            )?;
+        Ok(())
+    }
+
     /// The instance that owns `session_key`, if this gateway created it.
     pub fn owner(&self, session_key: &str) -> Result<Option<String>> {
         Ok(self
@@ -84,6 +98,17 @@ mod tests {
         let reopened = Conversations::open(Some(&path)).unwrap();
         assert_eq!(
             reopened.owner("web-1").unwrap().as_deref(),
+            Some("instance-a")
+        );
+    }
+
+    #[test]
+    fn d1099_a_seed_is_adopted_once_and_never_overrides_an_owner() {
+        let conversations = Conversations::open(None).unwrap();
+        conversations.adopt("extgate-old", "instance-a").unwrap();
+        conversations.adopt("extgate-old", "instance-b").unwrap();
+        assert_eq!(
+            conversations.owner("extgate-old").unwrap().as_deref(),
             Some("instance-a")
         );
     }

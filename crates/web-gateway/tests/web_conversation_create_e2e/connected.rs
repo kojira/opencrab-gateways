@@ -11,22 +11,11 @@ fn connected_create_is_201_then_sse_said_turn_say() {
     let gw = spawn_gateway(root.path(), &sock, gw_port);
     assert!(wait_tcp(gw_port, Duration::from_secs(15)), "gateway http");
 
-    let (st, body) = http(
-        gw_port,
-        "POST",
-        "/api/web-conversations",
-        None,
-        Some(&format!(r#"{{"agent_id":"{AGENT}","name":"E2E"}}"#)),
-        Duration::from_secs(70),
-    )
-    .expect("create");
-    assert_eq!(st, 201, "{body}");
-    let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+    let v = create(gw_port, "E2E");
     assert_eq!(v["state"], "ready");
     assert_eq!(v["name"], "E2E");
     let session = v["session_id"].as_str().unwrap().to_string();
-    let binding = v["binding_id"].as_str().unwrap().to_string();
-    assert_eq!(counts(&db), (1, 1, 1));
+    assert_eq!(counts(&db), (1, 1));
 
     let sse_rx = spawn_sse(gw_port, &session);
     let post_body = format!(
@@ -55,7 +44,7 @@ fn connected_create_is_201_then_sse_said_turn_say() {
     let inbound: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1 AND content = 'hello from e2e'",
-            [format!("extgate-{binding}")],
+            [session.clone()],
             |r| r.get(0),
         )
         .unwrap();
@@ -63,7 +52,7 @@ fn connected_create_is_201_then_sse_said_turn_say() {
     let reply: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memory_sessions WHERE session_id = ?1 AND content = ?2",
-            [format!("extgate-{binding}"), REPLY.to_string()],
+            [session.clone(), REPLY.to_string()],
             |r| r.get(0),
         )
         .unwrap();

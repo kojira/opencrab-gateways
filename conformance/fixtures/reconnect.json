@@ -1,6 +1,6 @@
 {
   "name": "reconnect",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     { "op": "uds_close" },
     { "op": "uds_accept" },
@@ -14,24 +14,10 @@
         "final_delivery": "automatic",
         "operations": [],
         "instance_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-        "revision": 1,
-        "config_digest": "3b354e0c676677f4ab5735bc9f8eb2fbb2c74df34e5d54d3b4fd88165b542672"
+        "agent_id": "agent-a"
       }
     },
     { "op": "uds_send", "frame": { "id": "$hello2.id", "m": "ok" } },
-    {
-      "op": "uds_send",
-      "frame": {
-        "id": "bind:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        "m": "bind",
-        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-        "address": "web-agent-conv"
-      }
-    },
-    {
-      "op": "uds_recv",
-      "expect": { "m": "ok", "id": "bind:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }
-    },
     {
       "op": "http_post_async",
       "id": "p1",

@@ -54,7 +54,7 @@ fn second_request_not_blocked_during_long_op() {
         "[tools]\nenabled = false\n",
     );
     let db = &h.db;
-    let ext_session = format!("extgate-{}", h.binding);
+    let ext_session = h.core_session.clone();
 
     // 1) 長処理依頼 → ack say(1) ＋ 背景サブタスク detach。
     post_message(

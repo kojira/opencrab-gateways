@@ -1,6 +1,6 @@
 {
   "name": "frame-invalid-utf8",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "sse_open",

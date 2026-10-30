@@ -1,6 +1,6 @@
 {
   "name": "frame-non-object",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "sse_open",

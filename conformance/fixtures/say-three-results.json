@@ -1,6 +1,6 @@
 {
   "name": "say-three-results",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "sse_open",
@@ -12,7 +12,7 @@
       "frame": {
         "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
         "m": "say",
-        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "session": "web-agent-conv",
         "payload": { "text": "reply", "ignored": true }
       }
     },
@@ -31,7 +31,7 @@
       "frame": {
         "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
         "m": "say",
-        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "session": "web-agent-conv",
         "payload": { "text": "" }
       }
     },
@@ -45,7 +45,7 @@
     },
     {
       "op": "uds_send_raw",
-      "utf8": "{\"id\":\"unknown-response-id\",\"m\":\"ok\"}\n{\"id\":\"11111111-1111-4111-8111-111111111111\",\"m\":\"say\",\"binding_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"payload\":{\"text\":\"maybe\"}}\n"
+      "utf8": "{\"id\":\"unknown-response-id\",\"m\":\"ok\"}\n{\"id\":\"11111111-1111-4111-8111-111111111111\",\"m\":\"say\",\"session\":\"web-agent-conv\",\"payload\":{\"text\":\"maybe\"}}\n"
     },
     {
       "op": "sse_recv",

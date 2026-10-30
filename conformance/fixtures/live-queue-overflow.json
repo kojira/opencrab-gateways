@@ -1,12 +1,12 @@
 {
   "name": "live-queue-overflow",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "uds_send_says",
       "count": 32,
       "id_prefix": "q",
-      "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "session": "web-agent-conv",
       "expect_ok": true
     },
     {
@@ -14,7 +14,7 @@
       "frame": {
         "id": "q32",
         "m": "say",
-        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "session": "web-agent-conv",
         "payload": { "text": "overflow" }
       }
     },

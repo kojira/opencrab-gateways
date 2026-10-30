@@ -1,6 +1,6 @@
 {
   "name": "activity",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "sse_open",
@@ -24,7 +24,7 @@
       "op": "uds_send",
       "frame": {
         "m": "activity",
-        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "session": "web-agent-conv",
         "activity_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
         "state": "started"
       }
@@ -42,7 +42,7 @@
       "op": "uds_send",
       "frame": {
         "m": "activity",
-        "binding_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "session": "web-agent-conv",
         "activity_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
         "state": "ended"
       }

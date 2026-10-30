@@ -1,6 +1,6 @@
 {
   "name": "frame-duplicate",
-  "prelude": "hello_bind",
+  "prelude": "hello",
   "steps": [
     {
       "op": "sse_open",

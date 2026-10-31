@@ -251,9 +251,10 @@ async fn d1106_a_zen_bot_sends_the_merged_dictionary_and_keeps_the_text() {
     assert_eq!(res.status(), 200);
     assert_eq!(
         zen_recorded.requests.lock().unwrap().last().unwrap(),
+        // Longest surface first; equal lengths in surface order.
         &json!({"text": "明日のAI", "voice": "marine", "dict": [
-            {"surface": "明日", "reading": "アシタ", "accent": 0, "contour": [1.0, 0.0, -1.0]},
-            {"surface": "AI", "reading": "エーアイ"}
+            {"surface": "AI", "reading": "エーアイ"},
+            {"surface": "明日", "reading": "アシタ", "accent": 0, "contour": [1.0, 0.0, -1.0]}
         ]})
     );
 }

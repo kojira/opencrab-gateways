@@ -15,3 +15,4 @@ mod speculation;
 mod tts_cache;
 mod tts_segments;
 mod tts_text;
+mod zen_tts;

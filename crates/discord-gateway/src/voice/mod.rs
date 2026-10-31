@@ -8,6 +8,7 @@ pub mod aizuchi;
 pub mod audio;
 pub mod clients;
 mod draft;
+pub mod preview;
 pub mod receiver;
 pub mod session;
 pub mod settings;
@@ -18,4 +19,4 @@ mod tts_cache;
 pub mod tts_text;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

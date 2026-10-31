@@ -279,3 +279,47 @@ fn d1097_a_bot_without_a_channel_gets_a_valid_child_placement() {
     assert!(place.instances[0].addresses.is_empty());
     assert!(place.channel_socket.is_some());
 }
+
+/// D-1101: a saved aizuchi list reaches the rebuilt child through its placement.
+#[test]
+fn d1101_the_child_placement_carries_the_bots_aizuchi() {
+    let temp = tempfile::tempdir().unwrap();
+    let placement_dir = temp.path().join("placements");
+    let factory = ProductionFactory {
+        child_binary: "/bin/true".into(),
+        core_socket: temp.path().join("core.sock"),
+        placement_dir: placement_dir.clone(),
+        attachment_spool_root: None,
+        attachment_outbox_root: None,
+        database_path: temp.path().join("owner.db"),
+        voice_settings: temp.path().join("voice/settings.json"),
+    };
+    let store = DiscordStore::open(&temp.path().join("owner.db")).unwrap();
+    store
+        .upsert_desired(A, "agent", &config(&[]), &[], "bot-token", true, &KEY)
+        .unwrap();
+    crate::admin_settings::set_config(
+        &store,
+        A,
+        &serde_json::json!({"agent_id":"agent","self_bot_id":"111111111111111111",
+            "aizuchi":{"enabled":false,"question":["それで？"],"statement":[]}}),
+        &KEY,
+    )
+    .unwrap();
+    let row = store.get(A).unwrap().unwrap();
+    factory
+        .for_instance(
+            &row,
+            zeroize::Zeroizing::new(b"bot-token".to_vec()),
+            "nonce",
+        )
+        .unwrap();
+    let place = crate::config::Placement::load(&placement_dir.join(format!("{A}.json"))).unwrap();
+    let cfg = crate::config::parse_instance_config(
+        &crate::config::decode_config_b64(&place.instances[0].config_b64).unwrap(),
+    )
+    .unwrap();
+    assert!(!cfg.aizuchi.enabled);
+    assert_eq!(cfg.aizuchi.question, ["それで？"]);
+    assert!(cfg.aizuchi.statement.is_empty());
+}

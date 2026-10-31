@@ -2,19 +2,52 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Discord VC 設定</title>
 <style>
-body { font-family: sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; }
-fieldset { margin-bottom: 1em; }
-label { display: block; margin: .5em 0; }
-input, select { width: 100%; box-sizing: border-box; padding: .3em; }
-#status { white-space: pre-wrap; margin-top: 1em; }
-table { width: 100%; }
+:root { color-scheme: light dark; --gap: .75rem; --line: #8886; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Segoe UI", "Noto Sans JP", sans-serif; max-width: 860px; margin: 0 auto; padding: 1rem; }
+h1 { font-size: 1.35rem; margin: .25rem 0 .5rem; }
+h2 { font-size: 1.1rem; margin: 1.25rem 0 .5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--line); }
+p { margin: .4rem 0; }
+fieldset { margin: 0 0 var(--gap); padding: .75rem; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+legend { font-weight: 600; padding: 0 .35rem; }
+label { display: block; margin: 0 0 var(--gap); }
+input:not([type=checkbox]):not([type=radio]), select, textarea { display: block; width: 100%; margin-top: .25rem; font: inherit; font-size: 16px; padding: .55rem .65rem; border: 1px solid #8888; border-radius: 6px; }
+textarea { min-height: 5em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+button { font: inherit; font-size: 16px; min-height: 44px; padding: .5rem 1rem; margin: .25rem .5rem .25rem 0; border: 1px solid #8888; border-radius: 8px; cursor: pointer; }
+label.check { display: flex; align-items: center; gap: .6rem; }
+label.check input { width: 1.4rem; height: 1.4rem; margin: 0; flex: none; }
+.grid { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: var(--gap); }
+@media (min-width: 640px) {
+  .grid.c2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.c4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid.c5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+.inline { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+.inline > button { margin: 0; }
+.id, code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; overflow-wrap: anywhere; }
+.muted { color: #888; font-size: .9rem; }
+.status { white-space: pre-wrap; overflow-wrap: anywhere; color: #888; font-size: .95rem; }
+.status:empty { display: none; }
+nav { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0 1rem; }
+nav button { margin: 0; }
+nav button.active { font-weight: 700; border-width: 2px; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+#status { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: .75rem; }
+#agents td { padding: .25rem; }
+#agents input, #agents select { margin-top: 0; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.actions button { margin: 0; }
 </style>
 </head>
 <body>
 <h1>Discord VC 設定</h1>
-<p>保存すると次の参加・発話・読み上げから反映されます。gateway の再起動は不要です。</p>
+<p class="muted">保存すると次の参加・発話・読み上げから反映されます。gateway の再起動は不要です。</p>
 <form id="form">
 <fieldset>
 <legend>音声認識（STT）</legend>
@@ -26,14 +59,16 @@ table { width: 100%; }
 <legend>読み上げ（VOICEVOX）</legend>
 <label>エンドポイント<input name="tts_base_url" required></label>
 <label>既定の話者<select name="tts_default_voice"></select></label>
-<p>エージェントごとの話者（agent ID ごと。空欄の行は保存しません）</p>
-<table id="agents"></table>
+<p class="muted">エージェントごとの話者（agent ID ごと。空欄の行は保存しません）</p>
+<div class="scroll"><table id="agents"></table></div>
 <button type="button" id="add-agent">行を追加</button>
 </fieldset>
+<div class="actions">
 <button type="submit">保存</button>
 <button type="button" id="reload-speakers">話者一覧を読み込む</button>
 <button type="button" id="test-tts">読み上げをテスト</button>
 <button type="button" id="test-stt">音声認識をテスト</button>
+</div>
 </form>
 <div id="status"></div>
 <script>

@@ -2,35 +2,60 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Discord gateway 設定</title>
 <style>
-body { font-family: sans-serif; max-width: 820px; margin: 2em auto; padding: 0 1em; }
-fieldset { margin-bottom: 1em; }
-label { display: block; margin: .5em 0; }
-input, select, textarea { width: 100%; box-sizing: border-box; padding: .3em; }
-textarea { font-family: monospace; min-height: 4em; }
-.row { display: flex; gap: .5em; align-items: center; }
-.row > * { flex: 1; }
-.status { white-space: pre-wrap; margin: .5em 0; color: #333; }
-nav button.active { font-weight: bold; }
-iframe { width: 100%; border: 1px solid #ccc; height: 900px; }
-.aizuchi-words { list-style: none; padding: 0; margin: .3em 0; }
-.aizuchi-words li { display: flex; gap: .5em; align-items: center; margin: .2em 0; }
-.aizuchi-words li button { flex: 0 0 auto; }
-.aizuchi-words li span { flex: 1; }
+:root { color-scheme: light dark; --gap: .75rem; --line: #8886; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Segoe UI", "Noto Sans JP", sans-serif; max-width: 860px; margin: 0 auto; padding: 1rem; }
+h1 { font-size: 1.35rem; margin: .25rem 0 .5rem; }
+h2 { font-size: 1.1rem; margin: 1.25rem 0 .5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--line); }
+p { margin: .4rem 0; }
+fieldset { margin: 0 0 var(--gap); padding: .75rem; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+legend { font-weight: 600; padding: 0 .35rem; }
+label { display: block; margin: 0 0 var(--gap); }
+input:not([type=checkbox]):not([type=radio]), select, textarea { display: block; width: 100%; margin-top: .25rem; font: inherit; font-size: 16px; padding: .55rem .65rem; border: 1px solid #8888; border-radius: 6px; }
+textarea { min-height: 5em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+button { font: inherit; font-size: 16px; min-height: 44px; padding: .5rem 1rem; margin: .25rem .5rem .25rem 0; border: 1px solid #8888; border-radius: 8px; cursor: pointer; }
+label.check { display: flex; align-items: center; gap: .6rem; }
+label.check input { width: 1.4rem; height: 1.4rem; margin: 0; flex: none; }
+.grid { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: var(--gap); }
+@media (min-width: 640px) {
+  .grid.c2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.c4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid.c5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+.inline { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+.inline > button { margin: 0; }
+.id, code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; overflow-wrap: anywhere; }
+.muted { color: #888; font-size: .9rem; }
+.status { white-space: pre-wrap; overflow-wrap: anywhere; color: #888; font-size: .95rem; }
+.status:empty { display: none; }
+nav { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0 1rem; }
+nav button { margin: 0; }
+nav button.active { font-weight: 700; border-width: 2px; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+iframe { width: 100%; border: 1px solid var(--line); border-radius: 8px; height: 1100px; }
+.aizuchi-words { list-style: none; padding: 0; margin: -.25rem 0 var(--gap); }
+.aizuchi-words li { display: flex; gap: .6rem; align-items: center; margin: .25rem 0; }
+.aizuchi-words li button { flex: 0 0 auto; min-width: 44px; margin: 0; padding: .25rem .6rem; }
+.aizuchi-words li span:first-of-type { flex: 1; }
 </style>
 </head>
 <body>
 <h1>Discord gateway 設定</h1>
-<p>保存すると数秒で反映されます（そのエージェントの bot だけつなぎ直します）。bot トークンは表示しません。</p>
+<p class="muted">保存すると数秒で反映されます（そのエージェントの bot だけつなぎ直します）。bot トークンは表示しません。</p>
 <nav id="tabs"></nav>
 <div id="panel"></div>
 <fieldset id="create"><legend>新しいエージェントの bot</legend>
-  <p>bot をまだ持っていないエージェントに bot を付けます。トークンは Discord に確認して bot ID を自動で入れます（表示はしません）。</p>
+  <p class="muted">bot をまだ持っていないエージェントに bot を付けます。トークンは Discord に確認して bot ID を自動で入れます（表示はしません）。</p>
   <label>エージェント<select id="c-agent"></select></label>
   <label>bot トークン<input id="c-token" type="password" autocomplete="off"></label>
   <label>オーナー（Discord ユーザー ID。改行区切り）<textarea id="c-owners"></textarea></label>
-  <div class="row">
+  <div class="grid c2">
     <label>サーバー ID（DM は空欄）<input id="c-guild"></label>
     <label>チャンネル ID<input id="c-channel"></label>
   </div>
@@ -127,15 +152,15 @@ function render() {
   const reactions = c.system_reactions || {};
   const aizuchi = c.aizuchi || { enabled: true, question: [], statement: [] };
   panel.innerHTML = `
-<p>エージェント ${current.agent_id} ／ 状態: ${current.lifecycle_state}${current.last_exit ? `（直近: ${current.last_exit}）` : ""}</p>
+<p class="muted">エージェント <span class="id">${current.agent_id}</span> ／ 状態: ${current.lifecycle_state}${current.last_exit ? `（直近: ${current.last_exit}）` : ""}</p>
 <fieldset><legend>起動・停止</legend>
-  <div class="row"><span>${current.enabled ? "起動中（有効）" : "停止中（無効）"}</span>
+  <div class="inline"><span>${current.enabled ? "起動中（有効）" : "停止中（無効）"}</span>
   <button id="toggle">${current.enabled ? "停止する" : "起動する"}</button></div>
   <div class="status" id="s-enabled"></div>
 </fieldset>
 <fieldset><legend>bot トークン</legend>
-  <p>${current.credential_configured ? "設定済み" : "未設定"}（表示しません。差し替えるときだけ入力。Discord に確認して bot ID も合わせます）</p>
-  <p>bot ID: ${c.self_bot_id}</p>
+  <p class="muted">${current.credential_configured ? "設定済み" : "未設定"}（表示しません。差し替えるときだけ入力。Discord に確認して bot ID も合わせます）</p>
+  <p>bot ID: <span class="id">${c.self_bot_id}</span></p>
   <input id="f-token" type="password" autocomplete="off" placeholder="新しいトークン">
   <button id="save-token">トークンを差し替える</button>
   <div class="status" id="s-token"></div>
@@ -147,7 +172,7 @@ function render() {
   ${field("co-agent（Discord ユーザー ID=エージェント ID。改行区切り）", coAgents, "co", true)}
   <label>配送モード<select id="f-mode">
     <option value="tool_driven">tool_driven</option><option value="say">say</option></select></label>
-  <div class="row">
+  <div class="grid c4">
     ${field("受理", reactions.accepted || "👀", "r-accepted")}
     ${field("完了", reactions.completed || "🏁", "r-completed")}
     ${field("失敗", reactions.failed || "❌", "r-failed")}
@@ -157,22 +182,22 @@ function render() {
   <div class="status" id="s-config"></div>
 </fieldset>
 <fieldset><legend>相づち（VC）</legend>
-  <p>話し終わったあと、返事の前に流す短い言葉です。1行に1つ書きます（${aizuchiMaxWords}個まで、1つ${aizuchiMaxChars}文字まで）。空にすると、その場面では流しません。</p>
-  <label class="row"><input id="f-aizuchi-on" type="checkbox" style="flex:0"> 相づちを流す</label>
+  <p class="muted">話し終わったあと、返事の前に流す短い言葉です。1行に1つ書きます（${aizuchiMaxWords}個まで、1つ${aizuchiMaxChars}文字まで）。空にすると、その場面では流しません。</p>
+  <label class="check"><input id="f-aizuchi-on" type="checkbox"><span>相づちを流す</span></label>
   ${field("問いかけのとき（「か」「の」「？」で終わる発話）", aizuchi.question.join("\n"), "aizuchi-q", true)}
   <ul class="aizuchi-words" id="w-aizuchi-q"></ul>
   ${field("それ以外のとき", aizuchi.statement.join("\n"), "aizuchi-s", true)}
   <ul class="aizuchi-words" id="w-aizuchi-s"></ul>
-  <p>▶ を押すと、この bot の声で実際に流れる音声を再生します（保存前の言葉も試せます）。</p>
+  <p class="muted">▶ を押すと、この bot の声で実際に流れる音声を再生します（保存前の言葉も試せます）。</p>
   <button id="save-aizuchi">保存</button>
   <div class="status" id="s-aizuchi"></div>
 </fieldset>
 <fieldset><legend>チャンネルを追加</legend>
-  <div class="row">${field("サーバー ID（DM は空欄）", "", "guild")}${field("チャンネル ID", "", "channel")}</div>
+  <div class="grid c2">${field("サーバー ID（DM は空欄）", "", "guild")}${field("チャンネル ID", "", "channel")}</div>
   <button id="add-channel">このチャンネルで話せるようにする</button>
 </fieldset>
 <fieldset><legend>チャンネル（会話できるチャンネルの address。改行区切り）</legend>
-  <p>形式: discord-${current.agent_id}-&lt;サーバー ID&gt;-&lt;チャンネル ID&gt;（DM はサーバー ID を空に）</p>
+  <p class="muted">形式: <span class="id">discord-${current.agent_id}-&lt;サーバー ID&gt;-&lt;チャンネル ID&gt;</span>（DM はサーバー ID を空に）</p>
   <textarea id="f-addresses">${current.addresses.join("\n")}</textarea>
   <button id="save-addresses">保存</button>
   <div class="status" id="s-addresses"></div>

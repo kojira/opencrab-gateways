@@ -5,20 +5,50 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nostr gateway 設定</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, "Hiragino Sans", sans-serif; max-width: 880px; margin: 2em auto; padding: 0 1em; line-height: 1.6; }
-  h1 { font-size: 1.3em; }
-  h2 { font-size: 1.05em; margin-top: 1.6em; border-bottom: 1px solid #8884; }
-  label { display: block; margin: 0.4em 0; }
-  input[type=text], input[type=number], input[type=password], textarea, select { width: 100%; box-sizing: border-box; padding: 0.3em; font: inherit; }
-  textarea { min-height: 4.5em; }
-  table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.95em; }
-  th, td { border: 1px solid #8884; padding: 0.3em 0.5em; text-align: left; vertical-align: top; word-break: break-all; }
-  button { padding: 0.35em 0.9em; margin: 0.2em 0.4em 0.2em 0; }
-  .row { display: grid; grid-template-columns: 1fr 1fr 2fr 2fr 1fr; gap: 0.5em; align-items: end; }
-  .muted { color: #888; font-size: 0.9em; }
-  #msg { position: sticky; top: 0; padding: 0.4em 0; min-height: 1.4em; background: Canvas; }
-  #msg.err { color: #c00; }
+:root { color-scheme: light dark; --gap: .75rem; --line: #8886; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Segoe UI", "Noto Sans JP", sans-serif; max-width: 860px; margin: 0 auto; padding: 1rem; }
+h1 { font-size: 1.35rem; margin: .25rem 0 .5rem; }
+h2 { font-size: 1.1rem; margin: 1.25rem 0 .5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--line); }
+p { margin: .4rem 0; }
+fieldset { margin: 0 0 var(--gap); padding: .75rem; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+legend { font-weight: 600; padding: 0 .35rem; }
+label { display: block; margin: 0 0 var(--gap); }
+input:not([type=checkbox]):not([type=radio]), select, textarea { display: block; width: 100%; margin-top: .25rem; font: inherit; font-size: 16px; padding: .55rem .65rem; border: 1px solid #8888; border-radius: 6px; }
+textarea { min-height: 5em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+button { font: inherit; font-size: 16px; min-height: 44px; padding: .5rem 1rem; margin: .25rem .5rem .25rem 0; border: 1px solid #8888; border-radius: 8px; cursor: pointer; }
+label.check { display: flex; align-items: center; gap: .6rem; }
+label.check input { width: 1.4rem; height: 1.4rem; margin: 0; flex: none; }
+.grid { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: var(--gap); }
+@media (min-width: 640px) {
+  .grid.c2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.c4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid.c5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+.inline { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+.inline > button { margin: 0; }
+.id, code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; overflow-wrap: anywhere; }
+.muted { color: #888; font-size: .9rem; }
+.status { white-space: pre-wrap; overflow-wrap: anywhere; color: #888; font-size: .95rem; }
+.status:empty { display: none; }
+nav { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0 1rem; }
+nav button { margin: 0; }
+nav button.active { font-weight: 700; border-width: 2px; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+#msg { position: sticky; top: 0; z-index: 1; padding: .4rem 0; min-height: 1.5em; background: Canvas; overflow-wrap: anywhere; }
+#msg.err { color: #c00; }
+#msg:empty { min-height: 0; padding: 0; }
+.watches td button { min-height: 36px; padding: .25rem .7rem; margin: .1rem .3rem .1rem 0; }
+@media (max-width: 639px) {
+  .watches thead { display: none; }
+  .watches, .watches tbody, .watches tr, .watches td { display: block; width: 100%; }
+  .watches tr { border: 1px solid var(--line); border-radius: 8px; padding: .4rem .6rem; margin-bottom: .6rem; }
+  .watches td { border: 0; padding: .15rem 0; }
+  .watches td[data-label]::before { content: attr(data-label) ": "; color: #888; }
+}
 </style>
 </head>
 <body>
@@ -30,8 +60,8 @@
 <p class="muted" id="state"></p>
 
 <h2>起動・停止</h2>
-<p><span id="enabled-label"></span>
-  <button id="enable">起動</button><button id="disable">停止</button></p>
+<div class="inline"><span id="enabled-label"></span>
+  <span><button id="enable">起動</button><button id="disable">停止</button></span></div>
 
 <h2>基本（relays・name・filter）</h2>
 <label>relays（1 行に 1 つ、ws:// か wss://）<textarea id="relays"></textarea></label>
@@ -39,7 +69,7 @@
 <label>filter.authors（カンマ区切り）<input id="filter-authors" type="text"></label>
 <label>filter.keywords（カンマ区切り）<input id="filter-keywords" type="text"></label>
 <label>filter.kinds（カンマ区切り）<input id="filter-kinds" type="text"></label>
-<p class="muted">自分の公開鍵: <span id="self-pubkey"></span></p>
+<p class="muted">自分の公開鍵: <span class="id" id="self-pubkey"></span></p>
 <button id="save-config">基本を保存</button>
 
 <h2>アクセス（owner・trusted_users・followees・co_agents）</h2>
@@ -58,12 +88,12 @@
 <button id="generate">新しい鍵を generate（今の鍵は上書き・停止状態になります）</button>
 
 <h2>watch（タイムライン監視）</h2>
-<table>
+<div class="scroll"><table class="watches">
   <thead><tr><th>id</th><th>interval_secs</th><th>authors</th><th>keywords</th><th>kinds</th><th></th></tr></thead>
   <tbody id="watch-list"></tbody>
-</table>
+</table></div>
 <p class="muted">id を空にすると追加、入れるとその watch を更新。kinds は 1,6,7（空なら 1）。</p>
-<div class="row">
+<div class="grid c5">
   <label>id<input id="w-id" type="number" min="1"></label>
   <label>interval_secs<input id="w-interval" type="number" min="60" max="86400" value="1800"></label>
   <label>authors<input id="w-authors" type="text"></label>
@@ -140,8 +170,9 @@ async function loadWatches() {
   try { data = await call(base() + '/watches'); } catch (e) { say(e.message, true); return; }
   for (const w of data.watches) {
     const tr = document.createElement('tr');
-    for (const v of [w.id, w.interval_secs, w.authors.join(', '), w.keywords.join(', '), w.kinds.join(',')]) {
-      const td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
+    const cells = [['id', w.id], ['interval_secs', w.interval_secs], ['authors', w.authors.join(', ')], ['keywords', w.keywords.join(', ')], ['kinds', w.kinds.join(',')]];
+    for (const [label, v] of cells) {
+      const td = document.createElement('td'); td.dataset.label = label; td.textContent = v; tr.appendChild(td);
     }
     const td = document.createElement('td');
     const edit = document.createElement('button');

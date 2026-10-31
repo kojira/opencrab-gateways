@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 
-use super::dictionary::{Readings, TtsDictionary};
+use super::dictionary::{Dictionary, TtsDictionary};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -101,8 +101,8 @@ pub struct VoiceChoice {
     pub emotion: Option<serde_json::Value>,
     /// ZEN-TTS の抑揚（VOICEVOX は常に None）。
     pub strength: Option<f64>,
-    /// この bot の読み上げ辞書（D-1106）。合成とキャッシュのキーは置き換えた本文で決まる。
-    pub readings: Readings,
+    /// この bot の読み上げ辞書（共通と bot の辞書を重ねたもの。D-1106）。
+    pub dictionary: Dictionary,
 }
 
 impl VoiceChoice {
@@ -112,7 +112,7 @@ impl VoiceChoice {
             voice: voice.to_string(),
             emotion: None,
             strength: None,
-            readings: Readings::default(),
+            dictionary: Dictionary::default(),
         }
     }
 
@@ -122,18 +122,22 @@ impl VoiceChoice {
             voice: voice.to_string(),
             emotion,
             strength,
-            readings: Readings::default(),
+            dictionary: Dictionary::default(),
         }
     }
 
-    pub fn with_readings(mut self, readings: Readings) -> Self {
-        self.readings = readings;
+    pub fn with_dictionary(mut self, dictionary: Dictionary) -> Self {
+        self.dictionary = dictionary;
         self
     }
 
-    /// 辞書を通した、エンジンに渡す本文。
-    pub fn reading(&self, text: &str) -> String {
-        self.readings.apply(text)
+    /// エンジンに渡す本文。VOICEVOX は辞書の言葉を読みに置き換え、ZEN-TTS は辞書を `dict` で
+    /// 渡すので本文はそのまま。
+    pub fn engine_text(&self, text: &str) -> String {
+        match self.engine {
+            TtsEngine::Voicevox => self.dictionary.replace_readings(text),
+            TtsEngine::ZenTts => text.to_string(),
+        }
     }
 }
 
@@ -156,7 +160,7 @@ impl TtsSettings {
     /// `agent_id` の bot が読み上げに使うエンジンと声。
     pub fn choice_for_agent(&self, agent_id: &str) -> VoiceChoice {
         self.engine_choice(agent_id)
-            .with_readings(self.dictionary.for_agent(agent_id))
+            .with_dictionary(self.dictionary.for_agent(agent_id))
     }
 
     fn engine_choice(&self, agent_id: &str) -> VoiceChoice {

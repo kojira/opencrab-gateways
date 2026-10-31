@@ -46,7 +46,7 @@ pub(crate) fn cache_key(style: &str, speed: f64, text: &str) -> String {
 
 /// `choice` の声で `text` を読んだ音声のキー（[`VoiceChoice`] ごとに別の音声）。
 pub(crate) fn choice_cache_key(choice: &VoiceChoice, text: &str) -> String {
-    let text = &choice.reading(text);
+    let text = &choice.engine_text(text);
     match choice.engine {
         TtsEngine::Voicevox => cache_key(&choice.voice, TTS_SPEED_SCALE, text),
         TtsEngine::ZenTts => {
@@ -72,6 +72,17 @@ pub(crate) fn choice_cache_key(choice: &VoiceChoice, text: &str) -> String {
                 hasher.update(format!("{strength}").as_bytes());
             }
             hasher.update([0]);
+            // The dictionary changes readings and intonation, so it is part of the audio. Keys
+            // without a dictionary stay as before D-1106.
+            if !choice.dictionary.is_empty() {
+                hasher.update(b"dict");
+                hasher.update(
+                    serde_json::to_string(choice.dictionary.entries())
+                        .unwrap_or_default()
+                        .as_bytes(),
+                );
+                hasher.update([0]);
+            }
             hasher.update(text.as_bytes());
             hasher
                 .finalize()

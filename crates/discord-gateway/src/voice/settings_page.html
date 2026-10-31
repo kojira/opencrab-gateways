@@ -44,6 +44,11 @@ th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; 
 .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .actions button { margin: 0; }
 .credit { font-size: .9rem; }
+.dict-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr) auto; gap: .5rem; align-items: center; margin: 0 0 .5rem; }
+.dict-row input { margin-top: 0 !important; }
+.dict-row button { margin: 0; min-width: 44px; }
+.dict-mark { grid-column: 1 / -1; margin-top: -.35rem; }
+@media (max-width: 480px) { .dict-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 </style>
 </head>
 <body>
@@ -72,6 +77,14 @@ th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; 
 <div class="grid c5" id="zen-emotion"></div>
 <label>抑揚の強さ（空欄なら標準）<input name="zen_strength" inputmode="decimal"></label>
 <p class="credit">音声合成：<a href="https://zenryokukikai.com" target="_blank" rel="noopener">ZEN-TTS（https://zenryokukikai.com ）</a></p>
+</fieldset>
+<fieldset>
+<legend>読み上げ辞書（共通）</legend>
+<p class="muted">どの bot の読み上げにも効く読み方です。同じ言葉が bot の辞書にあれば、bot の辞書が優先します。アクセントは何拍目の後で下がるか（0 = 平板、空欄ならおまかせ）で、ZEN-TTS だけが使います。ZEN-TTS のデモのイントネーション編集で作った抑揚は「読み込む」で入れられます（「抑揚あり」の行）。VOICEVOX は言葉を読みに置き換えて読みます（読みが空なら読みません）。</p>
+<div id="dict-shared"></div>
+<button type="button" id="add-dict">言葉を追加</button>
+<button type="button" id="export-dict">書き出す</button>
+<button type="button" id="import-dict-button">読み込む</button><input type="file" id="import-dict" accept="application/json,.json" hidden>
 </fieldset>
 <div class="actions">
 <button type="submit">保存</button>
@@ -131,6 +144,79 @@ function zenVoiceOptions(select, value) {
 
 function say(text) { status.textContent = text; }
 
+// D-1106: a read-aloud dictionary editor (zen-tts dictionary entries). Rows edit 言葉 / 読み /
+// アクセント; other fields (phrase, strength, contour, pitch, length) come from 読み込む (the zen-tts
+// demo's export) and are kept as they are.
+const dictAdvanced = ["phrase", "strength", "contour", "pitch", "length"];
+function dictRow(box, entry) {
+  const e = entry || { surface: "", reading: "" };
+  const row = document.createElement("div");
+  row.className = "dict-row";
+  row.entry = e;
+  const input = (cls, label, value, max) => {
+    const el = document.createElement("input");
+    el.className = cls; el.placeholder = label; el.setAttribute("aria-label", label); el.value = value ?? "";
+    if (max) el.maxLength = max;
+    return el;
+  };
+  const surface = input("dict-surface", "言葉", e.surface, 64);
+  const reading = input("dict-reading", "読み", e.reading, 128);
+  const accent = input("dict-accent", "アクセント", e.accent, 0);
+  accent.inputMode = "numeric";
+  const del = document.createElement("button");
+  del.type = "button"; del.textContent = "削除"; del.onclick = () => row.remove();
+  row.append(surface, reading, accent, del);
+  if (dictAdvanced.some(k => e[k] !== undefined)) {
+    const mark = document.createElement("span");
+    mark.className = "muted dict-mark"; mark.textContent = "抑揚あり";
+    row.appendChild(mark);
+  }
+  box.appendChild(row);
+}
+function dictFill(box, entries) {
+  box.innerHTML = "";
+  for (const e of entries || []) dictRow(box, e);
+}
+function dictCollect(box) {
+  const out = [];
+  for (const row of box.querySelectorAll(".dict-row")) {
+    const surface = row.querySelector(".dict-surface").value;
+    if (!surface.trim()) continue;
+    const e = { ...row.entry, surface, reading: row.querySelector(".dict-reading").value.trim() };
+    const accent = row.querySelector(".dict-accent").value.trim();
+    if (accent === "") delete e.accent; else e.accent = Number(accent);
+    out.push(e);
+  }
+  return out;
+}
+function dictExport(box, name) {
+  const body = JSON.stringify({ format: "zen-tts-dictionary", version: 1, entries: dictCollect(box) }, null, 2);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([body], { type: "application/json" }));
+  a.download = `${name}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+// Adds the entries of a zen-tts dictionary file (or a bare entry array). A surface already in the
+// list is replaced. Saving is still the 保存 button.
+async function dictImport(box, file, report) {
+  try {
+    const data = JSON.parse(await file.text());
+    const entries = Array.isArray(data) ? data : data.entries;
+    if (!Array.isArray(entries)) throw new Error("entries がありません");
+    const current = dictCollect(box);
+    for (const e of entries) {
+      if (!e || typeof e.surface !== "string" || typeof e.reading !== "string") throw new Error("surface と reading が要ります");
+      const i = current.findIndex(c => c.surface === e.surface);
+      if (i >= 0) current[i] = e; else current.push(e);
+    }
+    dictFill(box, current);
+    report(`${entries.length} 語を読み込みました。保存すると反映されます。`);
+  } catch (err) {
+    report(`読み込めません: ${err.message}`);
+  }
+}
+
 function speakerOptions(select, value) {
   select.innerHTML = "";
   const known = new Set();
@@ -188,6 +274,7 @@ function fill(s) {
   zenVoiceOptions(form.zen_default_voice, zen.default_voice);
   for (const name of emotionNames) form[`zen_emotion_${name}`].value = (zen.emotion || {})[name] ?? "";
   form.zen_strength.value = zen.strength ?? "";
+  dictFill(document.getElementById("dict-shared"), (s.tts.dictionary || {}).shared);
 }
 
 function collect() {
@@ -216,6 +303,10 @@ function collect() {
   } else {
     delete tts.zen;
   }
+  const dictionary = { ...(tts.dictionary || {}) };
+  const shared = dictCollect(document.getElementById("dict-shared"));
+  if (shared.length) dictionary.shared = shared; else delete dictionary.shared;
+  if (Object.keys(dictionary).length) tts.dictionary = dictionary; else delete tts.dictionary;
   return { stt, tts };
 }
 
@@ -271,6 +362,14 @@ form.addEventListener("submit", async ev => {
 
 document.getElementById("add-agent").onclick = () => addAgentRow("", form.tts_default_voice.value);
 document.getElementById("reload-speakers").onclick = loadSpeakers;
+document.getElementById("add-dict").onclick = () => dictRow(document.getElementById("dict-shared"));
+document.getElementById("export-dict").onclick = () => dictExport(document.getElementById("dict-shared"), "tts-dictionary-shared");
+document.getElementById("import-dict-button").onclick = () => document.getElementById("import-dict").click();
+document.getElementById("import-dict").onchange = async ev => {
+  const file = ev.target.files[0];
+  ev.target.value = "";
+  if (file) await dictImport(document.getElementById("dict-shared"), file, say);
+};
 
 document.getElementById("test-tts").onclick = async () => {
   say("合成しています…");

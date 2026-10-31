@@ -138,8 +138,10 @@ async fn test_tts(State(state): Shared, Json(request): Json<TtsTest>) -> Respons
     };
     let choice = match (&request.agent, &request.voice) {
         (Some(agent), _) => settings.tts.choice_for_agent(agent),
-        (None, Some(voice)) => super::settings::VoiceChoice::voicevox(voice),
-        (None, None) => super::settings::VoiceChoice::voicevox(&settings.tts.default_voice),
+        (None, Some(voice)) => super::settings::VoiceChoice::voicevox(voice)
+            .with_dictionary(settings.tts.dictionary.for_agent("")),
+        (None, None) => super::settings::VoiceChoice::voicevox(&settings.tts.default_voice)
+            .with_dictionary(settings.tts.dictionary.for_agent("")),
     };
     match clients::synthesize_choice(&state.http, &settings.tts, &choice, &request.text).await {
         Ok(wav) => ([(header::CONTENT_TYPE, "audio/wav")], wav).into_response(),

@@ -37,7 +37,9 @@ impl std::fmt::Display for PreviewError {
         match self {
             Self::InvalidWord(reason) => write!(f, "この言葉は使えません: {reason}"),
             Self::NotConfigured => write!(f, "VC の音声設定がまだありません"),
-            Self::Engine(engine, reason) => write!(f, "{engine} で音声を作れませんでした: {reason}"),
+            Self::Engine(engine, reason) => {
+                write!(f, "{engine} で音声を作れませんでした: {reason}")
+            }
         }
     }
 }

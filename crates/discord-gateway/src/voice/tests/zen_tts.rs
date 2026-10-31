@@ -63,7 +63,8 @@ pub async fn spawn_zen() -> (String, Arc<ZenRecorded>) {
 
 /// VOICEVOX for every bot except `agent-zen`, which reads with ZEN-TTS `kikka`, happy 70.
 fn settings_json(voicevox: &str, zen: &str) -> String {
-    let mut v: serde_json::Value = serde_json::from_str(&mock_http::settings_json(voicevox)).unwrap();
+    let mut v: serde_json::Value =
+        serde_json::from_str(&mock_http::settings_json(voicevox)).unwrap();
     v["tts"]["zen"] = serde_json::json!({"base_url": zen, "default_voice": "marine"});
     v["tts"]["agents"] = serde_json::json!({
         "agent-zen": {"provider": "zen-tts", "voice": "kikka", "emotion": {"happy": 70}}
@@ -86,7 +87,12 @@ async fn d1103_a_zen_bot_reads_through_the_zen_server_and_a_voicevox_bot_does_no
 
     let choice = settings.tts.choice_for_agent("agent-zen");
     let wav = synthesizer
-        .synthesize(&settings.tts, &choice, "こんにちは。", SynthesisPriority::Live)
+        .synthesize(
+            &settings.tts,
+            &choice,
+            "こんにちは。",
+            SynthesisPriority::Live,
+        )
         .await
         .unwrap();
     assert_eq!(wav, WAV_FROM_ZEN);
@@ -98,7 +104,12 @@ async fn d1103_a_zen_bot_reads_through_the_zen_server_and_a_voicevox_bot_does_no
 
     let vv_choice = settings.tts.choice_for_agent("agent");
     let wav = synthesizer
-        .synthesize(&settings.tts, &vv_choice, "こんにちは。", SynthesisPriority::Live)
+        .synthesize(
+            &settings.tts,
+            &vv_choice,
+            "こんにちは。",
+            SynthesisPriority::Live,
+        )
         .await
         .unwrap();
     assert_eq!(wav, mock_http::WAV_FROM_TTS);
@@ -107,7 +118,11 @@ async fn d1103_a_zen_bot_reads_through_the_zen_server_and_a_voicevox_bot_does_no
         vv.tts_queries.lock().unwrap().clone(),
         [("こんにちは。".to_string(), "8".to_string())]
     );
-    assert_eq!(zen_recorded.requests.lock().unwrap().len(), 1, "VOICEVOX bot never hit ZEN");
+    assert_eq!(
+        zen_recorded.requests.lock().unwrap().len(),
+        1,
+        "VOICEVOX bot never hit ZEN"
+    );
 }
 
 #[tokio::test]
@@ -123,7 +138,11 @@ async fn d1103_prewarm_covers_the_zen_bot_and_its_aizuchi_play_from_cache() {
     let phrases = AizuchiConfig::default().prewarm_phrases();
     let synthesizer = Synthesizer::new(
         crate::voice::clients::http_client(),
-        TtsCache::open(voice.join("tts-cache"), MEMORY_LIMIT_BYTES, DISK_LIMIT_BYTES),
+        TtsCache::open(
+            voice.join("tts-cache"),
+            MEMORY_LIMIT_BYTES,
+            DISK_LIMIT_BYTES,
+        ),
         phrases.clone(),
     );
     let settings = VoiceSettings::from_json(&settings_json(&voicevox, &zen)).unwrap();
@@ -135,12 +154,21 @@ async fn d1103_prewarm_covers_the_zen_bot_and_its_aizuchi_play_from_cache() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let zen_count = zen_recorded.requests.lock().unwrap().len();
-    assert_eq!(zen_count, phrases.len(), "every phrase prewarmed in the ZEN voice");
+    assert_eq!(
+        zen_count,
+        phrases.len(),
+        "every phrase prewarmed in the ZEN voice"
+    );
     let choice = settings.tts.choice_for_agent("agent-zen");
-    assert_eq!(synthesizer.cached(&choice, &phrases[0]).as_deref(), Some(WAV_FROM_ZEN));
+    assert_eq!(
+        synthesizer.cached(&choice, &phrases[0]).as_deref(),
+        Some(WAV_FROM_ZEN)
+    );
 
     // The settings page preview plays the same cached ZEN audio, without a new synthesis.
-    let preview = aizuchi_preview(&path, "agent-zen", &phrases[0]).await.unwrap();
+    let preview = aizuchi_preview(&path, "agent-zen", &phrases[0])
+        .await
+        .unwrap();
     assert!(preview.from_cache);
     assert_eq!(preview.wav, WAV_FROM_ZEN);
     assert_eq!(zen_recorded.requests.lock().unwrap().len(), zen_count);
@@ -155,8 +183,15 @@ async fn d1103_preview_names_zen_tts_when_its_server_is_down() {
     std::fs::create_dir_all(&voice).unwrap();
     let path = voice.join("settings.json");
     std::fs::write(&path, settings_json(&voicevox, "http://127.0.0.1:9")).unwrap();
-    let error = aizuchi_preview(&path, "agent-zen", "うん、").await.unwrap_err();
-    assert!(error.to_string().starts_with("ZEN-TTS で音声を作れませんでした"), "{error}");
+    let error = aizuchi_preview(&path, "agent-zen", "うん、")
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("ZEN-TTS で音声を作れませんでした"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

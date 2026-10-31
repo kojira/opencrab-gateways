@@ -311,11 +311,18 @@ fn d1103_cache_keys_differ_by_engine_voice_emotion_and_strength() {
         VoiceChoice::zen(voice, emotion, strength)
     };
     let base = choice_cache_key(&zen("marine", None, None), "うん、");
-    assert_ne!(base, cache_key("marine", 1.0, "うん、"), "engine is in the key");
+    assert_ne!(
+        base,
+        cache_key("marine", 1.0, "うん、"),
+        "engine is in the key"
+    );
     assert_ne!(base, choice_cache_key(&zen("kikka", None, None), "うん、"));
     assert_ne!(
         base,
-        choice_cache_key(&zen("marine", Some(serde_json::json!({"happy": 70})), None), "うん、")
+        choice_cache_key(
+            &zen("marine", Some(serde_json::json!({"happy": 70})), None),
+            "うん、"
+        )
     );
     assert_ne!(
         base,
@@ -324,11 +331,19 @@ fn d1103_cache_keys_differ_by_engine_voice_emotion_and_strength() {
     // The same emotion written in another key order is the same audio.
     assert_eq!(
         choice_cache_key(
-            &zen("marine", Some(serde_json::json!({"happy": 70, "sad": 30})), None),
+            &zen(
+                "marine",
+                Some(serde_json::json!({"happy": 70, "sad": 30})),
+                None
+            ),
             "うん、"
         ),
         choice_cache_key(
-            &zen("marine", Some(serde_json::json!({"sad": 30, "happy": 70})), None),
+            &zen(
+                "marine",
+                Some(serde_json::json!({"sad": 30, "happy": 70})),
+                None
+            ),
             "うん、"
         )
     );

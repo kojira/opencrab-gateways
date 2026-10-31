@@ -156,7 +156,10 @@ pub async fn engine_version(http: &reqwest::Client, tts: &TtsSettings) -> anyhow
     let voicevox = voicevox_version(http, tts).await?;
     match &tts.zen {
         None => Ok(voicevox),
-        Some(zen) => Ok(format!("{voicevox}+zen:{}", zen_version(http, &zen.base_url).await?)),
+        Some(zen) => Ok(format!(
+            "{voicevox}+zen:{}",
+            zen_version(http, &zen.base_url).await?
+        )),
     }
 }
 

@@ -46,7 +46,9 @@ async fn setup(stt: Vec<(u64, &'static str)>) -> Setup {
     let manager = manager_with(&core, path, player.clone(), transport.clone());
     manager.join(BINDING, Some("555"), None).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while recorded.synthesis_started.lock().unwrap().len() < 2 * AizuchiConfig::default().prewarm_phrases().len() {
+        while recorded.synthesis_started.lock().unwrap().len()
+            < 2 * AizuchiConfig::default().prewarm_phrases().len()
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

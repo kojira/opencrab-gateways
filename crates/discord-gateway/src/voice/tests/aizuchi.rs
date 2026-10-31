@@ -35,7 +35,9 @@ async fn setup(stt: &'static str, version: bool) -> Setup {
     manager.join(BINDING, Some("555"), None).await.unwrap();
     if version {
         tokio::time::timeout(Duration::from_secs(5), async {
-            while recorded.synthesis_started.lock().unwrap().len() < 2 * AizuchiConfig::default().prewarm_phrases().len() {
+            while recorded.synthesis_started.lock().unwrap().len()
+                < 2 * AizuchiConfig::default().prewarm_phrases().len()
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })

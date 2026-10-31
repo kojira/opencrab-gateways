@@ -439,3 +439,78 @@ async fn d1097_create_route_checks_the_token_and_forwards_to_the_daemon() {
     assert_eq!(row.agent_id, "agent-new");
     assert_eq!(row.addresses, vec!["discord-agent-new-100-200"]);
 }
+
+/// D-1101: the page shows each bot's aizuchi (defaults when unset) and saving a custom list
+/// stores it for that bot only; the rebuilt child reads it from its placement.
+#[tokio::test]
+async fn d1101_aizuchi_round_trip_is_per_bot() {
+    let f = fixture().await;
+    let http = reqwest::Client::new();
+    let list: serde_json::Value = http
+        .get(format!("{}/api/instances", f.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for inst in list["instances"].as_array().unwrap() {
+        let aizuchi = &inst["config"]["aizuchi"];
+        assert_eq!(aizuchi["enabled"], true, "{inst}");
+        assert_eq!(
+            aizuchi["question"],
+            serde_json::json!(["えっと、", "うーん、"])
+        );
+    }
+
+    let put = http
+        .put(format!("{}/api/instances/{A}/config", f.base))
+        .json(
+            &serde_json::json!({"agent_id":"agent-a","self_bot_id":"111111111111111111",
+            "aizuchi":{"enabled":true,"question":["それで？"],"statement":["ほうほう、"]}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 200, "{}", put.text().await.unwrap());
+    let saved = |id: &str| {
+        let row = f.store.lock().unwrap().get(id).unwrap().unwrap();
+        crate::config::parse_instance_config(
+            &crate::config::decode_config_b64(&row.config_b64).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(saved(A).aizuchi.statement, ["ほうほう、"]);
+    assert_eq!(
+        saved(B).aizuchi,
+        crate::voice::aizuchi::AizuchiConfig::default(),
+        "the other bot keeps its own"
+    );
+
+    let bad = http
+        .put(format!("{}/api/instances/{A}/config", f.base))
+        .json(
+            &serde_json::json!({"agent_id":"agent-a","self_bot_id":"111111111111111111",
+            "aizuchi":{"statement":[""]}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    assert_eq!(
+        saved(A).aizuchi.statement,
+        ["ほうほう、"],
+        "a rejected save changes nothing"
+    );
+
+    let page = http
+        .get(&f.base)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.contains("相づち"), "the page has the aizuchi section");
+    let _ = &f.temp;
+}

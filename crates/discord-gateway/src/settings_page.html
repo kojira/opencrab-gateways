@@ -35,6 +35,8 @@ iframe { width: 100%; border: 1px solid #ccc; height: 900px; }
 </fieldset>
 <script>
 const api = "api/instances";
+const aizuchiMaxWords = 20;
+const aizuchiMaxChars = 20;
 let instances = [];
 let current = null;
 
@@ -86,6 +88,7 @@ function render() {
   const access = c.access || {};
   const coAgents = Object.entries(access.co_agents || {}).map(([u, a]) => `${u}=${a}`).join("\n");
   const reactions = c.system_reactions || {};
+  const aizuchi = c.aizuchi || { enabled: true, question: [], statement: [] };
   panel.innerHTML = `
 <p>エージェント ${current.agent_id} ／ 状態: ${current.lifecycle_state}${current.last_exit ? `（直近: ${current.last_exit}）` : ""}</p>
 <fieldset><legend>起動・停止</legend>
@@ -116,6 +119,14 @@ function render() {
   <button id="save-config">保存</button>
   <div class="status" id="s-config"></div>
 </fieldset>
+<fieldset><legend>相づち（VC）</legend>
+  <p>話し終わったあと、返事の前に流す短い言葉です。1行に1つ書きます（${aizuchiMaxWords}個まで、1つ${aizuchiMaxChars}文字まで）。空にすると、その場面では流しません。</p>
+  <label class="row"><input id="f-aizuchi-on" type="checkbox" style="flex:0"> 相づちを流す</label>
+  ${field("問いかけのとき（「か」「の」「？」で終わる発話）", aizuchi.question.join("\n"), "aizuchi-q", true)}
+  ${field("それ以外のとき", aizuchi.statement.join("\n"), "aizuchi-s", true)}
+  <button id="save-aizuchi">保存</button>
+  <div class="status" id="s-aizuchi"></div>
+</fieldset>
 <fieldset><legend>チャンネルを追加</legend>
   <div class="row">${field("サーバー ID（DM は空欄）", "", "guild")}${field("チャンネル ID", "", "channel")}</div>
   <button id="add-channel">このチャンネルで話せるようにする</button>
@@ -127,6 +138,16 @@ function render() {
   <div class="status" id="s-addresses"></div>
 </fieldset>`;
   document.getElementById("f-mode").value = c.delivery_mode || "tool_driven";
+  document.getElementById("f-aizuchi-on").checked = aizuchi.enabled;
+  document.getElementById("save-aizuchi").onclick = () => {
+    const words = id => document.getElementById(id).value.split("\n").map(s => s.trim()).filter(Boolean);
+    const next = { ...c, aizuchi: {
+      enabled: document.getElementById("f-aizuchi-on").checked,
+      question: words("f-aizuchi-q"),
+      statement: words("f-aizuchi-s"),
+    } };
+    put("config", next, document.getElementById("s-aizuchi"));
+  };
   document.getElementById("toggle").onclick = () =>
     put("enabled", { enabled: !current.enabled }, document.getElementById("s-enabled"));
   document.getElementById("save-token").onclick = () => {

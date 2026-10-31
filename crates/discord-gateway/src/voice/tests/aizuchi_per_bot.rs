@@ -31,9 +31,10 @@ fn d1101_missing_config_keeps_todays_defaults() {
         ["うん、", "へえ、", "なるほど、", "そっか、", "ああ、"]
     );
     // 一部だけ書いた設定は、書かなかった項目が既定値になる。
-    let cfg =
-        parse_instance_config(br#"{"agent_id":"a","self_bot_id":"111","aizuchi":{"enabled":false}}"#)
-            .unwrap();
+    let cfg = parse_instance_config(
+        br#"{"agent_id":"a","self_bot_id":"111","aizuchi":{"enabled":false}}"#,
+    )
+    .unwrap();
     assert!(!cfg.aizuchi.enabled);
     assert_eq!(cfg.aizuchi.question, ["えっと、", "うーん、"]);
 }

@@ -69,6 +69,7 @@ pub async fn synthesize_choice(
     choice: &VoiceChoice,
     text: &str,
 ) -> anyhow::Result<Vec<u8>> {
+    let text = &choice.reading(text);
     match choice.engine {
         TtsEngine::Voicevox => synthesize(http, tts, text, &choice.voice).await,
         TtsEngine::ZenTts => zen_synthesize(http, tts, choice, text).await,

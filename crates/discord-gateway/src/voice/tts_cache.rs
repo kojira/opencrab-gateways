@@ -46,6 +46,7 @@ pub(crate) fn cache_key(style: &str, speed: f64, text: &str) -> String {
 
 /// `choice` の声で `text` を読んだ音声のキー（[`VoiceChoice`] ごとに別の音声）。
 pub(crate) fn choice_cache_key(choice: &VoiceChoice, text: &str) -> String {
+    let text = &choice.reading(text);
     match choice.engine {
         TtsEngine::Voicevox => cache_key(&choice.voice, TTS_SPEED_SCALE, text),
         TtsEngine::ZenTts => {

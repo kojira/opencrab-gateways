@@ -3,6 +3,7 @@ mod aizuchi_per_bot;
 mod aizuchi_preview;
 mod bargein;
 mod caller_vc;
+mod dictionary;
 mod e2e;
 pub(crate) mod mock_http;
 mod ops;

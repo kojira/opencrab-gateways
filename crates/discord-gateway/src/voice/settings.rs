@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 
+use super::dictionary::{Readings, TtsDictionary};
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceSettings {
@@ -47,6 +49,9 @@ pub struct TtsSettings {
     /// bot（agent）ごとの読み上げ。`agent_voices` より優先する（D-1103）。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agents: BTreeMap<String, AgentTts>,
+    /// 読み上げ辞書（共通と bot ごと。D-1106）。
+    #[serde(default, skip_serializing_if = "TtsDictionary::is_empty")]
+    pub dictionary: TtsDictionary,
 }
 
 /// ZEN-TTS の接続先と、bot が指定しなかったときの声・感情・抑揚。
@@ -96,6 +101,8 @@ pub struct VoiceChoice {
     pub emotion: Option<serde_json::Value>,
     /// ZEN-TTS の抑揚（VOICEVOX は常に None）。
     pub strength: Option<f64>,
+    /// この bot の読み上げ辞書（D-1106）。合成とキャッシュのキーは置き換えた本文で決まる。
+    pub readings: Readings,
 }
 
 impl VoiceChoice {
@@ -105,6 +112,7 @@ impl VoiceChoice {
             voice: voice.to_string(),
             emotion: None,
             strength: None,
+            readings: Readings::default(),
         }
     }
 
@@ -114,7 +122,18 @@ impl VoiceChoice {
             voice: voice.to_string(),
             emotion,
             strength,
+            readings: Readings::default(),
         }
+    }
+
+    pub fn with_readings(mut self, readings: Readings) -> Self {
+        self.readings = readings;
+        self
+    }
+
+    /// 辞書を通した、エンジンに渡す本文。
+    pub fn reading(&self, text: &str) -> String {
+        self.readings.apply(text)
     }
 }
 
@@ -136,6 +155,11 @@ impl TtsSettings {
 
     /// `agent_id` の bot が読み上げに使うエンジンと声。
     pub fn choice_for_agent(&self, agent_id: &str) -> VoiceChoice {
+        self.engine_choice(agent_id)
+            .with_readings(self.dictionary.for_agent(agent_id))
+    }
+
+    fn engine_choice(&self, agent_id: &str) -> VoiceChoice {
         let agent = self.agents.get(agent_id);
         let provider = agent.map_or(self.provider.as_str(), |a| a.provider.as_str());
         match (provider, &self.zen) {
@@ -174,6 +198,7 @@ impl TtsSettings {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
+        self.dictionary.validate()?;
         check_provider("tts.provider", &self.provider)?;
         check_http_url("tts.base_url", &self.base_url)?;
         check_speaker("tts.default_voice", &self.default_voice)?;

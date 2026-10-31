@@ -7,6 +7,7 @@
 pub mod aizuchi;
 pub mod audio;
 pub mod clients;
+pub mod dictionary;
 mod draft;
 pub mod preview;
 pub mod receiver;

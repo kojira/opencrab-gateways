@@ -158,3 +158,53 @@ async fn d1103_preview_names_zen_tts_when_its_server_is_down() {
     let error = aizuchi_preview(&path, "agent-zen", "うん、").await.unwrap_err();
     assert!(error.to_string().starts_with("ZEN-TTS で音声を作れませんでした"), "{error}");
 }
+
+#[tokio::test]
+async fn d1103_pages_show_the_zen_tts_credit_with_a_link() {
+    let credit = r#"<a href="https://zenryokukikai.com" target="_blank" rel="noopener">ZEN-TTS（https://zenryokukikai.com ）</a>"#;
+    for (name, page) in [
+        ("VC settings page", crate::voice::settings_http::PAGE),
+        ("Discord settings page", crate::settings_http::PAGE),
+    ] {
+        assert!(page.contains("音声合成："), "{name} names the credit");
+        assert!(page.contains(credit), "{name} links the credit");
+    }
+}
+
+#[tokio::test]
+async fn d1103_test_play_for_a_bot_uses_that_bots_zen_voice() {
+    let (voicevox, vv) = mock_http::spawn("x").await;
+    *vv.engine_version.lock().unwrap() = Some("0.25.2".into());
+    let (zen, zen_recorded) = spawn_zen().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("voice").join("settings.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, settings_json(&voicevox, &zen)).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(crate::voice::settings_http::serve_on(listener, path));
+    let http = reqwest::Client::new();
+
+    let voices: serde_json::Value = http
+        .get(format!("http://{addr}/api/voice-settings/zen-voices"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(voices["voices"][0]["id"], "marine");
+
+    let wav = http
+        .post(format!("http://{addr}/api/voice-settings/test-tts"))
+        .json(&serde_json::json!({"text": "試し。", "agent": "agent-zen"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wav.status(), 200);
+    assert_eq!(wav.bytes().await.unwrap().as_ref(), WAV_FROM_ZEN);
+    assert_eq!(
+        zen_recorded.requests.lock().unwrap().last().unwrap(),
+        &serde_json::json!({"text": "試し。", "voice": "kikka", "emotion": {"happy": 70}})
+    );
+}

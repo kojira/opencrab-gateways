@@ -31,7 +31,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
-const PAGE: &str = include_str!("settings_page.html");
+pub const PAGE: &str = include_str!("settings_page.html");
 
 struct AppState {
     admin_socket: PathBuf,

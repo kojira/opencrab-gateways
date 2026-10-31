@@ -43,6 +43,7 @@ iframe { width: 100%; border: 1px solid var(--line); border-radius: 8px; height:
 .aizuchi-words li { display: flex; gap: .6rem; align-items: center; margin: .25rem 0; }
 .aizuchi-words li button { flex: 0 0 auto; min-width: 44px; margin: 0; padding: .25rem .6rem; }
 .aizuchi-words li span:first-of-type { flex: 1; }
+.credit { font-size: .9rem; }
 </style>
 </head>
 <body>
@@ -181,6 +182,20 @@ function render() {
   <button id="save-config">保存</button>
   <div class="status" id="s-config"></div>
 </fieldset>
+<fieldset><legend>読み上げ（VC）</legend>
+  <p class="muted">この bot が VC で話す声です。接続先と既定は「VC 設定」で決めます。</p>
+  <label>エンジン<select id="f-tts-provider">
+    <option value="">既定に合わせる</option><option value="voicevox">VOICEVOX</option><option value="zen-tts">ZEN-TTS</option></select></label>
+  <label>声<select id="f-tts-voice"></select></label>
+  <div id="tts-zen-only">
+    <div class="grid c5" id="f-tts-emotion"></div>
+    <label>抑揚の強さ（空欄なら既定）<input id="f-tts-strength" inputmode="decimal"></label>
+    <p class="credit">音声合成：<a href="https://zenryokukikai.com" target="_blank" rel="noopener">ZEN-TTS（https://zenryokukikai.com ）</a></p>
+  </div>
+  <button id="test-tts">この声で試す</button>
+  <button id="save-tts">保存</button>
+  <div class="status" id="s-tts"></div>
+</fieldset>
 <fieldset><legend>相づち（VC）</legend>
   <p class="muted">話し終わったあと、返事の前に流す短い言葉です。1行に1つ書きます（${aizuchiMaxWords}個まで、1つ${aizuchiMaxChars}文字まで）。空にすると、その場面では流しません。</p>
   <label class="check"><input id="f-aizuchi-on" type="checkbox"><span>相づちを流す</span></label>
@@ -203,6 +218,7 @@ function render() {
   <div class="status" id="s-addresses"></div>
 </fieldset>`;
   document.getElementById("f-mode").value = c.delivery_mode || "tool_driven";
+  ttsSection(current.agent_id);
   document.getElementById("f-aizuchi-on").checked = aizuchi.enabled;
   for (const name of ["aizuchi-q", "aizuchi-s"]) {
     const area = document.getElementById(`f-${name}`);
@@ -264,6 +280,123 @@ function render() {
     };
     put("config", next, document.getElementById("s-config"));
   };
+}
+
+// D-1103: this bot's TTS (engine, voice, ZEN-TTS emotion) lives in the shared VC settings,
+// under tts.agents[agent_id]. Everything else in that file is kept as it is.
+const voiceApi = "api/voice-settings";
+const emotionNames = ["neutral", "happy", "sad", "angry", "apologetic"];
+const emotionLabels = { neutral: "普通", happy: "嬉しい", sad: "悲しい", angry: "怒り", apologetic: "謝罪" };
+let voiceSettings = null;
+let vvSpeakers = [];
+let zenVoices = [];
+
+function voiceOptions(provider, value) {
+  const select = document.getElementById("f-tts-voice");
+  select.innerHTML = "";
+  const def = document.createElement("option");
+  def.value = ""; def.textContent = "既定に合わせる";
+  select.appendChild(def);
+  const known = new Set([""]);
+  const add = (id, label) => {
+    const opt = document.createElement("option");
+    opt.value = id; opt.textContent = label;
+    select.appendChild(opt); known.add(id);
+  };
+  if (provider === "zen-tts") for (const v of zenVoices) add(v.id, `${v.name.ja}: ${v.id}`);
+  else for (const sp of vvSpeakers) for (const st of sp.styles) add(String(st.id), `${sp.name}（${st.name}）: ${st.id}`);
+  if (value && !known.has(value)) add(value, value);
+  select.value = value || "";
+}
+
+function effectiveProvider() {
+  const chosen = document.getElementById("f-tts-provider").value;
+  return chosen || (voiceSettings ? voiceSettings.tts.provider : "voicevox");
+}
+
+function showZenOnly() {
+  document.getElementById("tts-zen-only").style.display = effectiveProvider() === "zen-tts" ? "" : "none";
+}
+
+async function ttsSection(agentId) {
+  const status = document.getElementById("s-tts");
+  const box = document.getElementById("f-tts-emotion");
+  for (const name of emotionNames) {
+    const label = document.createElement("label");
+    label.textContent = `${emotionLabels[name]}（0〜100）`;
+    const input = document.createElement("input");
+    input.id = `f-tts-emotion-${name}`; input.inputMode = "numeric";
+    label.appendChild(input); box.appendChild(label);
+  }
+  const res = await fetch(voiceApi);
+  if (!res.ok) { status.textContent = `VC 設定を読めません: ${await errorText(res)}`; return; }
+  voiceSettings = await res.json();
+  const mine = (voiceSettings.tts.agents || {})[agentId] || {};
+  const provider = document.getElementById("f-tts-provider");
+  provider.value = mine.provider || "";
+  for (const name of emotionNames) document.getElementById(`f-tts-emotion-${name}`).value = (mine.emotion || {})[name] ?? "";
+  document.getElementById("f-tts-strength").value = mine.strength ?? "";
+  const [vv, zen] = await Promise.all([
+    fetch(`${voiceApi}/speakers`).then(r => r.ok ? r.json() : []).catch(() => []),
+    voiceSettings.tts.zen ? fetch(`${voiceApi}/zen-voices`).then(r => r.ok ? r.json() : {}).catch(() => ({})) : {},
+  ]);
+  vvSpeakers = vv; zenVoices = zen.voices || [];
+  voiceOptions(effectiveProvider(), mine.voice);
+  showZenOnly();
+  provider.onchange = () => { voiceOptions(effectiveProvider(), ""); showZenOnly(); };
+  document.getElementById("save-tts").onclick = () => saveTts(agentId, status);
+  document.getElementById("test-tts").onclick = () => testTts(agentId, status);
+}
+
+function ttsEntry() {
+  const provider = document.getElementById("f-tts-provider").value;
+  if (!provider) return null;
+  const entry = { provider };
+  const voice = document.getElementById("f-tts-voice").value;
+  if (voice) entry.voice = voice;
+  if (provider === "zen-tts") {
+    const emotion = {};
+    for (const name of emotionNames) {
+      const raw = document.getElementById(`f-tts-emotion-${name}`).value.trim();
+      if (raw !== "") emotion[name] = Number(raw);
+    }
+    if (Object.keys(emotion).length) entry.emotion = emotion;
+    const strength = document.getElementById("f-tts-strength").value.trim();
+    if (strength !== "") entry.strength = Number(strength);
+  }
+  return entry;
+}
+
+async function saveTts(agentId, status) {
+  if (!voiceSettings) return;
+  const next = JSON.parse(JSON.stringify(voiceSettings));
+  next.tts.agents = next.tts.agents || {};
+  const entry = ttsEntry();
+  if (entry) next.tts.agents[agentId] = entry; else delete next.tts.agents[agentId];
+  if (!Object.keys(next.tts.agents).length) delete next.tts.agents;
+  status.textContent = "保存しています…";
+  const res = await fetch(voiceApi, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next),
+  });
+  if (!res.ok) { status.textContent = `保存できません: ${await errorText(res)}`; return; }
+  voiceSettings = await res.json();
+  status.textContent = "保存しました。次の読み上げから反映されます。";
+}
+
+async function testTts(agentId, status) {
+  // Tries the saved voice of this bot (save first to hear a change).
+  status.textContent = "音声を用意しています…";
+  const res = await fetch(`${voiceApi}/test-tts`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "こんにちは。読み上げのテストです。", agent: agentId }),
+  });
+  if (!res.ok) { status.textContent = `再生できません: ${await errorText(res)}`; return; }
+  const url = URL.createObjectURL(await res.blob());
+  if (playing) playing.pause();
+  playing = new Audio(url);
+  playing.onended = () => URL.revokeObjectURL(url);
+  status.textContent = "保存済みの設定で再生しています。";
+  try { await playing.play(); } catch { status.textContent = "ブラウザが再生を止めました。もう一度押してください。"; }
 }
 
 async function loadAgents() {

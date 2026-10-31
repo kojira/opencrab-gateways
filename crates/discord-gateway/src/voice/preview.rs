@@ -1,17 +1,17 @@
 //! D-1101b: 設定画面で相づちを試聴する。VC で流すのと同じ音声を返す。
 //!
 //! 同じ音声にするため、bot と同じ道を通る。
-//! - スタイル: [`TtsSettings::voice_for_agent`]（agent ごとの声、無ければ既定）
-//! - 合成の固定値: [`clients::synthesize`]（話速などは VC と同じ）
+//! - 声: [`TtsSettings::choice_for_agent`]（bot ごとのエンジンと声、無ければ既定。D-1103）
+//! - 合成: [`clients::synthesize_choice`]（VOICEVOX の話速などは VC と同じ）
 //! - キャッシュ: bot と共有の `voice/tts-cache`（[`TtsCache`]）。あれば VC と同じ音声をそのまま
 //!   返し、無ければ合成してキャッシュへ入れる（次に VC で流すときもそれを使う）
 
 use std::path::Path;
 
 use super::aizuchi::AizuchiConfig;
-use super::clients::{self, TTS_SPEED_SCALE};
-use super::settings::load_settings;
-use super::tts_cache::{cache_key, TtsCache, DISK_LIMIT_BYTES, MEMORY_LIMIT_BYTES};
+use super::clients;
+use super::settings::{load_settings, TtsEngine};
+use super::tts_cache::{choice_cache_key, TtsCache, DISK_LIMIT_BYTES, MEMORY_LIMIT_BYTES};
 
 /// 試聴の結果。
 #[derive(Debug)]
@@ -28,8 +28,8 @@ pub enum PreviewError {
     InvalidWord(String),
     /// VC の接続先がまだ設定されていない。
     NotConfigured,
-    /// VOICEVOX につながらない、または合成に失敗した。
-    Engine(String),
+    /// 読み上げエンジンにつながらない、または合成に失敗した（どのエンジンか、理由）。
+    Engine(&'static str, String),
 }
 
 impl std::fmt::Display for PreviewError {
@@ -37,7 +37,9 @@ impl std::fmt::Display for PreviewError {
         match self {
             Self::InvalidWord(reason) => write!(f, "この言葉は使えません: {reason}"),
             Self::NotConfigured => write!(f, "VC の音声設定がまだありません"),
-            Self::Engine(reason) => write!(f, "VOICEVOX で音声を作れませんでした: {reason}"),
+            Self::Engine(engine, reason) => {
+                write!(f, "{engine} で音声を作れませんでした: {reason}")
+            }
         }
     }
 }
@@ -59,10 +61,14 @@ pub async fn aizuchi_preview(
     if !settings_path.exists() {
         return Err(PreviewError::NotConfigured);
     }
-    let settings =
-        load_settings(settings_path).map_err(|e| PreviewError::Engine(format!("{e:#}")))?;
+    let settings = load_settings(settings_path)
+        .map_err(|e| PreviewError::Engine("読み上げ", format!("{e:#}")))?;
     let tts = settings.tts;
-    let style = tts.voice_for_agent(agent_id).to_string();
+    let choice = tts.choice_for_agent(agent_id);
+    let engine = match choice.engine {
+        TtsEngine::Voicevox => "VOICEVOX",
+        TtsEngine::ZenTts => "ZEN-TTS",
+    };
     let http = clients::http_client();
     let cache_dir = settings_path
         .parent()
@@ -75,7 +81,7 @@ pub async fn aizuchi_preview(
             cache.disable();
         }
     }
-    let key = cache_key(&style, TTS_SPEED_SCALE, &word);
+    let key = choice_cache_key(&choice, &word);
     if let Some(wav) = cache.get(&key) {
         tracing::info!(
             text_chars = word.chars().count(),
@@ -87,9 +93,9 @@ pub async fn aizuchi_preview(
             from_cache: true,
         });
     }
-    let wav = clients::synthesize(&http, &tts, &word, &style)
+    let wav = clients::synthesize_choice(&http, &tts, &choice, &word)
         .await
-        .map_err(|e| PreviewError::Engine(format!("{e:#}")))?;
+        .map_err(|e| PreviewError::Engine(engine, format!("{e:#}")))?;
     cache.insert(&key, &wav);
     tracing::info!(
         text_chars = word.chars().count(),

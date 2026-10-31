@@ -1,11 +1,11 @@
-//! STT（OpenAI 互換 `/audio/transcriptions`）と VOICEVOX の HTTP クライアント。
+//! STT（OpenAI 互換 `/audio/transcriptions`）と、読み上げ（VOICEVOX・ZEN-TTS）の HTTP クライアント。
 //! 接続先は毎回 [`super::settings`] から渡す（再起動なしで切り替わる）。
 
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 
-use super::settings::{SttSettings, TtsSettings};
+use super::settings::{SttSettings, TtsEngine, TtsSettings, VoiceChoice};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -62,6 +62,48 @@ pub async fn transcribe(
         .to_string())
 }
 
+/// `choice` のエンジンと声で WAV を作る（D-1103）。
+pub async fn synthesize_choice(
+    http: &reqwest::Client,
+    tts: &TtsSettings,
+    choice: &VoiceChoice,
+    text: &str,
+) -> anyhow::Result<Vec<u8>> {
+    match choice.engine {
+        TtsEngine::Voicevox => synthesize(http, tts, text, &choice.voice).await,
+        TtsEngine::ZenTts => zen_synthesize(http, tts, choice, text).await,
+    }
+}
+
+/// ZEN-TTS サーバー（kojira/zen-tts-server）の `POST /synthesize`。
+async fn zen_synthesize(
+    http: &reqwest::Client,
+    tts: &TtsSettings,
+    choice: &VoiceChoice,
+    text: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let zen = tts.zen.as_ref().context("ZEN-TTS is not configured")?;
+    let mut body = serde_json::json!({"text": text, "voice": choice.voice});
+    if let Some(emotion) = &choice.emotion {
+        body["emotion"] = emotion.clone();
+    }
+    if let Some(strength) = choice.strength {
+        body["strength"] = strength.into();
+    }
+    let response = http
+        .post(format!("{}/synthesize", zen.base_url.trim_end_matches('/')))
+        .json(&body)
+        .send()
+        .await
+        .context("ZEN-TTS request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("ZEN-TTS failed ({status}): {}", truncate(&body));
+    }
+    Ok(response.bytes().await.context("ZEN-TTS audio")?.to_vec())
+}
+
 /// VOICEVOX の 2 段階 API（audio_query → synthesis）で WAV を作る。
 pub async fn synthesize(
     http: &reqwest::Client,
@@ -107,8 +149,53 @@ pub async fn synthesize(
     Ok(synthesis.bytes().await.context("VOICEVOX audio")?.to_vec())
 }
 
-/// VOICEVOX エンジンの版（`GET /version`、JSON 文字列）。TTS キャッシュの有効性の確認に使う。
+/// TTS キャッシュの有効性を決める版。設定にある全エンジンの版をつなげたもの（D-1103）。
+/// ZEN-TTS が設定されていなければ VOICEVOX の版だけ（D-1103 以前のキャッシュはそのまま使える）。
+/// どれかの版が読めなければ、今まで通りキャッシュは使わない（合成はする）。
 pub async fn engine_version(http: &reqwest::Client, tts: &TtsSettings) -> anyhow::Result<String> {
+    let voicevox = voicevox_version(http, tts).await?;
+    match &tts.zen {
+        None => Ok(voicevox),
+        Some(zen) => Ok(format!(
+            "{voicevox}+zen:{}",
+            zen_version(http, &zen.base_url).await?
+        )),
+    }
+}
+
+/// ZEN-TTS の版とモデル（`GET /health` の `version` と `models`）。
+async fn zen_version(http: &reqwest::Client, base_url: &str) -> anyhow::Result<String> {
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    let response = http.get(url).send().await.context("ZEN-TTS health")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("ZEN-TTS health failed ({status})");
+    }
+    let health: serde_json::Value = response.json().await.context("ZEN-TTS health JSON")?;
+    let version = health["version"].as_str().unwrap_or_default();
+    if version.is_empty() {
+        bail!("ZEN-TTS health has no version");
+    }
+    Ok(format!("{version}/{}", health["models"]))
+}
+
+/// ZEN-TTS の声の一覧（`GET /voices`。設定画面のプルダウン用）。
+pub async fn zen_voices(
+    http: &reqwest::Client,
+    tts: &TtsSettings,
+) -> anyhow::Result<serde_json::Value> {
+    let zen = tts.zen.as_ref().context("ZEN-TTS is not configured")?;
+    let url = format!("{}/voices", zen.base_url.trim_end_matches('/'));
+    let response = http.get(url).send().await.context("ZEN-TTS voices")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("ZEN-TTS voices failed ({status})");
+    }
+    response.json().await.context("ZEN-TTS voices JSON")
+}
+
+/// VOICEVOX エンジンの版（`GET /version`、JSON 文字列）。
+async fn voicevox_version(http: &reqwest::Client, tts: &TtsSettings) -> anyhow::Result<String> {
     let url = format!("{}/version", tts.base_url.trim_end_matches('/'));
     let response = http.get(url).send().await.context("VOICEVOX version")?;
     let status = response.status();

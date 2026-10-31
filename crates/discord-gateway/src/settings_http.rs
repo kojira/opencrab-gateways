@@ -31,7 +31,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
-const PAGE: &str = include_str!("settings_page.html");
+pub const PAGE: &str = include_str!("settings_page.html");
 
 struct AppState {
     admin_socket: PathBuf,
@@ -316,7 +316,7 @@ async fn aizuchi_preview(
             .into_response(),
         Err(e @ PreviewError::InvalidWord(_)) => error(StatusCode::BAD_REQUEST, e),
         Err(e @ PreviewError::NotConfigured) => error(StatusCode::CONFLICT, e),
-        Err(e @ PreviewError::Engine(_)) => error(StatusCode::BAD_GATEWAY, e),
+        Err(e @ PreviewError::Engine(..)) => error(StatusCode::BAD_GATEWAY, e),
     }
 }
 

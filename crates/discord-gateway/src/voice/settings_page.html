@@ -43,6 +43,7 @@ th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; 
 #agents input, #agents select { margin-top: 0; }
 .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .actions button { margin: 0; }
+.credit { font-size: .9rem; }
 </style>
 </head>
 <body>
@@ -63,6 +64,15 @@ th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; 
 <div class="scroll"><table id="agents"></table></div>
 <button type="button" id="add-agent">行を追加</button>
 </fieldset>
+<fieldset>
+<legend>読み上げ（ZEN-TTS）</legend>
+<p class="muted">ZEN-TTS サーバー（<a href="https://github.com/kojira/zen-tts-server" target="_blank" rel="noopener">kojira/zen-tts-server</a>）を使うときに入れます。bot ごとにどちらを使うかは、各 bot のページで選びます。</p>
+<label>エンドポイント（空欄なら使わない）<input name="zen_base_url" placeholder="http://127.0.0.1:50023"></label>
+<label>既定の声<select name="zen_default_voice"></select></label>
+<div class="grid c5" id="zen-emotion"></div>
+<label>抑揚の強さ（空欄なら標準）<input name="zen_strength" inputmode="decimal"></label>
+<p class="credit">音声合成：<a href="https://zenryokukikai.com" target="_blank" rel="noopener">ZEN-TTS（https://zenryokukikai.com ）</a></p>
+</fieldset>
 <div class="actions">
 <button type="submit">保存</button>
 <button type="button" id="reload-speakers">話者一覧を読み込む</button>
@@ -75,7 +85,49 @@ th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; 
 const api = "api/voice-settings";
 const form = document.getElementById("form");
 const status = document.getElementById("status");
+const emotionNames = ["neutral", "happy", "sad", "angry", "apologetic"];
+const emotionLabels = { neutral: "普通", happy: "嬉しい", sad: "悲しい", angry: "怒り", apologetic: "謝罪" };
 let speakers = [];
+let zenVoices = [];
+// The settings as loaded. Saving keeps fields this page does not edit (per-bot `agents`).
+let loaded = null;
+
+function zenEmotionInputs() {
+  const box = document.getElementById("zen-emotion");
+  box.innerHTML = "";
+  for (const name of emotionNames) {
+    const label = document.createElement("label");
+    label.textContent = `${emotionLabels[name]}（0〜100）`;
+    const input = document.createElement("input");
+    input.name = `zen_emotion_${name}`;
+    input.inputMode = "numeric";
+    label.appendChild(input);
+    box.appendChild(label);
+  }
+}
+zenEmotionInputs();
+
+function zenVoiceOptions(select, value) {
+  select.innerHTML = "";
+  const known = new Set();
+  for (const v of zenVoices) {
+    const opt = document.createElement("option");
+    opt.value = v.id;
+    opt.textContent = `${v.name.ja}: ${v.id}`;
+    select.appendChild(opt);
+    known.add(v.id);
+  }
+  for (const id of [value, "marine"]) {
+    if (id && !known.has(id)) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = id;
+      select.appendChild(opt);
+      known.add(id);
+    }
+  }
+  select.value = value || "marine";
+}
 
 function say(text) { status.textContent = text; }
 
@@ -131,6 +183,11 @@ function fill(s) {
   speakerOptions(form.tts_default_voice, s.tts.default_voice);
   document.getElementById("agents").innerHTML = "";
   for (const [agent, voice] of Object.entries(s.tts.agent_voices || {})) addAgentRow(agent, voice);
+  const zen = s.tts.zen || {};
+  form.zen_base_url.value = zen.base_url || "";
+  zenVoiceOptions(form.zen_default_voice, zen.default_voice);
+  for (const name of emotionNames) form[`zen_emotion_${name}`].value = (zen.emotion || {})[name] ?? "";
+  form.zen_strength.value = zen.strength ?? "";
 }
 
 function collect() {
@@ -138,15 +195,28 @@ function collect() {
   for (const [agent, voice] of currentAgentRows()) if (agent) agentVoices[agent] = voice;
   const stt = { base_url: form.stt_base_url.value.trim(), model: form.stt_model.value.trim() };
   if (form.stt_language.value.trim()) stt.language = form.stt_language.value.trim();
-  return {
-    stt,
-    tts: {
-      provider: "voicevox",
-      base_url: form.tts_base_url.value.trim(),
-      default_voice: form.tts_default_voice.value,
-      agent_voices: agentVoices,
-    },
+  const tts = {
+    ...(loaded ? loaded.tts : {}),
+    provider: (loaded && loaded.tts.provider) || "voicevox",
+    base_url: form.tts_base_url.value.trim(),
+    default_voice: form.tts_default_voice.value,
+    agent_voices: agentVoices,
   };
+  const zenUrl = form.zen_base_url.value.trim();
+  if (zenUrl) {
+    const zen = { base_url: zenUrl, default_voice: form.zen_default_voice.value || "marine" };
+    const emotion = {};
+    for (const name of emotionNames) {
+      const raw = form[`zen_emotion_${name}`].value.trim();
+      if (raw !== "") emotion[name] = Number(raw);
+    }
+    if (Object.keys(emotion).length) zen.emotion = emotion;
+    if (form.zen_strength.value.trim() !== "") zen.strength = Number(form.zen_strength.value.trim());
+    tts.zen = zen;
+  } else {
+    delete tts.zen;
+  }
+  return { stt, tts };
 }
 
 async function errorText(res) {
@@ -165,16 +235,27 @@ async function loadSpeakers() {
   say("話者一覧を読み込みました。");
 }
 
+async function loadZenVoices() {
+  if (!loaded || !loaded.tts.zen) return;
+  const res = await fetch(`${api}/zen-voices`);
+  if (!res.ok) { say(`ZEN-TTS の声の一覧を読み込めません: ${await errorText(res)}`); return; }
+  zenVoices = (await res.json()).voices || [];
+  zenVoiceOptions(form.zen_default_voice, form.zen_default_voice.value);
+}
+
 async function load() {
   const res = await fetch(api);
   if (res.status === 404) {
     say("まだ設定されていません。入力して保存してください。");
     speakerOptions(form.tts_default_voice, "");
+    zenVoiceOptions(form.zen_default_voice, "");
     return;
   }
   if (!res.ok) { say(`読み込めません: ${await errorText(res)}`); return; }
-  fill(await res.json());
+  loaded = await res.json();
+  fill(loaded);
   await loadSpeakers();
+  await loadZenVoices();
 }
 
 form.addEventListener("submit", async ev => {
@@ -184,6 +265,7 @@ form.addEventListener("submit", async ev => {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(collect()),
   });
+  if (res.ok) { loaded = await res.json(); await loadZenVoices(); }
   say(res.ok ? "保存しました。" : `保存できません: ${await errorText(res)}`);
 });
 

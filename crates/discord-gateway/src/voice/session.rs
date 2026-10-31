@@ -505,8 +505,8 @@ impl VoiceManager {
             tracing::debug!(guild, "aizuchi skipped; the bot is speaking");
             return None;
         }
-        let style = settings.tts.voice_for_agent(&self.config.agent_id);
-        let Some(wav) = self.synthesizer.cached(style, &aizuchi) else {
+        let choice = settings.tts.choice_for_agent(&self.config.agent_id);
+        let Some(wav) = self.synthesizer.cached(&choice, &aizuchi) else {
             tracing::warn!(guild, "aizuchi skipped; not in the TTS cache");
             return None;
         };

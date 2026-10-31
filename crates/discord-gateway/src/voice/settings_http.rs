@@ -4,6 +4,7 @@
 //! - `GET /` 素の HTML + fetch の 1 ページ
 //! - `GET/PUT /api/voice-settings` 設定の読み書き（PUT は検証してから 0600 で原子的に置換）
 //! - `GET /api/voice-settings/speakers` VOICEVOX 話者一覧の代理取得
+//! - `GET /api/voice-settings/zen-voices` ZEN-TTS の声の一覧の代理取得（D-1103）
 //! - `POST /api/voice-settings/test-tts` 合成した WAV を返す
 //! - `POST /api/voice-settings/test-stt` 合成音声を STT にかけて結果を返す（疎通確認）
 
@@ -58,6 +59,7 @@ pub fn api_router(path: PathBuf) -> Router {
     Router::new()
         .route("/api/voice-settings", get(get_settings).put(put_settings))
         .route("/api/voice-settings/speakers", get(get_speakers))
+        .route("/api/voice-settings/zen-voices", get(get_zen_voices))
         .route("/api/voice-settings/test-tts", post(test_tts))
         .route("/api/voice-settings/test-stt", post(test_stt))
         .with_state(state)
@@ -107,11 +109,26 @@ async fn get_speakers(State(state): Shared) -> Response {
     }
 }
 
+async fn get_zen_voices(State(state): Shared) -> Response {
+    let settings = match saved(&state) {
+        Ok(settings) => settings,
+        Err((status, message)) => return error(status, message),
+    };
+    match clients::zen_voices(&state.http, &settings.tts).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
 #[derive(Deserialize)]
 struct TtsTest {
     text: String,
+    /// VOICEVOX のスタイル ID（`agent` が無いとき。省けば既定）。
     #[serde(default)]
     voice: Option<String>,
+    /// この bot（agent）の読み上げで試す（D-1103。エンジン・声・感情はその bot の設定）。
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 async fn test_tts(State(state): Shared, Json(request): Json<TtsTest>) -> Response {
@@ -119,10 +136,12 @@ async fn test_tts(State(state): Shared, Json(request): Json<TtsTest>) -> Respons
         Ok(settings) => settings,
         Err((status, message)) => return error(status, message),
     };
-    let voice = request
-        .voice
-        .unwrap_or_else(|| settings.tts.default_voice.clone());
-    match clients::synthesize(&state.http, &settings.tts, &request.text, &voice).await {
+    let choice = match (&request.agent, &request.voice) {
+        (Some(agent), _) => settings.tts.choice_for_agent(agent),
+        (None, Some(voice)) => super::settings::VoiceChoice::voicevox(voice),
+        (None, None) => super::settings::VoiceChoice::voicevox(&settings.tts.default_voice),
+    };
+    match clients::synthesize_choice(&state.http, &settings.tts, &choice, &request.text).await {
         Ok(wav) => ([(header::CONTENT_TYPE, "audio/wav")], wav).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }

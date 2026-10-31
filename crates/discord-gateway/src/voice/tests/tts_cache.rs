@@ -5,14 +5,21 @@ use std::time::Duration;
 use super::e2e::{core, manager_with, wait_played, FakePlayer, BINDING};
 use super::mock_http::{self, Recorded};
 use crate::transport::DryRunTransport;
-use crate::voice::aizuchi::PREWARM_PHRASES;
+use crate::voice::aizuchi::AizuchiConfig;
 use crate::voice::clients::{SYNTHESIS_CONSTANTS_VERSION, TTS_SPEED_SCALE};
 use crate::voice::settings::VoiceSettings;
 use crate::voice::synthesizer::{SynthesisPriority, Synthesizer};
 use crate::voice::tts_cache::{cache_key, TtsCache, DISK_LIMIT_BYTES, MEMORY_LIMIT_BYTES};
 
+/// 既定の相づち設定での先読み本文。
+fn prewarm_phrases() -> Vec<String> {
+    AizuchiConfig::default().prewarm_phrases()
+}
+
 /// 設定にあるスタイル（既定 3 と agent の 8）すべての先読み件数。
-const PREWARM_JOBS: usize = 2 * PREWARM_PHRASES.len();
+fn prewarm_jobs() -> usize {
+    2 * prewarm_phrases().len()
+}
 
 async fn mock_with_version(delay_ms: u64) -> (String, Arc<Recorded>) {
     let (mock, recorded) =
@@ -90,6 +97,7 @@ async fn t2_a_different_style_misses() {
     let synthesizer = Synthesizer::new(
         crate::voice::clients::http_client(),
         TtsCache::open(dir.path().join("c"), MEMORY_LIMIT_BYTES, DISK_LIMIT_BYTES),
+        prewarm_phrases(),
     );
     let settings = VoiceSettings::from_json(&mock_http::settings_json(&mock)).unwrap();
     synthesizer.refresh(&settings.tts).await;
@@ -221,15 +229,15 @@ async fn t5_prewarm_covers_every_phrase_for_every_configured_style() {
         Arc::new(FakePlayer::default()),
         Arc::new(DryRunTransport),
     );
-    assert_eq!(settle(&recorded).await, PREWARM_JOBS);
+    assert_eq!(settle(&recorded).await, prewarm_jobs());
     let mut queries = recorded.tts_queries.lock().unwrap().clone();
     queries.sort();
     let mut expected: Vec<(String, String)> = ["3", "8"]
         .iter()
         .flat_map(|style| {
-            PREWARM_PHRASES
-                .iter()
-                .map(|phrase| (phrase.to_string(), style.to_string()))
+            prewarm_phrases()
+                .into_iter()
+                .map(|phrase| (phrase, style.to_string()))
         })
         .collect();
     expected.sort();
@@ -243,6 +251,7 @@ async fn t6_a_live_job_is_synthesized_before_queued_prewarm_jobs() {
     let synthesizer = Synthesizer::new(
         crate::voice::clients::http_client(),
         TtsCache::open(dir.path().join("c"), MEMORY_LIMIT_BYTES, DISK_LIMIT_BYTES),
+        prewarm_phrases(),
     );
     let settings = VoiceSettings::from_json(&mock_http::settings_json(&mock)).unwrap();
     synthesizer.refresh(&settings.tts).await;

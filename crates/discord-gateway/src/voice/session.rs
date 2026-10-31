@@ -11,7 +11,7 @@ use opencrab_gate_client::wire::{LiveInboundScope, SaidContext};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use super::aizuchi::choose_aizuchi;
+use super::aizuchi::{choose_aizuchi, AizuchiConfig};
 use super::audio::{downmix_48k_stereo_to_16k_mono, pcm_to_wav, rms, SegmenterEvent};
 use super::draft::DraftState;
 use super::settings::{load_settings, VoiceSettings};
@@ -69,6 +69,8 @@ pub struct VoiceManagerConfig {
     /// session key）。オーナーのメンションで増える（D-1097/D-1099）。
     pub addresses: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     pub settings_path: PathBuf,
+    /// この bot の相づち（D-1101）。設定を変えると子プロセスごと作り直されて反映される。
+    pub aizuchi: AizuchiConfig,
 }
 
 #[derive(Clone)]
@@ -110,7 +112,7 @@ pub struct VoiceManager {
     /// 読み上げキューに積んでまだ再生へ渡し終えていない文の数（相づちを打つかの判断用）。
     pending_speech: Arc<AtomicUsize>,
     /// テキストチャンネルごとの、直前に agent_prelude として送った相づち（続けて同じものを選ばない）。
-    last_aizuchi: Mutex<HashMap<String, &'static str>>,
+    last_aizuchi: Mutex<HashMap<String, String>>,
     /// provisional_id ごとの、先行生成の返事の保留（合成だけして再生しない、D-1085 P5）。
     holds: Mutex<HashMap<String, Hold>>,
     /// guild ごとの再生状態（バージインで止める世代と、相手に届いた文、D-1096）。
@@ -135,6 +137,7 @@ impl VoiceManager {
         let synthesizer = Synthesizer::new(
             http.clone(),
             TtsCache::open(cache_dir, MEMORY_LIMIT_BYTES, DISK_LIMIT_BYTES),
+            config.aizuchi.prewarm_phrases(),
         );
         if let Ok(settings) = load_settings(&config.settings_path) {
             synthesizer.refresh_if_changed(&settings.tts);
@@ -399,7 +402,7 @@ impl VoiceManager {
         let label = self.label(user).await;
         // D-1085 §9: 流す相づちを said の前に決め、agent_prelude で core へ送る。core はそれを
         // この発話の直後のエージェント自身の発言として会話履歴へ残す。先行生成があればその相づち。
-        let (prelude, slot, provisional_id): (Option<&'static str>, AizuchiSlot, Option<String>) =
+        let (prelude, slot, provisional_id): (Option<String>, AizuchiSlot, Option<String>) =
             match provisional {
                 Some(started) => {
                     if let Some(hold) = self.holds.lock().unwrap().get_mut(&started.id) {
@@ -416,7 +419,7 @@ impl VoiceManager {
                         Err(_) => None,
                     };
                     (
-                        aizuchi.as_ref().map(|(text, _)| *text),
+                        aizuchi.as_ref().map(|(text, _)| text.clone()),
                         Arc::new(Mutex::new(aizuchi)),
                         None,
                     )
@@ -431,7 +434,7 @@ impl VoiceManager {
             live_inbound_scope: LiveInboundScope::All,
             // Spoken turns run on the session's voice (realtime) model.
             model_profile: opencrab_gate_client::wire::TurnModelProfile::Realtime,
-            agent_prelude: prelude.map(str::to_string),
+            agent_prelude: prelude.clone(),
             provisional_id: provisional_id.clone(),
         };
         let body = format!("{VOICE_TEXT_PREFIX}{text}");
@@ -468,7 +471,7 @@ impl VoiceManager {
                 if provisional_id.is_none() {
                     let aizuchi = slot.lock().unwrap().take();
                     if let Some((aizuchi, wav)) = aizuchi {
-                        self.play_aizuchi(guild, aizuchi, wav).await;
+                        self.play_aizuchi(guild, &aizuchi, wav).await;
                     }
                 }
             }
@@ -490,15 +493,20 @@ impl VoiceManager {
         settings: &VoiceSettings,
         text: &str,
         pick: u128,
-    ) -> Option<(&'static str, Vec<u8>)> {
-        let previous = self.last_aizuchi.lock().unwrap().get(text_channel).copied();
-        let aizuchi = choose_aizuchi(text, previous, (pick % 1_000_003) as usize)?;
+    ) -> Option<(String, Vec<u8>)> {
+        let previous = self.last_aizuchi.lock().unwrap().get(text_channel).cloned();
+        let aizuchi = choose_aizuchi(
+            &self.config.aizuchi,
+            text,
+            previous.as_deref(),
+            (pick % 1_000_003) as usize,
+        )?;
         if self.pending_speech.load(Ordering::SeqCst) > 0 || !self.player.is_idle(guild).await {
             tracing::debug!(guild, "aizuchi skipped; the bot is speaking");
             return None;
         }
         let style = settings.tts.voice_for_agent(&self.config.agent_id);
-        let Some(wav) = self.synthesizer.cached(style, aizuchi) else {
+        let Some(wav) = self.synthesizer.cached(style, &aizuchi) else {
             tracing::warn!(guild, "aizuchi skipped; not in the TTS cache");
             return None;
         };

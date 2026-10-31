@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{oneshot, Notify};
 
-use super::aizuchi::PREWARM_PHRASES;
 use super::clients::{self, TTS_SPEED_SCALE};
 use super::settings::TtsSettings;
 use super::tts_cache::{cache_key, TtsCache};
@@ -44,16 +43,23 @@ pub(crate) struct Synthesizer {
     notify: Notify,
     /// 最後に先読みした TTS 設定。設定が変わったら確かめ直して先読みし直す。
     refreshed: Mutex<Option<TtsSettings>>,
+    /// 先読みする本文（この bot の相づちと、よく使う短い返事。D-1101）。
+    prewarm_phrases: Vec<String>,
 }
 
 impl Synthesizer {
-    pub(crate) fn new(http: reqwest::Client, cache: TtsCache) -> Arc<Self> {
+    pub(crate) fn new(
+        http: reqwest::Client,
+        cache: TtsCache,
+        prewarm_phrases: Vec<String>,
+    ) -> Arc<Self> {
         let synthesizer = Arc::new(Self {
             http,
             cache,
             jobs: Mutex::new(Jobs::default()),
             notify: Notify::new(),
             refreshed: Mutex::new(None),
+            prewarm_phrases,
         });
         tokio::spawn(run_worker(synthesizer.clone()));
         synthesizer
@@ -139,7 +145,7 @@ impl Synthesizer {
             .chain(tts.agent_voices.values().map(String::as_str))
             .collect();
         for style in styles {
-            for phrase in PREWARM_PHRASES {
+            for phrase in &self.prewarm_phrases {
                 if self.cached(style, phrase).is_some() {
                     continue;
                 }

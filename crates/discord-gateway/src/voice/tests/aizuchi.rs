@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use super::e2e::{core, loud_pcm, manager_with, Core, FakePlayer, BINDING};
 use super::mock_http::{self, Recorded};
 use crate::transport::DryRunTransport;
-use crate::voice::aizuchi::{choose_aizuchi, AIZUCHI_QUESTION, AIZUCHI_STATEMENT, PREWARM_PHRASES};
+use crate::voice::aizuchi::{choose_aizuchi, AizuchiConfig, DEFAULT_QUESTION, DEFAULT_STATEMENT};
 use crate::voice::session::{VoiceManager, VOICE_SYSTEM_CONTEXT};
 
 struct Setup {
@@ -35,7 +35,9 @@ async fn setup(stt: &'static str, version: bool) -> Setup {
     manager.join(BINDING, Some("555"), None).await.unwrap();
     if version {
         tokio::time::timeout(Duration::from_secs(5), async {
-            while recorded.synthesis_started.lock().unwrap().len() < 2 * PREWARM_PHRASES.len() {
+            while recorded.synthesis_started.lock().unwrap().len()
+                < 2 * AizuchiConfig::default().prewarm_phrases().len()
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -89,28 +91,31 @@ fn assert_plain_voice_context(said: &Value) {
 #[test]
 fn question_and_statement_endings_choose_from_their_own_sets() {
     for pick in 0..10 {
-        let q = choose_aizuchi("元気ですか", None, pick).unwrap();
-        assert!(AIZUCHI_QUESTION.contains(&q), "{q}");
-        let q = choose_aizuchi("何を食べたの？", None, pick).unwrap();
-        assert!(AIZUCHI_QUESTION.contains(&q), "{q}");
-        let s = choose_aizuchi("今日は晴れ。", None, pick).unwrap();
-        assert!(AIZUCHI_STATEMENT.contains(&s), "{s}");
+        let d = AizuchiConfig::default();
+        let q = choose_aizuchi(&d, "元気ですか", None, pick).unwrap();
+        assert!(DEFAULT_QUESTION.contains(&q.as_str()), "{q}");
+        let q = choose_aizuchi(&d, "何を食べたの？", None, pick).unwrap();
+        assert!(DEFAULT_QUESTION.contains(&q.as_str()), "{q}");
+        let s = choose_aizuchi(&d, "今日は晴れ。", None, pick).unwrap();
+        assert!(DEFAULT_STATEMENT.contains(&s.as_str()), "{s}");
     }
-    assert_eq!(choose_aizuchi("あ", None, 0), None);
-    assert_eq!(choose_aizuchi(" あ。", None, 3), None);
+    let d = AizuchiConfig::default();
+    assert_eq!(choose_aizuchi(&d, "あ", None, 0), None);
+    assert_eq!(choose_aizuchi(&d, " あ。", None, 3), None);
 }
 
 #[test]
 fn the_previous_aizuchi_is_never_chosen_again() {
-    for set in [AIZUCHI_QUESTION, AIZUCHI_STATEMENT] {
-        let text = if set == AIZUCHI_QUESTION {
+    let d = AizuchiConfig::default();
+    for set in [DEFAULT_QUESTION, DEFAULT_STATEMENT] {
+        let text = if set == DEFAULT_QUESTION {
             "元気ですか"
         } else {
             "今日は晴れ"
         };
         for previous in set {
             for pick in 0..10 {
-                let next = choose_aizuchi(text, Some(previous), pick).unwrap();
+                let next = choose_aizuchi(&d, text, Some(previous), pick).unwrap();
                 assert_ne!(next, *previous, "pick {pick}");
             }
         }
@@ -119,8 +124,9 @@ fn the_previous_aizuchi_is_never_chosen_again() {
 
 #[test]
 fn every_aizuchi_candidate_is_prewarmed() {
-    for candidate in AIZUCHI_QUESTION.iter().chain(AIZUCHI_STATEMENT) {
-        assert!(PREWARM_PHRASES.contains(candidate), "{candidate}");
+    let phrases = AizuchiConfig::default().prewarm_phrases();
+    for candidate in DEFAULT_QUESTION.iter().chain(DEFAULT_STATEMENT) {
+        assert!(phrases.iter().any(|p| p == candidate), "{candidate}");
     }
 }
 
@@ -141,7 +147,7 @@ async fn b1_played_aizuchi_is_sent_as_the_agent_prelude_from_the_cache() {
     let prelude = said["agent_prelude"]
         .as_str()
         .unwrap_or_else(|| panic!("{said}"));
-    assert!(AIZUCHI_STATEMENT.contains(&prelude), "{said}");
+    assert!(DEFAULT_STATEMENT.contains(&prelude), "{said}");
     assert_eq!(s.played_count(), 1);
     assert_eq!(
         s.synth_count(),
@@ -168,7 +174,7 @@ async fn b3_question_ending_sends_a_question_aizuchi() {
     let prelude = said["agent_prelude"]
         .as_str()
         .unwrap_or_else(|| panic!("{said}"));
-    assert!(AIZUCHI_QUESTION.contains(&prelude), "{said}");
+    assert!(DEFAULT_QUESTION.contains(&prelude), "{said}");
     assert_plain_voice_context(&said);
     assert_eq!(s.played_count(), 1);
 }

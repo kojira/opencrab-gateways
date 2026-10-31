@@ -134,6 +134,17 @@ pub(super) fn manager_with(
     player: Arc<FakePlayer>,
     transport: Arc<dyn DiscordTransport>,
 ) -> Arc<VoiceManager> {
+    manager_with_aizuchi(core, settings_path, player, transport, Default::default())
+}
+
+/// [`manager_with`] with this bot's aizuchi settings (D-1101).
+pub(super) fn manager_with_aizuchi(
+    core: &Core,
+    settings_path: std::path::PathBuf,
+    player: Arc<FakePlayer>,
+    transport: Arc<dyn DiscordTransport>,
+    aizuchi: crate::voice::aizuchi::AizuchiConfig,
+) -> Arc<VoiceManager> {
     let manager = VoiceManager::new(
         VoiceManagerConfig {
             agent_id: "agent".into(),
@@ -146,6 +157,7 @@ pub(super) fn manager_with(
                 [core.address.clone()].into_iter().collect(),
             )),
             settings_path,
+            aizuchi,
         },
         player,
         transport,

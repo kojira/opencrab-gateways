@@ -91,6 +91,9 @@ pub struct InstanceConfig {
     /// 上書きし、無ければ現行と同じ既定値（👀🏁❌）。core に Discord 語彙は足さない。
     #[serde(default)]
     pub system_reactions: SystemReactions,
+    /// D-1101: VC の相づち（on/off と言葉の組）。無ければ既定の組で有効。
+    #[serde(default)]
+    pub aizuchi: crate::voice::aizuchi::AizuchiConfig,
 }
 
 /// gateway が自動付与する system reaction の絵文字集合（設計 v17 §6.3・D17-12）。
@@ -289,6 +292,7 @@ fn validate_instance_config(cfg: &InstanceConfig) -> anyhow::Result<()> {
             anyhow::bail!("system_reactions.{label} must be a nonempty emoji");
         }
     }
+    cfg.aizuchi.validate()?;
     Ok(())
 }
 

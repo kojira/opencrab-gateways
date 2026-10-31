@@ -111,6 +111,7 @@ pub fn spawn_instance_with_voice(
                     access: cfg.access.clone(),
                     addresses: listening.clone(),
                     settings_path,
+                    aizuchi: cfg.aizuchi.clone(),
                 },
                 Arc::new(SongbirdPlayer::new(songbird)),
                 transport.clone(),

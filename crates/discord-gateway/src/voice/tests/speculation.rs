@@ -12,7 +12,7 @@ use super::mock_http::{self, Recorded};
 use crate::config::SystemReactions;
 use crate::ops::SessionDeliveryTargets;
 use crate::transport::testfake::RecordingTransport;
-use crate::voice::aizuchi::{AIZUCHI_STATEMENT, PREWARM_PHRASES};
+use crate::voice::aizuchi::{AizuchiConfig, DEFAULT_STATEMENT};
 use crate::voice::audio::{EndReason, EndVerdict, SegmenterEvent};
 use crate::voice::session::VoiceManager;
 
@@ -46,7 +46,7 @@ async fn setup(stt: Vec<(u64, &'static str)>) -> Setup {
     let manager = manager_with(&core, path, player.clone(), transport.clone());
     manager.join(BINDING, Some("555"), None).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while recorded.synthesis_started.lock().unwrap().len() < 2 * PREWARM_PHRASES.len() {
+        while recorded.synthesis_started.lock().unwrap().len() < 2 * AizuchiConfig::default().prewarm_phrases().len() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -172,7 +172,7 @@ impl Setup {
             .unwrap()
             .iter()
             .map(|(text, _)| text.clone())
-            .filter(|text| !PREWARM_PHRASES.contains(&text.as_str()))
+            .filter(|text| !AizuchiConfig::default().prewarm_phrases().contains(text))
             .collect()
     }
 
@@ -192,7 +192,7 @@ async fn a_provisional_starts_at_five_chars_with_the_aizuchi_of_that_text() {
     assert_eq!(provisional["text"], "（音声）今日はいい天気");
     assert_eq!(provisional["model_profile"], "realtime");
     let prelude = provisional["agent_prelude"].as_str().unwrap();
-    assert!(AIZUCHI_STATEMENT.contains(&prelude), "{provisional}");
+    assert!(DEFAULT_STATEMENT.contains(&prelude), "{provisional}");
     assert_eq!(s.played_count(), 0, "nothing plays while the user speaks");
 }
 

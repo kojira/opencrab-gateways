@@ -26,14 +26,14 @@ pub(super) const FIRST_PROVISIONAL_CHARS: usize = 5;
 pub(super) const REPLACE_PROVISIONAL_CHARS: usize = 8;
 
 /// 1 度だけ流す相づち（先行生成付きの said では昇格の知らせだけが流す）。
-pub(super) type AizuchiSlot = Arc<Mutex<Option<(&'static str, Vec<u8>)>>>;
+pub(super) type AizuchiSlot = Arc<Mutex<Option<(String, Vec<u8>)>>>;
 
 /// core に送った先行生成。
 pub(super) struct Started {
     pub(super) id: String,
     /// 先行生成の本文（「（音声）」を付ける前の認識結果）。
     pub(super) text: String,
-    pub(super) prelude: Option<&'static str>,
+    pub(super) prelude: Option<String>,
     pub(super) slot: AizuchiSlot,
 }
 
@@ -201,7 +201,7 @@ impl VoiceManager {
         let aizuchi = self
             .ready_aizuchi(guild, &session.text_channel, &settings, text, nanos)
             .await;
-        let prelude = aizuchi.as_ref().map(|(text, _)| *text);
+        let prelude = aizuchi.as_ref().map(|(text, _)| text.clone());
         let slot: AizuchiSlot = Arc::new(Mutex::new(aizuchi));
         let id = uuid::Uuid::new_v4().to_string();
         self.holds.lock().unwrap().insert(
@@ -223,7 +223,7 @@ impl VoiceManager {
             author_label: self.label(user).await,
             caller: crate::run::caller_for(&self.config.access, &user_id),
             system_context: Some(VOICE_SYSTEM_CONTEXT.to_string()),
-            agent_prelude: prelude.map(str::to_string),
+            agent_prelude: prelude.clone(),
             text: format!("{VOICE_TEXT_PREFIX}{text}"),
         };
         match client.provisional(&session.address, &request).await {
@@ -386,7 +386,7 @@ impl VoiceManager {
         if let Some((aizuchi, wav)) = aizuchi {
             for guild in self.session_guilds(&hold.text_channel) {
                 match self.player.play(guild, wav.clone()).await {
-                    Ok(()) => tracing::debug!(guild, aizuchi, "aizuchi played"),
+                    Ok(()) => tracing::debug!(guild, aizuchi = %aizuchi, "aizuchi played"),
                     Err(error) => {
                         tracing::warn!(guild, error = %format!("{error:#}"), "aizuchi playback failed")
                     }

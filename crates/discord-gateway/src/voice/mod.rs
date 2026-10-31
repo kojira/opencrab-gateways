@@ -4,7 +4,7 @@
 //! - 読み上げ: VC に結びついたテキストチャンネルへ投稿した本文を TTS にして VC で流す。
 //! - 設定: [`settings`] の JSON ファイル（0600）。設定画面は [`settings_http`]。
 
-mod aizuchi;
+pub mod aizuchi;
 pub mod audio;
 pub mod clients;
 mod draft;

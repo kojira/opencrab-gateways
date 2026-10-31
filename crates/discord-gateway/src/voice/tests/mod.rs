@@ -1,9 +1,10 @@
 mod aizuchi;
 mod aizuchi_per_bot;
+mod aizuchi_preview;
 mod bargein;
 mod caller_vc;
 mod e2e;
-mod mock_http;
+pub(crate) mod mock_http;
 mod ops;
 mod partial_speech;
 mod receiver;

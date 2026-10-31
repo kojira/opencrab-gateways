@@ -14,6 +14,7 @@
 //! - `PUT  /api/instances/{id}/addresses`       `{"addresses": [...]}`
 //! - `PUT  /api/instances/{id}/credential`      `{"credential": "<bot token>"}` (write-only)
 //! - `PUT  /api/instances/{id}/enabled`         `{"enabled": bool}` (start / stop the bot)
+//! - `POST /api/instances/{id}/aizuchi/preview` `{"text": "..."}` -> `audio/wav` (D-1101b)
 //! - `GET  /voice/`                             the VC settings page (embedded)
 //! - `/api/voice-settings*`, `/voice/api/voice-settings*`  the VC settings API
 
@@ -34,6 +35,8 @@ const PAGE: &str = include_str!("settings_page.html");
 
 struct AppState {
     admin_socket: PathBuf,
+    /// The VC settings file; its `tts-cache` directory is the one the bots play from.
+    voice_settings: PathBuf,
     discord: DiscordApi,
     /// Core's public HTTP API (`http://127.0.0.1:8080`), read only for the agent list.
     core_api: Option<String>,
@@ -138,6 +141,7 @@ pub async fn serve_with(
 ) -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         admin_socket,
+        voice_settings: voice_settings.clone(),
         discord,
         core_api,
         http: reqwest::Client::new(),
@@ -148,6 +152,7 @@ pub async fn serve_with(
         .route("/api/agents", get(agents))
         .route("/api/instances/{id}/credential", put(set_credential))
         .route("/api/instances/{id}/channels", post(add_channel))
+        .route("/api/instances/{id}/aizuchi/preview", post(aizuchi_preview))
         .route("/api/instances/{id}/{field}", put(update))
         .with_state(state)
         // The VC page is embedded as-is; its relative `api/voice-settings` calls resolve under
@@ -280,6 +285,38 @@ async fn add_channel(
         Ok(value) => Json(value).into_response(),
         Err(AdminError::Rejected(message)) => error(StatusCode::BAD_REQUEST, message),
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+/// D-1101b: plays one aizuchi word with this bot's voice, from the bots' TTS cache when present.
+/// The word may be unsaved; it must pass the same checks as a saved one.
+async fn aizuchi_preview(
+    State(state): Shared,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    use crate::voice::preview::PreviewError;
+    let text = body["text"].as_str().unwrap_or_default();
+    let listed = match admin(&state, json!({"id":"settings","op":"list"})).await {
+        Ok(value) => value,
+        Err(e) => return error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    };
+    let Some(agent) = listed["instances"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["instance_id"] == id.as_str()))
+        .and_then(|item| item["agent_id"].as_str())
+    else {
+        return error(StatusCode::NOT_FOUND, "instance_unknown");
+    };
+    match crate::voice::preview::aizuchi_preview(&state.voice_settings, agent, text).await {
+        Ok(preview) => (
+            [(axum::http::header::CONTENT_TYPE, "audio/wav")],
+            preview.wav,
+        )
+            .into_response(),
+        Err(e @ PreviewError::InvalidWord(_)) => error(StatusCode::BAD_REQUEST, e),
+        Err(e @ PreviewError::NotConfigured) => error(StatusCode::CONFLICT, e),
+        Err(e @ PreviewError::Engine(_)) => error(StatusCode::BAD_GATEWAY, e),
     }
 }
 
@@ -426,3 +463,7 @@ async fn admin(state: &AppState, request: Value) -> Result<Value, AdminError> {
 #[cfg(test)]
 #[path = "settings_http_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_http_preview_tests.rs"]
+mod preview_tests;

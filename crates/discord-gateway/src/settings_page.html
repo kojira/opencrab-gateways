@@ -14,6 +14,10 @@ textarea { font-family: monospace; min-height: 4em; }
 .status { white-space: pre-wrap; margin: .5em 0; color: #333; }
 nav button.active { font-weight: bold; }
 iframe { width: 100%; border: 1px solid #ccc; height: 900px; }
+.aizuchi-words { list-style: none; padding: 0; margin: .3em 0; }
+.aizuchi-words li { display: flex; gap: .5em; align-items: center; margin: .2em 0; }
+.aizuchi-words li button { flex: 0 0 auto; }
+.aizuchi-words li span { flex: 1; }
 </style>
 </head>
 <body>
@@ -51,6 +55,39 @@ async function put(path, body, status) {
   });
   status.textContent = res.ok ? "保存しました。数秒で反映されます。" : `保存できません: ${await errorText(res)}`;
   if (res.ok) await load(current.instance_id);
+}
+
+// D-1101b: one ▶ per aizuchi word; plays the WAV this bot would play in the VC.
+let playing = null;
+async function playAizuchi(text, status) {
+  status.textContent = "音声を用意しています…";
+  const res = await fetch(`${api}/${current.instance_id}/aizuchi/preview`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }),
+  });
+  if (!res.ok) { status.textContent = await errorText(res); return; }
+  const url = URL.createObjectURL(await res.blob());
+  if (playing) playing.pause();
+  playing = new Audio(url);
+  playing.onended = () => URL.revokeObjectURL(url);
+  status.textContent = "";
+  try { await playing.play(); } catch { status.textContent = "ブラウザが再生を止めました。もう一度押してください。"; }
+}
+function playList(value, list) {
+  list.innerHTML = "";
+  for (const word of value.split("\n").map(s => s.trim()).filter(Boolean)) {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "▶";
+    button.title = "この bot の声で再生";
+    const label = document.createElement("span");
+    label.textContent = word;
+    const status = document.createElement("span");
+    status.className = "status";
+    button.onclick = () => playAizuchi(word, status);
+    li.append(button, label, status);
+    list.append(li);
+  }
 }
 
 function tabs() {
@@ -123,7 +160,10 @@ function render() {
   <p>話し終わったあと、返事の前に流す短い言葉です。1行に1つ書きます（${aizuchiMaxWords}個まで、1つ${aizuchiMaxChars}文字まで）。空にすると、その場面では流しません。</p>
   <label class="row"><input id="f-aizuchi-on" type="checkbox" style="flex:0"> 相づちを流す</label>
   ${field("問いかけのとき（「か」「の」「？」で終わる発話）", aizuchi.question.join("\n"), "aizuchi-q", true)}
+  <ul class="aizuchi-words" id="w-aizuchi-q"></ul>
   ${field("それ以外のとき", aizuchi.statement.join("\n"), "aizuchi-s", true)}
+  <ul class="aizuchi-words" id="w-aizuchi-s"></ul>
+  <p>▶ を押すと、この bot の声で実際に流れる音声を再生します（保存前の言葉も試せます）。</p>
   <button id="save-aizuchi">保存</button>
   <div class="status" id="s-aizuchi"></div>
 </fieldset>
@@ -139,6 +179,12 @@ function render() {
 </fieldset>`;
   document.getElementById("f-mode").value = c.delivery_mode || "tool_driven";
   document.getElementById("f-aizuchi-on").checked = aizuchi.enabled;
+  for (const name of ["aizuchi-q", "aizuchi-s"]) {
+    const area = document.getElementById(`f-${name}`);
+    const draw = () => playList(area.value, document.getElementById(`w-${name}`));
+    area.addEventListener("input", draw);
+    draw();
+  }
   document.getElementById("save-aizuchi").onclick = () => {
     const words = id => document.getElementById(id).value.split("\n").map(s => s.trim()).filter(Boolean);
     const next = { ...c, aizuchi: {

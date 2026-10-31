@@ -1,4 +1,5 @@
 mod aizuchi;
+mod aizuchi_per_bot;
 mod bargein;
 mod caller_vc;
 mod e2e;

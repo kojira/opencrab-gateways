@@ -44,6 +44,9 @@ th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; 
 .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .actions button { margin: 0; }
 .credit { font-size: .9rem; }
+.dict-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: .5rem; align-items: center; margin: 0 0 .5rem; }
+.dict-row input { margin-top: 0 !important; }
+.dict-row button { margin: 0; min-width: 44px; }
 </style>
 </head>
 <body>
@@ -72,6 +75,12 @@ th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; 
 <div class="grid c5" id="zen-emotion"></div>
 <label>抑揚の強さ（空欄なら標準）<input name="zen_strength" inputmode="decimal"></label>
 <p class="credit">音声合成：<a href="https://zenryokukikai.com" target="_blank" rel="noopener">ZEN-TTS（https://zenryokukikai.com ）</a></p>
+</fieldset>
+<fieldset>
+<legend>読み上げ辞書（共通）</legend>
+<p class="muted">どの bot の読み上げにも効く読み方です（VOICEVOX・ZEN-TTS 共通）。長い言葉から順に置き換えます。読みを空にすると、その言葉は読みません。同じ言葉が bot の辞書にあれば、bot の辞書が優先します。</p>
+<div id="dict-shared"></div>
+<button type="button" id="add-dict">言葉を追加</button>
 </fieldset>
 <div class="actions">
 <button type="submit">保存</button>
@@ -131,6 +140,26 @@ function zenVoiceOptions(select, value) {
 
 function say(text) { status.textContent = text; }
 
+// D-1106: the shared read-aloud dictionary (tts.dictionary.shared).
+function addDictRow(box, word, reading) {
+  const row = document.createElement("div");
+  row.className = "dict-row";
+  const w = document.createElement("input");
+  w.className = "dict-word"; w.placeholder = "言葉"; w.setAttribute("aria-label", "言葉"); w.maxLength = 64; w.value = word || "";
+  const r = document.createElement("input");
+  r.className = "dict-reading"; r.placeholder = "読み"; r.setAttribute("aria-label", "読み"); r.maxLength = 128; r.value = reading || "";
+  const del = document.createElement("button");
+  del.type = "button"; del.textContent = "削除"; del.onclick = () => row.remove();
+  row.append(w, r, del);
+  box.appendChild(row);
+}
+
+function dictRows(box) {
+  return [...box.querySelectorAll(".dict-row")]
+    .map(row => ({ word: row.querySelector(".dict-word").value, reading: row.querySelector(".dict-reading").value.trim() }))
+    .filter(e => e.word.trim() !== "");
+}
+
 function speakerOptions(select, value) {
   select.innerHTML = "";
   const known = new Set();
@@ -188,6 +217,9 @@ function fill(s) {
   zenVoiceOptions(form.zen_default_voice, zen.default_voice);
   for (const name of emotionNames) form[`zen_emotion_${name}`].value = (zen.emotion || {})[name] ?? "";
   form.zen_strength.value = zen.strength ?? "";
+  const dict = document.getElementById("dict-shared");
+  dict.innerHTML = "";
+  for (const e of ((s.tts.dictionary || {}).shared || [])) addDictRow(dict, e.word, e.reading);
 }
 
 function collect() {
@@ -216,6 +248,10 @@ function collect() {
   } else {
     delete tts.zen;
   }
+  const dictionary = { ...(tts.dictionary || {}) };
+  const shared = dictRows(document.getElementById("dict-shared"));
+  if (shared.length) dictionary.shared = shared; else delete dictionary.shared;
+  if (Object.keys(dictionary).length) tts.dictionary = dictionary; else delete tts.dictionary;
   return { stt, tts };
 }
 
@@ -271,6 +307,7 @@ form.addEventListener("submit", async ev => {
 
 document.getElementById("add-agent").onclick = () => addAgentRow("", form.tts_default_voice.value);
 document.getElementById("reload-speakers").onclick = loadSpeakers;
+document.getElementById("add-dict").onclick = () => addDictRow(document.getElementById("dict-shared"), "", "");
 
 document.getElementById("test-tts").onclick = async () => {
   say("合成しています…");

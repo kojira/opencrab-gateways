@@ -39,6 +39,9 @@ nav button.active { font-weight: 700; border-width: 2px; }
 table { width: 100%; border-collapse: collapse; }
 th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 iframe { width: 100%; border: 1px solid var(--line); border-radius: 8px; height: 1100px; }
+.dict-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: .5rem; align-items: center; margin: 0 0 .5rem; }
+.dict-row input { margin-top: 0 !important; }
+.dict-row button { margin: 0; min-width: 44px; }
 .aizuchi-words { list-style: none; padding: 0; margin: -.25rem 0 var(--gap); }
 .aizuchi-words li { display: flex; gap: .6rem; align-items: center; margin: .25rem 0; }
 .aizuchi-words li button { flex: 0 0 auto; min-width: 44px; margin: 0; padding: .25rem .6rem; }
@@ -192,6 +195,10 @@ function render() {
     <label>抑揚の強さ（空欄なら既定）<input id="f-tts-strength" inputmode="decimal"></label>
     <p class="credit">音声合成：<a href="https://zenryokukikai.com" target="_blank" rel="noopener">ZEN-TTS（https://zenryokukikai.com ）</a></p>
   </div>
+  <p><strong>この bot の辞書</strong></p>
+  <p class="muted">この bot だけの読み方です。共通の辞書（「VC 設定」）に同じ言葉があれば、こちらが優先します。読みを空にすると読みません。</p>
+  <div id="f-dict"></div>
+  <button id="add-dict">言葉を追加</button>
   <button id="test-tts">この声で試す</button>
   <button id="save-tts">保存</button>
   <div class="status" id="s-tts"></div>
@@ -318,6 +325,26 @@ function showZenOnly() {
   document.getElementById("tts-zen-only").style.display = effectiveProvider() === "zen-tts" ? "" : "none";
 }
 
+// D-1106: this bot's read-aloud dictionary (tts.dictionary.agents[agent_id]).
+function addDictRow(word, reading) {
+  const row = document.createElement("div");
+  row.className = "dict-row";
+  const w = document.createElement("input");
+  w.className = "dict-word"; w.placeholder = "言葉"; w.setAttribute("aria-label", "言葉"); w.maxLength = 64; w.value = word || "";
+  const r = document.createElement("input");
+  r.className = "dict-reading"; r.placeholder = "読み"; r.setAttribute("aria-label", "読み"); r.maxLength = 128; r.value = reading || "";
+  const del = document.createElement("button");
+  del.textContent = "削除"; del.onclick = () => row.remove();
+  row.append(w, r, del);
+  document.getElementById("f-dict").appendChild(row);
+}
+
+function dictEntries() {
+  return [...document.querySelectorAll("#f-dict .dict-row")]
+    .map(row => ({ word: row.querySelector(".dict-word").value, reading: row.querySelector(".dict-reading").value.trim() }))
+    .filter(e => e.word.trim() !== "");
+}
+
 async function ttsSection(agentId) {
   const status = document.getElementById("s-tts");
   const box = document.getElementById("f-tts-emotion");
@@ -336,6 +363,8 @@ async function ttsSection(agentId) {
   provider.value = mine.provider || "";
   for (const name of emotionNames) document.getElementById(`f-tts-emotion-${name}`).value = (mine.emotion || {})[name] ?? "";
   document.getElementById("f-tts-strength").value = mine.strength ?? "";
+  for (const e of (((voiceSettings.tts.dictionary || {}).agents || {})[agentId] || [])) addDictRow(e.word, e.reading);
+  document.getElementById("add-dict").onclick = () => addDictRow("", "");
   const [vv, zen] = await Promise.all([
     fetch(`${voiceApi}/speakers`).then(r => r.ok ? r.json() : []).catch(() => []),
     voiceSettings.tts.zen ? fetch(`${voiceApi}/zen-voices`).then(r => r.ok ? r.json() : {}).catch(() => ({})) : {},
@@ -374,6 +403,12 @@ async function saveTts(agentId, status) {
   const entry = ttsEntry();
   if (entry) next.tts.agents[agentId] = entry; else delete next.tts.agents[agentId];
   if (!Object.keys(next.tts.agents).length) delete next.tts.agents;
+  const dictionary = next.tts.dictionary || {};
+  dictionary.agents = dictionary.agents || {};
+  const words = dictEntries();
+  if (words.length) dictionary.agents[agentId] = words; else delete dictionary.agents[agentId];
+  if (!Object.keys(dictionary.agents).length) delete dictionary.agents;
+  if (Object.keys(dictionary).length) next.tts.dictionary = dictionary; else delete next.tts.dictionary;
   status.textContent = "保存しています…";
   const res = await fetch(voiceApi, {
     method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next),

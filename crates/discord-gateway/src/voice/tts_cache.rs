@@ -1,6 +1,7 @@
 //! TTS キャッシュ（D-1085）。同じ（スタイル・話速・本文）の音声は VOICEVOX で合成し直さない。
 //!
-//! - キー: `sha256("voicevox" ‖ 0 ‖ スタイル ID ‖ 0 ‖ 話速 ‖ 0 ‖ 本文)`。
+//! - キー: VOICEVOX は `sha256("voicevox" ‖ 0 ‖ スタイル ID ‖ 0 ‖ 話速 ‖ 0 ‖ 本文)`。
+//!   ZEN-TTS（D-1103）は `sha256("zen-tts" ‖ 0 ‖ voice ‖ 0 ‖ 感情（キー順）‖ 0 ‖ 抑揚 ‖ 0 ‖ 本文)`。
 //! - メモリ: バイト数で上限を掛けた LRU。ディスク: `voice/tts-cache/<key>.wav`（0600、一時ファイル
 //!   から rename）。上限を超えたら更新時刻の古い順に消す。起動時にディレクトリを走査して索引を作る。
 //! - 有効性: キーに入らない音の違い（エンジンの版・合成の固定値）は `cache-version.json` に記録し、
@@ -16,7 +17,8 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::clients::SYNTHESIS_CONSTANTS_VERSION;
+use super::clients::{SYNTHESIS_CONSTANTS_VERSION, TTS_SPEED_SCALE};
+use super::settings::{TtsEngine, VoiceChoice};
 
 /// メモリに置く音声の上限（バイト）。24kHz モノラルでおよそ 22 分。
 pub(crate) const MEMORY_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
@@ -40,6 +42,43 @@ pub(crate) fn cache_key(style: &str, speed: f64, text: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// `choice` の声で `text` を読んだ音声のキー（[`VoiceChoice`] ごとに別の音声）。
+pub(crate) fn choice_cache_key(choice: &VoiceChoice, text: &str) -> String {
+    match choice.engine {
+        TtsEngine::Voicevox => cache_key(&choice.voice, TTS_SPEED_SCALE, text),
+        TtsEngine::ZenTts => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"zen-tts");
+            hasher.update([0]);
+            hasher.update(choice.voice.as_bytes());
+            hasher.update([0]);
+            // Sorted by name, so the same blend written in another order is the same audio.
+            if let Some(serde_json::Value::Object(emotion)) = &choice.emotion {
+                let mut parts: Vec<(&String, String)> =
+                    emotion.iter().map(|(k, v)| (k, v.to_string())).collect();
+                parts.sort();
+                for (name, value) in parts {
+                    hasher.update(name.as_bytes());
+                    hasher.update(b"=");
+                    hasher.update(value.as_bytes());
+                    hasher.update(b";");
+                }
+            }
+            hasher.update([0]);
+            if let Some(strength) = choice.strength {
+                hasher.update(format!("{strength}").as_bytes());
+            }
+            hasher.update([0]);
+            hasher.update(text.as_bytes());
+            hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]

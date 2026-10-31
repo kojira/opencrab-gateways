@@ -272,7 +272,7 @@ async fn speak_one(
         }
     };
     synthesizer.refresh_if_changed(&settings.tts);
-    let voice = settings.tts.voice_for_agent(agent_id);
+    let voice = settings.tts.choice_for_agent(agent_id);
     // 文ごとに合成し、合成できた文から再生キューへ積む（play は songbird へ積むだけ）。
     // 1 文の失敗は warn にして次の文へ進む。止められた（世代が古い）ら残りは読まない。
     let mut committed_at = committed_at;
@@ -281,7 +281,7 @@ async fn speak_one(
         let result = async {
             let text_chars = sentence.chars().count();
             let wav = synthesizer
-                .synthesize(&settings.tts, voice, &sentence, SynthesisPriority::Live)
+                .synthesize(&settings.tts, &voice, &sentence, SynthesisPriority::Live)
                 .await?;
             // 合成中に止められたら、合成した音声は再生しない。
             let Some(id) = playbacks.start(guild, generation, reply, &sentence) else {

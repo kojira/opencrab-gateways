@@ -123,7 +123,7 @@ async fn d1101b_preview_says_plainly_when_voicevox_is_down() {
     let dir = tempfile::tempdir().unwrap();
     let path = settings_file(dir.path(), "http://127.0.0.1:9");
     let error = aizuchi_preview(&path, "agent", "うん、").await.unwrap_err();
-    assert!(matches!(error, PreviewError::Engine(_)));
+    assert!(matches!(error, PreviewError::Engine(..)));
     assert!(error
         .to_string()
         .starts_with("VOICEVOX で音声を作れませんでした"));

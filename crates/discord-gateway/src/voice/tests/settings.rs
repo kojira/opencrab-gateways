@@ -86,3 +86,83 @@ fn settings_live_in_a_subdirectory_next_to_the_placement() {
         std::path::PathBuf::from("/x/data/gate/discord/voice/settings.json")
     );
 }
+
+// D-1103: ZEN-TTS next to VOICEVOX, chosen per bot.
+
+fn with_zen() -> serde_json::Value {
+    let mut v = valid();
+    v["tts"]["zen"] = json!({
+        "base_url": "http://127.0.0.1:50023",
+        "default_voice": "marine",
+        "emotion": {"happy": 70, "neutral": 30},
+        "strength": 1.2
+    });
+    v["tts"]["agents"] = json!({
+        "agent-zen": {"provider": "zen-tts", "voice": "kikka", "emotion": {"sad": 40}},
+        "agent-zen-default": {"provider": "zen-tts"}
+    });
+    v
+}
+
+#[test]
+fn d1103_a_bot_resolves_its_own_provider_and_voice() {
+    use super::super::settings::{TtsEngine, VoiceChoice};
+    let s = VoiceSettings::from_json(&with_zen().to_string()).unwrap();
+    // VOICEVOX bots keep the old resolution.
+    assert_eq!(
+        s.tts.choice_for_agent("agent-a"),
+        VoiceChoice::voicevox("8")
+    );
+    assert_eq!(s.tts.choice_for_agent("other"), VoiceChoice::voicevox("3"));
+    // A ZEN-TTS bot: its voice, its emotion; strength falls back to the shared default.
+    let zen = s.tts.choice_for_agent("agent-zen");
+    assert_eq!(zen.engine, TtsEngine::ZenTts);
+    assert_eq!(zen.voice, "kikka");
+    assert_eq!(zen.emotion, Some(json!({"sad": 40})));
+    assert_eq!(zen.strength, Some(1.2));
+    // No voice / emotion on the bot: the shared ZEN-TTS defaults.
+    let plain = s.tts.choice_for_agent("agent-zen-default");
+    assert_eq!(plain.voice, "marine");
+    assert_eq!(plain.emotion, Some(json!({"happy": 70, "neutral": 30})));
+}
+
+#[test]
+fn d1103_settings_without_zen_keep_working_unchanged() {
+    // Files written before D-1103 have no zen / agents; they must load and round-trip as-is.
+    let s = VoiceSettings::from_json(&valid().to_string()).unwrap();
+    assert!(s.tts.zen.is_none());
+    assert!(s.tts.agents.is_empty());
+    let saved = serde_json::to_value(&s).unwrap();
+    assert_eq!(saved, valid());
+}
+
+#[test]
+fn d1103_invalid_zen_settings_are_rejected() {
+    let cases = [
+        ("/tts/zen/base_url", json!("ftp://x")),
+        ("/tts/zen/default_voice", json!("")),
+        ("/tts/zen/default_voice", json!("Bad Voice")),
+        ("/tts/zen/emotion", json!({"joy": 10})),
+        ("/tts/zen/emotion", json!({"happy": 101})),
+        ("/tts/zen/strength", json!(-1)),
+        ("/tts/agents/agent-zen/provider", json!("openai")),
+        ("/tts/agents/agent-zen/voice", json!("")),
+        ("/tts/agents/agent-zen/emotion", json!({"happy": -1})),
+    ];
+    for (pointer, value) in cases {
+        let mut v = with_zen();
+        *v.pointer_mut(pointer).unwrap() = value.clone();
+        assert!(
+            VoiceSettings::from_json(&v.to_string()).is_err(),
+            "{pointer}={value} must be rejected"
+        );
+    }
+    // A ZEN-TTS bot needs the ZEN-TTS endpoint.
+    let mut no_zen = with_zen();
+    no_zen["tts"].as_object_mut().unwrap().remove("zen");
+    assert!(VoiceSettings::from_json(&no_zen.to_string()).is_err());
+    // A VOICEVOX override on a bot uses a VOICEVOX style id.
+    let mut bad_vv = with_zen();
+    bad_vv["tts"]["agents"]["agent-vv"] = json!({"provider": "voicevox", "voice": "kikka"});
+    assert!(VoiceSettings::from_json(&bad_vv.to_string()).is_err());
+}

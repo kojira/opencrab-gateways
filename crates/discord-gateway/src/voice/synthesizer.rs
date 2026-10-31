@@ -1,16 +1,16 @@
-//! VOICEVOX の合成をまとめる（D-1085）。合成は TTS キャッシュを先に引き、外れたら 1 本の合成役へ渡す。
+//! 読み上げの合成をまとめる（D-1085。D-1103 から VOICEVOX と ZEN-TTS）。合成は TTS キャッシュを先に引き、外れたら 1 本の合成役へ渡す。
 //!
 //! VOICEVOX は CPU で 1 本ずつしか速く合成できないため、合成役は 1 つだけにし、読み上げ（Live）を
 //! 先行生成の文（Held）、先読み（Prewarm）の順に合成する。合成中の 1 件は途中で止めない。
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{oneshot, Notify};
 
-use super::clients::{self, TTS_SPEED_SCALE};
-use super::settings::TtsSettings;
-use super::tts_cache::{cache_key, TtsCache};
+use super::clients;
+use super::settings::{TtsSettings, VoiceChoice};
+use super::tts_cache::{choice_cache_key, TtsCache};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SynthesisPriority {
@@ -24,7 +24,7 @@ pub(crate) enum SynthesisPriority {
 
 struct Job {
     tts: TtsSettings,
-    style: String,
+    choice: VoiceChoice,
     text: String,
     reply: Option<oneshot::Sender<anyhow::Result<Vec<u8>>>>,
 }
@@ -65,17 +65,17 @@ impl Synthesizer {
         synthesizer
     }
 
-    /// `style` で `text` を合成した WAV。キャッシュにあれば合成しない。
+    /// `choice` の声で `text` を合成した WAV。キャッシュにあれば合成しない。
     pub(crate) async fn synthesize(
         &self,
         tts: &TtsSettings,
-        style: &str,
+        choice: &VoiceChoice,
         text: &str,
         priority: SynthesisPriority,
     ) -> anyhow::Result<Vec<u8>> {
         let text_chars = text.chars().count();
         let started = std::time::Instant::now();
-        if let Some(wav) = self.cached(style, text) {
+        if let Some(wav) = self.cached(choice, text) {
             tracing::debug!(
                 text_chars,
                 elapsed_us = started.elapsed().as_micros() as u64,
@@ -92,7 +92,7 @@ impl Synthesizer {
         self.push(
             Job {
                 tts: tts.clone(),
-                style: style.to_string(),
+                choice: choice.clone(),
                 text: text.to_string(),
                 reply: Some(reply),
             },
@@ -104,8 +104,8 @@ impl Synthesizer {
     }
 
     /// キャッシュにある WAV だけを返す（合成しない）。
-    pub(crate) fn cached(&self, style: &str, text: &str) -> Option<Vec<u8>> {
-        self.cache.get(&cache_key(style, TTS_SPEED_SCALE, text))
+    pub(crate) fn cached(&self, choice: &VoiceChoice, text: &str) -> Option<Vec<u8>> {
+        self.cache.get(&choice_cache_key(choice, text))
     }
 
     /// 設定が前回の先読みと違うときだけ [`Self::refresh`] を走らせる。
@@ -130,7 +130,7 @@ impl Synthesizer {
                 *self.refreshed.lock().unwrap() = None;
                 tracing::warn!(
                     error = %format!("{error:#}"),
-                    "TTS cache disabled; VOICEVOX version is unreadable"
+                    "TTS cache disabled; a TTS engine version is unreadable"
                 );
                 return;
             }
@@ -141,18 +141,15 @@ impl Synthesizer {
             tracing::warn!(error = %format!("{error:#}"), "TTS cache disabled");
             return;
         }
-        let styles: BTreeSet<&str> = std::iter::once(tts.default_voice.as_str())
-            .chain(tts.agent_voices.values().map(String::as_str))
-            .collect();
-        for style in styles {
+        for choice in tts.all_choices() {
             for phrase in &self.prewarm_phrases {
-                if self.cached(style, phrase).is_some() {
+                if self.cached(&choice, phrase).is_some() {
                     continue;
                 }
                 self.push(
                     Job {
                         tts: tts.clone(),
-                        style: style.to_string(),
+                        choice: choice.clone(),
                         text: phrase.to_string(),
                         reply: None,
                     },
@@ -189,7 +186,7 @@ async fn run_worker(synthesizer: Arc<Synthesizer>) {
             synthesizer.notify.notified().await;
             continue;
         };
-        let key = cache_key(&job.style, TTS_SPEED_SCALE, &job.text);
+        let key = choice_cache_key(&job.choice, &job.text);
         let result = match synthesizer.cache.get(&key) {
             Some(wav) => Ok(wav),
             None => {
@@ -197,7 +194,8 @@ async fn run_worker(synthesizer: Arc<Synthesizer>) {
                 let text_chars = job.text.chars().count();
                 tracing::debug!(text_chars, "TTS synthesis started");
                 let result =
-                    clients::synthesize(&synthesizer.http, &job.tts, &job.text, &job.style).await;
+                    clients::synthesize_choice(&synthesizer.http, &job.tts, &job.choice, &job.text)
+                        .await;
                 tracing::debug!(
                     text_chars,
                     elapsed_ms = started.elapsed().as_millis() as u64,

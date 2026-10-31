@@ -104,7 +104,12 @@ async fn t2_a_different_style_misses() {
     let base = settle(&recorded).await;
     for style in ["3", "8", "3"] {
         synthesizer
-            .synthesize(&settings.tts, style, "別の文。", SynthesisPriority::Live)
+            .synthesize(
+                &settings.tts,
+                &crate::voice::settings::VoiceChoice::voicevox(style),
+                "別の文。",
+                SynthesisPriority::Live,
+            )
             .await
             .unwrap();
     }
@@ -257,7 +262,12 @@ async fn t6_a_live_job_is_synthesized_before_queued_prewarm_jobs() {
     synthesizer.refresh(&settings.tts).await;
     wait_synth(&recorded, 1).await;
     synthesizer
-        .synthesize(&settings.tts, "3", "いま読む文。", SynthesisPriority::Live)
+        .synthesize(
+            &settings.tts,
+            &crate::voice::settings::VoiceChoice::voicevox("3"),
+            "いま読む文。",
+            SynthesisPriority::Live,
+        )
         .await
         .unwrap();
     let queries = recorded.tts_queries.lock().unwrap().clone();
@@ -286,4 +296,40 @@ async fn synthesis_constants_v1_set_speed_and_zero_leading_silence() {
     assert_eq!(body["prePhonemeLength"], 0.0, "{body}");
     assert!(body.get("postPhonemeLength").is_none(), "{body}");
     assert_eq!(body["accent_phrases"], serde_json::json!([]), "{body}");
+}
+
+#[test]
+fn d1103_cache_keys_differ_by_engine_voice_emotion_and_strength() {
+    use crate::voice::settings::VoiceChoice;
+    use crate::voice::tts_cache::choice_cache_key;
+    // VOICEVOX keys are exactly the pre-D-1103 keys, so the existing cache stays valid.
+    assert_eq!(
+        choice_cache_key(&VoiceChoice::voicevox("3"), "うん、"),
+        cache_key("3", 1.0, "うん、")
+    );
+    let zen = |voice: &str, emotion: Option<serde_json::Value>, strength: Option<f64>| {
+        VoiceChoice::zen(voice, emotion, strength)
+    };
+    let base = choice_cache_key(&zen("marine", None, None), "うん、");
+    assert_ne!(base, cache_key("marine", 1.0, "うん、"), "engine is in the key");
+    assert_ne!(base, choice_cache_key(&zen("kikka", None, None), "うん、"));
+    assert_ne!(
+        base,
+        choice_cache_key(&zen("marine", Some(serde_json::json!({"happy": 70})), None), "うん、")
+    );
+    assert_ne!(
+        base,
+        choice_cache_key(&zen("marine", None, Some(1.2)), "うん、")
+    );
+    // The same emotion written in another key order is the same audio.
+    assert_eq!(
+        choice_cache_key(
+            &zen("marine", Some(serde_json::json!({"happy": 70, "sad": 30})), None),
+            "うん、"
+        ),
+        choice_cache_key(
+            &zen("marine", Some(serde_json::json!({"sad": 30, "happy": 70})), None),
+            "うん、"
+        )
+    );
 }

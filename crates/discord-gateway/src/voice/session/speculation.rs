@@ -349,10 +349,7 @@ impl VoiceManager {
         let Ok(settings) = load_settings(&self.config.settings_path) else {
             return;
         };
-        let style = settings
-            .tts
-            .voice_for_agent(&self.config.agent_id)
-            .to_string();
+        let style = settings.tts.choice_for_agent(&self.config.agent_id);
         for segment in to_synthesize {
             let synthesizer = self.synthesizer.clone();
             let tts = settings.tts.clone();

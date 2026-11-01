@@ -1,11 +1,12 @@
 //! VC 設定画面（`discord-gateway voice-settings <settings.json> <port>`）。
 //! 127.0.0.1 だけに bind する別プロセスで、gateway 本体は HTTP を listen しない。
 //!
-//! - `GET /` 素の HTML + fetch の 1 ページ
+//! - `GET /` 素の HTML + fetch の 1 ページ（`GET /dict-editor.js` は辞書の編集部品）
 //! - `GET/PUT /api/voice-settings` 設定の読み書き（PUT は検証してから 0600 で原子的に置換）
 //! - `GET /api/voice-settings/speakers` VOICEVOX 話者一覧の代理取得
 //! - `GET /api/voice-settings/zen-voices` ZEN-TTS の声の一覧の代理取得（D-1103）
-//! - `POST /api/voice-settings/test-tts` 合成した WAV を返す
+//! - `POST /api/voice-settings/test-tts` 合成した WAV を返す（`dict` は試聴だけの辞書。保存しない）
+//! - `POST /api/voice-settings/analyze` 言葉の読み・拍・アクセント型（ZEN-TTS の代理。D-1106）
 //! - `POST /api/voice-settings/test-stt` 合成音声を STT にかけて結果を返す（疎通確認）
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -21,9 +22,12 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::clients;
-use super::settings::{load_settings, save_settings, VoiceSettings};
+use super::dictionary::DictionaryEntry;
+use super::settings::{load_settings, save_settings, TtsEngine, VoiceChoice, VoiceSettings};
 
 pub const PAGE: &str = include_str!("settings_page.html");
+/// 読み上げ辞書の編集部品（VC 設定画面と bot の画面が `dict-editor.js` で読む。D-1106）。
+pub const DICT_EDITOR_JS: &str = include_str!("dict_editor.js");
 const STT_TEST_TEXT: &str = "音声認識のテストです";
 
 struct AppState {
@@ -57,11 +61,21 @@ pub fn api_router(path: PathBuf) -> Router {
         http: clients::http_client(),
     });
     Router::new()
+        .route(
+            "/dict-editor.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    DICT_EDITOR_JS,
+                )
+            }),
+        )
         .route("/api/voice-settings", get(get_settings).put(put_settings))
         .route("/api/voice-settings/speakers", get(get_speakers))
         .route("/api/voice-settings/zen-voices", get(get_zen_voices))
         .route("/api/voice-settings/test-tts", post(test_tts))
         .route("/api/voice-settings/test-stt", post(test_stt))
+        .route("/api/voice-settings/analyze", post(analyze))
         .with_state(state)
 }
 
@@ -129,6 +143,10 @@ struct TtsTest {
     /// この bot（agent）の読み上げで試す（D-1103。エンジン・声・感情はその bot の設定）。
     #[serde(default)]
     agent: Option<String>,
+    /// 試聴だけに使う辞書の項目（D-1106）。保存済みの辞書に重ねて、この 1 回だけ使う。
+    /// `agent` が無ければ ZEN-TTS の既定の声で読む（共通の辞書の編集画面から）。
+    #[serde(default)]
+    dict: Option<Vec<DictionaryEntry>>,
 }
 
 async fn test_tts(State(state): Shared, Json(request): Json<TtsTest>) -> Response {
@@ -136,15 +154,77 @@ async fn test_tts(State(state): Shared, Json(request): Json<TtsTest>) -> Respons
         Ok(settings) => settings,
         Err((status, message)) => return error(status, message),
     };
-    let choice = match (&request.agent, &request.voice) {
-        (Some(agent), _) => settings.tts.choice_for_agent(agent),
-        (None, Some(voice)) => super::settings::VoiceChoice::voicevox(voice)
-            .with_dictionary(settings.tts.dictionary.for_agent("")),
-        (None, None) => super::settings::VoiceChoice::voicevox(&settings.tts.default_voice)
-            .with_dictionary(settings.tts.dictionary.for_agent("")),
+    let shared = || settings.tts.dictionary.for_agent("");
+    let mut choice = match (
+        &request.agent,
+        &request.voice,
+        &request.dict,
+        &settings.tts.zen,
+    ) {
+        (Some(agent), _, _, _) => settings.tts.choice_for_agent(agent),
+        (None, None, Some(_), Some(zen)) => {
+            VoiceChoice::zen(&zen.default_voice, None, None).with_dictionary(shared())
+        }
+        (None, Some(voice), _, _) => VoiceChoice::voicevox(voice).with_dictionary(shared()),
+        (None, None, _, _) => {
+            VoiceChoice::voicevox(&settings.tts.default_voice).with_dictionary(shared())
+        }
     };
+    if let Some(overrides) = &request.dict {
+        choice.dictionary = match choice.dictionary.with_overrides(overrides) {
+            Ok(dictionary) => dictionary,
+            Err(e) => return error(StatusCode::BAD_REQUEST, format!("{e:#}")),
+        };
+    }
     match clients::synthesize_choice(&state.http, &settings.tts, &choice, &request.text).await {
         Ok(wav) => ([(header::CONTENT_TYPE, "audio/wav")], wav).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct AnalyzeRequest {
+    text: String,
+    /// この bot（agent）が ZEN-TTS なら、その声で調べる。ほかは ZEN-TTS の既定の声。
+    #[serde(default)]
+    agent: Option<String>,
+    /// 調べるときに使う辞書の項目（読みを直したとき、その読みで拍を出す）。
+    #[serde(default)]
+    dict: Option<Vec<DictionaryEntry>>,
+}
+
+/// 言葉の読み・拍・アクセント型（ZEN-TTS `POST /analyze` の代理）。辞書の編集画面が、読みと
+/// アクセントを自動で入れ、拍の箱を出すのに使う。ZEN-TTS が無ければ 404。
+async fn analyze(State(state): Shared, Json(request): Json<AnalyzeRequest>) -> Response {
+    let settings = match saved(&state) {
+        Ok(settings) => settings,
+        Err((status, message)) => return error(status, message),
+    };
+    let Some(zen) = &settings.tts.zen else {
+        return error(StatusCode::NOT_FOUND, "ZEN-TTS is not configured");
+    };
+    let voice = match request
+        .agent
+        .as_deref()
+        .map(|agent| settings.tts.choice_for_agent(agent))
+    {
+        Some(choice) if choice.engine == TtsEngine::ZenTts => choice.voice,
+        _ => zen.default_voice.clone(),
+    };
+    let mut body = json!({"text": request.text, "voice": voice});
+    if let Some(dict) = &request.dict {
+        body["dict"] = json!(dict);
+    }
+    match clients::zen_analyze(&state.http, &settings.tts, &body).await {
+        Ok((status, value)) => {
+            let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status = if status.is_success() || status == StatusCode::BAD_REQUEST {
+                status
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            (status, Json(value)).into_response()
+        }
         Err(e) => error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
     }
 }

@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::State;
+use axum::response::IntoResponse as _;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -19,6 +20,8 @@ pub const WAV_FROM_ZEN: &[u8] = b"RIFF-fake-wav-from-zen-tts";
 #[derive(Default)]
 pub struct ZenRecorded {
     pub requests: Mutex<Vec<serde_json::Value>>,
+    /// `POST /analyze` の本文（受けた順）。
+    pub analyze_requests: Mutex<Vec<serde_json::Value>>,
 }
 
 /// A stand-in for kojira/zen-tts-server (`/health`, `/voices`, `/synthesize`).
@@ -42,6 +45,26 @@ pub async fn spawn_zen() -> (String, Arc<ZenRecorded>) {
                     "emotions": ["neutral", "happy", "sad", "angry", "apologetic"]
                 }))
             }),
+        )
+        .route(
+            "/analyze",
+            post(
+                |State(r): State<Arc<ZenRecorded>>, axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    r.analyze_requests.lock().unwrap().push(body.clone());
+                    if body["text"] == "明日" {
+                        let reading = body["dict"][0]["reading"].as_str().unwrap_or("アシタ").to_string();
+                        let moras: Vec<String> = reading.chars().map(String::from).collect();
+                        axum::Json(serde_json::json!({"reading": reading, "moras": moras, "accent": 3}))
+                            .into_response()
+                    } else {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(serde_json::json!({"error": "cannot read this word"})),
+                        )
+                            .into_response()
+                    }
+                },
+            ),
         )
         .route(
             "/synthesize",

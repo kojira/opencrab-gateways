@@ -287,8 +287,9 @@ fn d1106_pages_have_the_shared_and_per_bot_dictionaries() {
         crate::voice::settings_http::PAGE,
         crate::settings_http::PAGE,
     ] {
-        // Import / export in the zen-tts demo format.
-        assert!(page.contains("zen-tts-dictionary"));
+        assert!(page.contains(r#"<script src="dict-editor.js"></script>"#));
         assert!(page.contains("書き出す") && page.contains("読み込む"));
     }
+    // Import / export in the zen-tts demo format.
+    assert!(crate::voice::settings_http::DICT_EDITOR_JS.contains("zen-tts-dictionary"));
 }

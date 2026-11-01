@@ -16,7 +16,7 @@ style.textContent = `
 .az-head button, .az-actions button { margin: 0; min-width: 44px; min-height: 44px; }
 .az-mark { font-size: .9rem; color: #2563eb; }
 .az-tone { overflow-x: auto; margin: .5rem 0 .25rem; }
-.az-tone[hidden] { display: none; }
+.az-tone[hidden], .az-actions[hidden], .az-row button[hidden] { display: none !important; }
 .az-track { position: relative; display: inline-block; }
 .az-track svg { display: block; }
 .az-track svg polyline { fill: none; stroke: #2563eb; stroke-width: 3; stroke-linejoin: round; }

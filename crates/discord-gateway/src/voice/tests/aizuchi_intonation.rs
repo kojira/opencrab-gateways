@@ -260,4 +260,9 @@ fn d1107_page_has_the_aizuchi_intonation_editor_without_numbers() {
         !js.contains("<input type=\"range\""),
         "no slider with numbers"
     );
+    // The page CSS shows buttons and flex rows; a closed item hides its intonation controls.
+    assert!(
+        js.contains(".az-actions[hidden]"),
+        "closed rows hide their controls"
+    );
 }

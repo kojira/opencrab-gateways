@@ -174,7 +174,12 @@ impl Setup {
             .unwrap()
             .iter()
             .map(|(text, _)| text.clone())
-            .filter(|text| !AizuchiConfig::default().prewarm_phrases().contains(text))
+            .filter(|text| {
+                !AizuchiConfig::default()
+                    .prewarm_phrases()
+                    .iter()
+                    .any(|p| p.text == *text)
+            })
             .collect()
     }
 

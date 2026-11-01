@@ -32,6 +32,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
 pub const PAGE: &str = include_str!("settings_page.html");
+/// 相づちの一覧と言い方の編集部品（D-1107。`aizuchi-editor.js`）。
+pub const AIZUCHI_EDITOR_JS: &str = include_str!("aizuchi_editor.js");
 
 struct AppState {
     admin_socket: PathBuf,
@@ -148,6 +150,18 @@ pub async fn serve_with(
     });
     let app = Router::new()
         .route("/", get(|| async { Html(PAGE) }))
+        .route(
+            "/aizuchi-editor.js",
+            get(|| async {
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/javascript; charset=utf-8",
+                    )],
+                    AIZUCHI_EDITOR_JS,
+                )
+            }),
+        )
         .route("/api/instances", get(list).post(create))
         .route("/api/agents", get(agents))
         .route("/api/instances/{id}/credential", put(set_credential))
@@ -296,7 +310,16 @@ async fn aizuchi_preview(
     Json(body): Json<Value>,
 ) -> Response {
     use crate::voice::preview::PreviewError;
-    let text = body["text"].as_str().unwrap_or_default();
+    // D-1107: `{"text": ...}` or a saved aizuchi item with its intonation (`reading`, `accent`, ...).
+    let word: crate::voice::aizuchi::AizuchiWord = match serde_json::from_value(body) {
+        Ok(word) => word,
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("この言葉は使えません: {e}"),
+            )
+        }
+    };
     let listed = match admin(&state, json!({"id":"settings","op":"list"})).await {
         Ok(value) => value,
         Err(e) => return error(StatusCode::BAD_GATEWAY, format!("{e:#}")),
@@ -308,7 +331,7 @@ async fn aizuchi_preview(
     else {
         return error(StatusCode::NOT_FOUND, "instance_unknown");
     };
-    match crate::voice::preview::aizuchi_preview(&state.voice_settings, agent, text).await {
+    match crate::voice::preview::aizuchi_preview(&state.voice_settings, agent, word).await {
         Ok(preview) => (
             [(axum::http::header::CONTENT_TYPE, "audio/wav")],
             preview.wav,

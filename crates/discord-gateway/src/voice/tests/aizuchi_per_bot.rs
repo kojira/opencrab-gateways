@@ -15,8 +15,8 @@ use crate::voice::session::VoiceManager;
 fn custom(question: &[&str], statement: &[&str]) -> AizuchiConfig {
     AizuchiConfig {
         enabled: true,
-        question: question.iter().map(|s| s.to_string()).collect(),
-        statement: statement.iter().map(|s| s.to_string()).collect(),
+        question: question.iter().map(|s| (*s).into()).collect(),
+        statement: statement.iter().map(|s| (*s).into()).collect(),
     }
 }
 
@@ -44,15 +44,19 @@ fn d1101_a_custom_list_is_chosen_from() {
     let cfg = custom(&["それで？"], &["ほうほう、", "ふむ、"]);
     for pick in 0..10 {
         assert_eq!(
-            choose_aizuchi(&cfg, "元気ですか", None, pick).as_deref(),
+            choose_aizuchi(&cfg, "元気ですか", None, pick)
+                .map(|w| w.text)
+                .as_deref(),
             Some("それで？")
         );
         let s = choose_aizuchi(&cfg, "今日は晴れ", None, pick).unwrap();
-        assert!(["ほうほう、", "ふむ、"].contains(&s.as_str()), "{s}");
+        assert!(["ほうほう、", "ふむ、"].contains(&s.text.as_str()), "{s:?}");
     }
     // 1 語だけの組は、直前と同じでもその語を使う。
     assert_eq!(
-        choose_aizuchi(&cfg, "元気ですか", Some("それで？"), 0).as_deref(),
+        choose_aizuchi(&cfg, "元気ですか", Some(&"それで？".into()), 0)
+            .map(|w| w.text)
+            .as_deref(),
         Some("それで？")
     );
 }
@@ -74,7 +78,9 @@ fn d1101_an_empty_list_plays_nothing_of_that_kind() {
     let cfg = custom(&[], &["うん、"]);
     assert_eq!(choose_aizuchi(&cfg, "元気ですか", None, 0), None);
     assert_eq!(
-        choose_aizuchi(&cfg, "今日は晴れ", None, 0).as_deref(),
+        choose_aizuchi(&cfg, "今日は晴れ", None, 0)
+            .map(|w| w.text)
+            .as_deref(),
         Some("うん、")
     );
     let cfg = custom(&["えっと、"], &[]);

@@ -40,9 +40,6 @@ table { width: 100%; border-collapse: collapse; }
 th, td { border: 1px solid var(--line); padding: .4rem .5rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 iframe { width: 100%; border: 1px solid var(--line); border-radius: 8px; height: 1100px; }
 .aizuchi-words { list-style: none; padding: 0; margin: -.25rem 0 var(--gap); }
-.aizuchi-words li { display: flex; gap: .6rem; align-items: center; margin: .25rem 0; }
-.aizuchi-words li button { flex: 0 0 auto; min-width: 44px; margin: 0; padding: .25rem .6rem; }
-.aizuchi-words li span:first-of-type { flex: 1; }
 .credit { font-size: .9rem; }
 </style>
 </head>
@@ -64,6 +61,7 @@ iframe { width: 100%; border: 1px solid var(--line); border-radius: 8px; height:
   <div class="status" id="c-status"></div>
 </fieldset>
 <script src="dict-editor.js"></script>
+<script src="aizuchi-editor.js"></script>
 <script>
 const api = "api/instances";
 const aizuchiMaxWords = 20;
@@ -84,38 +82,7 @@ async function put(path, body, status) {
   if (res.ok) await load(current.instance_id);
 }
 
-// D-1101b: one ▶ per aizuchi word; plays the WAV this bot would play in the VC.
 let playing = null;
-async function playAizuchi(text, status) {
-  status.textContent = "音声を用意しています…";
-  const res = await fetch(`${api}/${current.instance_id}/aizuchi/preview`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }),
-  });
-  if (!res.ok) { status.textContent = await errorText(res); return; }
-  const url = URL.createObjectURL(await res.blob());
-  if (playing) playing.pause();
-  playing = new Audio(url);
-  playing.onended = () => URL.revokeObjectURL(url);
-  status.textContent = "";
-  try { await playing.play(); } catch { status.textContent = "ブラウザが再生を止めました。もう一度押してください。"; }
-}
-function playList(value, list) {
-  list.innerHTML = "";
-  for (const word of value.split("\n").map(s => s.trim()).filter(Boolean)) {
-    const li = document.createElement("li");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "▶";
-    button.title = "この bot の声で再生";
-    const label = document.createElement("span");
-    label.textContent = word;
-    const status = document.createElement("span");
-    status.className = "status";
-    button.onclick = () => playAizuchi(word, status);
-    li.append(button, label, status);
-    list.append(li);
-  }
-}
 
 function tabs() {
   const nav = document.getElementById("tabs");
@@ -204,13 +171,15 @@ function render() {
   <div class="status" id="s-tts"></div>
 </fieldset>
 <fieldset><legend>相づち（VC）</legend>
-  <p class="muted">話し終わったあと、返事の前に流す短い言葉です。1行に1つ書きます（${aizuchiMaxWords}個まで、1つ${aizuchiMaxChars}文字まで）。空にすると、その場面では流しません。</p>
+  <p class="muted">話し終わったあと、返事の前に流す短い言葉です（${aizuchiMaxWords}個まで、1つ${aizuchiMaxChars}文字まで）。空にすると、その場面では流しません。▶ を押すと、この bot の声で実際に流れる音声を再生します（保存前の言葉も試せます）。</p>
+  <p class="muted" id="aizuchi-zen-note">ZEN-TTS の bot は「言い方」で、音をタップして下がる位置を、▲▼で高さを、下のボタンで長さを変えられます。同じ言葉を別の言い方でいくつも入れられます（「同じ言葉で別の言い方」）。</p>
   <label class="check"><input id="f-aizuchi-on" type="checkbox"><span>相づちを流す</span></label>
-  ${field("問いかけのとき（「か」「の」「？」で終わる発話）", aizuchi.question.join("\n"), "aizuchi-q", true)}
-  <ul class="aizuchi-words" id="w-aizuchi-q"></ul>
-  ${field("それ以外のとき", aizuchi.statement.join("\n"), "aizuchi-s", true)}
-  <ul class="aizuchi-words" id="w-aizuchi-s"></ul>
-  <p class="muted">▶ を押すと、この bot の声で実際に流れる音声を再生します（保存前の言葉も試せます）。</p>
+  <p><strong>問いかけのとき（「か」「の」「？」で終わる発話）</strong></p>
+  <div class="aizuchi-words" id="w-aizuchi-q"></div>
+  <button id="add-aizuchi-q">言葉を追加</button>
+  <p><strong>それ以外のとき</strong></p>
+  <div class="aizuchi-words" id="w-aizuchi-s"></div>
+  <button id="add-aizuchi-s">言葉を追加</button>
   <button id="save-aizuchi">保存</button>
   <div class="status" id="s-aizuchi"></div>
 </fieldset>
@@ -227,18 +196,24 @@ function render() {
   document.getElementById("f-mode").value = c.delivery_mode || "tool_driven";
   ttsSection(current.agent_id);
   document.getElementById("f-aizuchi-on").checked = aizuchi.enabled;
-  for (const name of ["aizuchi-q", "aizuchi-s"]) {
-    const area = document.getElementById(`f-${name}`);
-    const draw = () => playList(area.value, document.getElementById(`w-${name}`));
-    area.addEventListener("input", draw);
-    draw();
+  const aizuchiStatus = document.getElementById("s-aizuchi");
+  const aizuchiConfig = {
+    analyzeUrl: `${voiceApi}/analyze`,
+    previewUrl: `${api}/${current.instance_id}/aizuchi/preview`,
+    agent: current.agent_id,
+    zen: () => Boolean(voiceSettings && voiceSettings.tts.zen) && effectiveProvider() === "zen-tts",
+    report: text => { aizuchiStatus.textContent = text; },
+  };
+  for (const [name, items] of [["aizuchi-q", aizuchi.question], ["aizuchi-s", aizuchi.statement]]) {
+    const box = document.getElementById(`w-${name}`);
+    aizuchiList(box, items, aizuchiConfig);
+    document.getElementById(`add-${name}`).onclick = () => aizuchiRow(box, "");
   }
   document.getElementById("save-aizuchi").onclick = () => {
-    const words = id => document.getElementById(id).value.split("\n").map(s => s.trim()).filter(Boolean);
     const next = { ...c, aizuchi: {
       enabled: document.getElementById("f-aizuchi-on").checked,
-      question: words("f-aizuchi-q"),
-      statement: words("f-aizuchi-s"),
+      question: aizuchiCollect(document.getElementById("w-aizuchi-q")),
+      statement: aizuchiCollect(document.getElementById("w-aizuchi-s")),
     } };
     put("config", next, document.getElementById("s-aizuchi"));
   };
@@ -322,7 +297,10 @@ function effectiveProvider() {
 }
 
 function showZenOnly() {
-  document.getElementById("tts-zen-only").style.display = effectiveProvider() === "zen-tts" ? "" : "none";
+  const zen = effectiveProvider() === "zen-tts";
+  document.getElementById("tts-zen-only").style.display = zen ? "" : "none";
+  document.getElementById("aizuchi-zen-note").style.display = zen && voiceSettings && voiceSettings.tts.zen ? "" : "none";
+  aizuchiRedraw();
 }
 
 

@@ -1,4 +1,5 @@
 mod aizuchi;
+mod aizuchi_intonation;
 mod aizuchi_per_bot;
 mod aizuchi_preview;
 mod bargein;

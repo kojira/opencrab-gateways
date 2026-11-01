@@ -187,6 +187,8 @@ async fn d1106_pages_load_the_mora_editor_without_a_numeric_accent_input() {
         "読みを調べる",
         "/analyze",
         "test-tts",
+        // The page CSS sets inputs to display:block; the file picker behind 読み込む stays hidden.
+        "#import-dict[hidden] { display: none !important; }",
     ] {
         assert!(js.contains(needed), "editor lacks {needed}");
     }

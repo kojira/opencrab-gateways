@@ -167,7 +167,7 @@ impl AizuchiWord {
     pub fn surface(&self) -> &str {
         self.text
             .trim()
-            .trim_end_matches(|c: char| matches!(c, '、' | '。' | ',' | '.' | '…'))
+            .trim_end_matches(['、', '。', ',', '.', '…'])
     }
 
     /// 言い方を 1 語の辞書項目にしたもの（言い方が無ければ None）。

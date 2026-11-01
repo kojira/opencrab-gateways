@@ -9,6 +9,7 @@
 const dictAdvanced = ["phrase", "strength", "contour", "pitch", "length"];
 const style = document.createElement("style");
 style.textContent = `
+#import-dict[hidden] { display: none !important; }
 .dict-row { border: 1px solid #8886; border-radius: 8px; padding: .5rem; margin: 0 0 .5rem; min-width: 0; }
 .dict-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
 .dict-fields input { margin-top: 0 !important; }

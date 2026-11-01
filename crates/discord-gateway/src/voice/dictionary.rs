@@ -62,15 +62,7 @@ impl TtsDictionary {
         for entry in self.agents.get(agent_id).into_iter().flatten() {
             merged.insert(&entry.surface, entry);
         }
-        let mut entries: Vec<DictionaryEntry> = merged.into_values().cloned().collect();
-        entries.sort_by(|a, b| {
-            b.surface
-                .chars()
-                .count()
-                .cmp(&a.surface.chars().count())
-                .then_with(|| a.surface.cmp(&b.surface))
-        });
-        Dictionary(entries)
+        Dictionary::sorted(merged.into_values().cloned().collect())
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -132,6 +124,29 @@ fn check_entries(field: &str, entries: &[DictionaryEntry]) -> anyhow::Result<()>
 pub struct Dictionary(Vec<DictionaryEntry>);
 
 impl Dictionary {
+    fn sorted(mut entries: Vec<DictionaryEntry>) -> Self {
+        entries.sort_by(|a, b| {
+            b.surface
+                .chars()
+                .count()
+                .cmp(&a.surface.chars().count())
+                .then_with(|| a.surface.cmp(&b.surface))
+        });
+        Dictionary(entries)
+    }
+
+    /// 試聴だけに使う辞書: この辞書に `overrides` を重ねる（同じ言葉は `overrides` が勝つ）。
+    /// 保存はしない。`overrides` が辞書の形でなければ Err。
+    pub fn with_overrides(&self, overrides: &[DictionaryEntry]) -> anyhow::Result<Self> {
+        check_entries("dict", overrides)?;
+        let mut merged: BTreeMap<&str, &DictionaryEntry> =
+            self.0.iter().map(|e| (e.surface.as_str(), e)).collect();
+        for entry in overrides {
+            merged.insert(&entry.surface, entry);
+        }
+        Ok(Dictionary::sorted(merged.into_values().cloned().collect()))
+    }
+
     pub fn entries(&self) -> &[DictionaryEntry] {
         &self.0
     }

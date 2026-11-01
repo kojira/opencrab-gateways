@@ -198,6 +198,27 @@ pub async fn zen_voices(
     response.json().await.context("ZEN-TTS voices JSON")
 }
 
+/// ZEN-TTS の `POST /analyze`（言葉の読み・拍・アクセント型。辞書の編集画面用）。
+/// 戻り値はサーバーの状態コードと本文そのまま（400 の理由も画面に出す）。
+pub async fn zen_analyze(
+    http: &reqwest::Client,
+    tts: &TtsSettings,
+    body: &serde_json::Value,
+) -> anyhow::Result<(reqwest::StatusCode, serde_json::Value)> {
+    let zen = tts.zen.as_ref().context("ZEN-TTS is not configured")?;
+    let response = http
+        .post(format!("{}/analyze", zen.base_url.trim_end_matches('/')))
+        .json(body)
+        .send()
+        .await
+        .context("ZEN-TTS analyze request failed")?;
+    let status = response.status();
+    let text = response.text().await.context("ZEN-TTS analyze body")?;
+    let value = serde_json::from_str(&text)
+        .unwrap_or_else(|_| serde_json::json!({"error": truncate(&text)}));
+    Ok((status, value))
+}
+
 /// VOICEVOX エンジンの版（`GET /version`、JSON 文字列）。
 async fn voicevox_version(http: &reqwest::Client, tts: &TtsSettings) -> anyhow::Result<String> {
     let url = format!("{}/version", tts.base_url.trim_end_matches('/'));

@@ -184,7 +184,7 @@ async fn d1103_prewarm_covers_the_zen_bot_and_its_aizuchi_play_from_cache() {
     );
     let choice = settings.tts.choice_for_agent("agent-zen");
     assert_eq!(
-        synthesizer.cached(&choice, &phrases[0]).as_deref(),
+        synthesizer.cached(&choice, &phrases[0].text).as_deref(),
         Some(WAV_FROM_ZEN)
     );
 

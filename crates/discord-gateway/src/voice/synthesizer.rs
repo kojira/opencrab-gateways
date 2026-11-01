@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{oneshot, Notify};
 
+use super::aizuchi::AizuchiWord;
 use super::clients;
 use super::settings::{TtsSettings, VoiceChoice};
 use super::tts_cache::{choice_cache_key, TtsCache};
@@ -43,15 +44,16 @@ pub(crate) struct Synthesizer {
     notify: Notify,
     /// 最後に先読みした TTS 設定。設定が変わったら確かめ直して先読みし直す。
     refreshed: Mutex<Option<TtsSettings>>,
-    /// 先読みする本文（この bot の相づちと、よく使う短い返事。D-1101）。
-    prewarm_phrases: Vec<String>,
+    /// 先読みする本文（この bot の相づちと、よく使う短い返事。D-1101）。相づちの言い方（D-1107）は
+    /// 項目ごとに別の音声として先読みする。
+    prewarm_phrases: Vec<AizuchiWord>,
 }
 
 impl Synthesizer {
     pub(crate) fn new(
         http: reqwest::Client,
         cache: TtsCache,
-        prewarm_phrases: Vec<String>,
+        prewarm_phrases: Vec<AizuchiWord>,
     ) -> Arc<Self> {
         let synthesizer = Arc::new(Self {
             http,
@@ -141,16 +143,17 @@ impl Synthesizer {
             tracing::warn!(error = %format!("{error:#}"), "TTS cache disabled");
             return;
         }
-        for choice in tts.all_choices() {
+        for base in tts.all_choices() {
             for phrase in &self.prewarm_phrases {
-                if self.cached(&choice, phrase).is_some() {
+                let choice = phrase.voice_choice(&base);
+                if self.cached(&choice, &phrase.text).is_some() {
                     continue;
                 }
                 self.push(
                     Job {
                         tts: tts.clone(),
-                        choice: choice.clone(),
-                        text: phrase.to_string(),
+                        choice,
+                        text: phrase.text.clone(),
                         reply: None,
                     },
                     SynthesisPriority::Prewarm,

@@ -15,6 +15,7 @@ use opencrab_gate_client::client::LiveEvent;
 use opencrab_gate_client::wire::ProvisionalRequest;
 
 use super::{SpeakerWork, VoiceManager, VOICE_SYSTEM_CONTEXT, VOICE_TEXT_PREFIX};
+use crate::voice::aizuchi::AizuchiWord;
 use crate::voice::audio::{ends_like_sentence, SegmenterEvent};
 use crate::voice::draft::DraftState;
 use crate::voice::settings::load_settings;
@@ -26,14 +27,14 @@ pub(super) const FIRST_PROVISIONAL_CHARS: usize = 5;
 pub(super) const REPLACE_PROVISIONAL_CHARS: usize = 8;
 
 /// 1 度だけ流す相づち（先行生成付きの said では昇格の知らせだけが流す）。
-pub(super) type AizuchiSlot = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+pub(super) type AizuchiSlot = Arc<Mutex<Option<(AizuchiWord, Vec<u8>)>>>;
 
 /// core に送った先行生成。
 pub(super) struct Started {
     pub(super) id: String,
     /// 先行生成の本文（「（音声）」を付ける前の認識結果）。
     pub(super) text: String,
-    pub(super) prelude: Option<String>,
+    pub(super) prelude: Option<AizuchiWord>,
     pub(super) slot: AizuchiSlot,
 }
 
@@ -223,7 +224,7 @@ impl VoiceManager {
             author_label: self.label(user).await,
             caller: crate::run::caller_for(&self.config.access, &user_id),
             system_context: Some(VOICE_SYSTEM_CONTEXT.to_string()),
-            agent_prelude: prelude.clone(),
+            agent_prelude: prelude.as_ref().map(|word| word.text.clone()),
             text: format!("{VOICE_TEXT_PREFIX}{text}"),
         };
         match client.provisional(&session.address, &request).await {
@@ -383,7 +384,7 @@ impl VoiceManager {
         if let Some((aizuchi, wav)) = aizuchi {
             for guild in self.session_guilds(&hold.text_channel) {
                 match self.player.play(guild, wav.clone()).await {
-                    Ok(()) => tracing::debug!(guild, aizuchi = %aizuchi, "aizuchi played"),
+                    Ok(()) => tracing::debug!(guild, aizuchi = %aizuchi.text, "aizuchi played"),
                     Err(error) => {
                         tracing::warn!(guild, error = %format!("{error:#}"), "aizuchi playback failed")
                     }

@@ -93,11 +93,11 @@ fn question_and_statement_endings_choose_from_their_own_sets() {
     for pick in 0..10 {
         let d = AizuchiConfig::default();
         let q = choose_aizuchi(&d, "元気ですか", None, pick).unwrap();
-        assert!(DEFAULT_QUESTION.contains(&q.as_str()), "{q}");
+        assert!(DEFAULT_QUESTION.contains(&q.text.as_str()), "{q:?}");
         let q = choose_aizuchi(&d, "何を食べたの？", None, pick).unwrap();
-        assert!(DEFAULT_QUESTION.contains(&q.as_str()), "{q}");
+        assert!(DEFAULT_QUESTION.contains(&q.text.as_str()), "{q:?}");
         let s = choose_aizuchi(&d, "今日は晴れ。", None, pick).unwrap();
-        assert!(DEFAULT_STATEMENT.contains(&s.as_str()), "{s}");
+        assert!(DEFAULT_STATEMENT.contains(&s.text.as_str()), "{s:?}");
     }
     let d = AizuchiConfig::default();
     assert_eq!(choose_aizuchi(&d, "あ", None, 0), None);
@@ -115,7 +115,7 @@ fn the_previous_aizuchi_is_never_chosen_again() {
         };
         for previous in set {
             for pick in 0..10 {
-                let next = choose_aizuchi(&d, text, Some(previous), pick).unwrap();
+                let next = choose_aizuchi(&d, text, Some(&(*previous).into()), pick).unwrap();
                 assert_ne!(next, *previous, "pick {pick}");
             }
         }

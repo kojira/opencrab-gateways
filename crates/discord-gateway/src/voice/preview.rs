@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use super::aizuchi::AizuchiConfig;
+use super::aizuchi::{AizuchiConfig, AizuchiWord};
 use super::clients;
 use super::settings::{load_settings, TtsEngine};
 use super::tts_cache::{choice_cache_key, TtsCache, DISK_LIMIT_BYTES, MEMORY_LIMIT_BYTES};
@@ -44,16 +44,19 @@ impl std::fmt::Display for PreviewError {
     }
 }
 
-/// `agent_id` の bot が相づち `text` を言うときの WAV。保存前の言葉でもよい。
+/// `agent_id` の bot が相づち `word`（言い方があればその言い方。D-1107）を言うときの WAV。
+/// 保存前の言葉でもよい。
 pub async fn aizuchi_preview(
     settings_path: &Path,
     agent_id: &str,
-    text: &str,
+    word: impl Into<AizuchiWord>,
 ) -> Result<Preview, PreviewError> {
-    let word = text.trim().to_string();
+    let mut item: AizuchiWord = word.into();
+    item.text = item.text.trim().to_string();
+    let word = item.text.clone();
     AizuchiConfig {
         enabled: true,
-        question: vec![word.clone()],
+        question: vec![item.clone()],
         statement: Vec::new(),
     }
     .validate()
@@ -64,7 +67,7 @@ pub async fn aizuchi_preview(
     let settings = load_settings(settings_path)
         .map_err(|e| PreviewError::Engine("読み上げ", format!("{e:#}")))?;
     let tts = settings.tts;
-    let choice = tts.choice_for_agent(agent_id);
+    let choice = item.voice_choice(&tts.choice_for_agent(agent_id));
     let engine = match choice.engine {
         TtsEngine::Voicevox => "VOICEVOX",
         TtsEngine::ZenTts => "ZEN-TTS",
@@ -116,6 +119,10 @@ fn word_rule(reason: &str) -> String {
         format!("{}文字までです", super::aizuchi::MAX_WORD_CHARS)
     } else if reason.contains("control") {
         "改行や制御文字は使えません".into()
+    } else if reason.contains("pitch") || reason.contains("length") || reason.contains("accent") {
+        "言い方の高さ・長さが範囲を超えています".into()
+    } else if reason.contains("reading") {
+        "言い方には読みが要ります".into()
     } else {
         reason.into()
     }

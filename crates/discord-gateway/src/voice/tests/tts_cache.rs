@@ -13,7 +13,11 @@ use crate::voice::tts_cache::{cache_key, TtsCache, DISK_LIMIT_BYTES, MEMORY_LIMI
 
 /// 既定の相づち設定での先読み本文。
 fn prewarm_phrases() -> Vec<String> {
-    AizuchiConfig::default().prewarm_phrases()
+    AizuchiConfig::default()
+        .prewarm_phrases()
+        .into_iter()
+        .map(|p| p.text)
+        .collect()
 }
 
 /// 設定にあるスタイル（既定 3 と agent の 8）すべての先読み件数。
@@ -97,7 +101,7 @@ async fn t2_a_different_style_misses() {
     let synthesizer = Synthesizer::new(
         crate::voice::clients::http_client(),
         TtsCache::open(dir.path().join("c"), MEMORY_LIMIT_BYTES, DISK_LIMIT_BYTES),
-        prewarm_phrases(),
+        AizuchiConfig::default().prewarm_phrases(),
     );
     let settings = VoiceSettings::from_json(&mock_http::settings_json(&mock)).unwrap();
     synthesizer.refresh(&settings.tts).await;
@@ -256,7 +260,7 @@ async fn t6_a_live_job_is_synthesized_before_queued_prewarm_jobs() {
     let synthesizer = Synthesizer::new(
         crate::voice::clients::http_client(),
         TtsCache::open(dir.path().join("c"), MEMORY_LIMIT_BYTES, DISK_LIMIT_BYTES),
-        prewarm_phrases(),
+        AizuchiConfig::default().prewarm_phrases(),
     );
     let settings = VoiceSettings::from_json(&mock_http::settings_json(&mock)).unwrap();
     synthesizer.refresh(&settings.tts).await;

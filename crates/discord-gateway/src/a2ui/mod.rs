@@ -235,7 +235,7 @@ impl A2ui {
             "surface_id": format!("interaction:{ui_id}"),
             "message_id": message_id,
             "status": "pending",
-            "message": "UIを送信しました。ユーザーの応答を待機中...",
+            "message": "UIはチャンネルに表示済み。応答は、操作されたときに新しい発言としてこの会話に届く。",
         }))
     }
 

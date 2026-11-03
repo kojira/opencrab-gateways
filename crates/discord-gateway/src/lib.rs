@@ -9,6 +9,7 @@
 //! 秘密（bot token）は gateway process env のみ（[`secret`]）。QC は fixture 注入 + dry-run の
 //! オフライン E2E（[`harness`]）で実配線を回す（Nostr の偽watch 相当）。
 
+pub mod a2ui;
 pub mod admin;
 pub mod admin_settings;
 pub mod attachment;

@@ -67,7 +67,14 @@ fn reply_declares_files_only_when_outbox_is_configured() {
         .collect();
     assert_eq!(
         names,
-        vec!["join_voice", "leave_voice", "reaction", "reply", "resolve"]
+        vec![
+            "join_voice",
+            "leave_voice",
+            "reaction",
+            "reply",
+            "resolve",
+            "send_ui"
+        ]
     );
     let with = reply_decl(&decls);
     let files = &with["input_schema"]["properties"]["files"];

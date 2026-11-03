@@ -217,6 +217,9 @@ impl EventHandler for Forwarder {
                 .or_else(|| thinking_interaction_to_line(&command))
                 .or_else(|| webhook_interaction_to_line(&command)),
             Interaction::Autocomplete(command) => model_interaction_to_line(&command, true),
+            // A2UI（send_ui）のボタン・セレクト・モーダル（D-1110）。
+            Interaction::Component(component) => crate::a2ui::event::component_line(&component),
+            Interaction::Modal(modal) => crate::a2ui::event::modal_line(&modal),
             _ => None,
         };
         if let Some(line) = line {

@@ -119,12 +119,16 @@ pub fn spawn_instance_with_voice(
         });
     let delivery_targets: SessionDeliveryTargets =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    // D-1110: A2UI keeps its pending UIs in the gateway DB (the same file as the activity routes).
+    let a2ui =
+        crate::a2ui::for_instance(&cfg, serenity_http.as_ref(), activity_store_path.as_deref());
     let invoke_handler = DiscordInvokeHandler::with_voice(
         transport.clone(),
         Arc::clone(&delivery_targets),
         voice.clone(),
     )
-    .with_outbox_root(attachment_outbox_root.clone());
+    .with_outbox_root(attachment_outbox_root.clone())
+    .with_a2ui(a2ui.clone());
 
     // D-1091: the environment the operator declared for this instance (empty = the previous
     // frame). Names only in the log; the values never reach a log line.
@@ -150,6 +154,10 @@ pub fn spawn_instance_with_voice(
     );
     if let Some(voice) = &voice {
         voice.attach_client(client.clone());
+    }
+    if let Some(a2ui) = &a2ui {
+        a2ui.attach_client(client.clone());
+        a2ui.resume_pending();
     }
 
     let attachment_spool = attachment_spool_root
@@ -184,6 +192,7 @@ pub fn spawn_instance_with_voice(
         songbird: voice.as_ref().and(songbird),
         voice,
         activity_store,
+        a2ui,
     });
     Ok(client)
 }
@@ -203,6 +212,7 @@ struct Supervision {
     songbird: Option<Arc<songbird::Songbird>>,
     voice: Option<Arc<VoiceManager>>,
     activity_store: Option<crate::webhook::RouteStore>,
+    a2ui: Option<Arc<crate::a2ui::A2ui>>,
 }
 
 fn supervise(supervision: Supervision) {
@@ -221,6 +231,7 @@ fn supervise(supervision: Supervision) {
         songbird,
         voice,
         activity_store,
+        a2ui,
     } = supervision;
     // D-1087: 活動の配送口（宛先は gateway の DB、core は知らない）。
     let activity = activity_store
@@ -244,7 +255,7 @@ fn supervise(supervision: Supervision) {
         cfg.access.clone(),
         attachment_spool,
         serenity_http,
-        voice.clone(),
+        (voice.clone(), a2ui),
         (
             activity_store.clone(),
             listening,
@@ -289,7 +300,7 @@ fn build_on_line(
     access: AccessConfig,
     attachment_spool: Option<Arc<AttachmentSpool>>,
     serenity_http: Option<Arc<serenity::http::Http>>,
-    voice: Option<Arc<VoiceManager>>,
+    (voice, a2ui): (Option<Arc<VoiceManager>>, Option<Arc<crate::a2ui::A2ui>>),
     (activity_store, listening, channel_socket, say_consumers): ChannelParts,
 ) -> OnLine {
     let model_cache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -302,11 +313,19 @@ fn build_on_line(
         let serenity_http = serenity_http.clone();
         let model_cache = model_cache.clone();
         let voice = voice.clone();
+        let a2ui = a2ui.clone();
         let activity_store = activity_store.clone();
         let channel_socket = channel_socket.clone();
         let say_consumers = say_consumers.clone();
         let listening = listening.clone();
         tokio::spawn(async move {
+            // D-1110: a click on a send_ui component.
+            if let Some(event) = crate::a2ui::event::InteractionEvent::parse(&line) {
+                if let Some(a2ui) = &a2ui {
+                    a2ui.handle_interaction(event).await;
+                }
+                return;
+            }
             // Slash commands answer in the channels this bot listens to right now.
             let configured_addresses: Vec<String> = listening
                 .read()

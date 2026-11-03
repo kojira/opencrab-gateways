@@ -13,7 +13,14 @@ fn voice_operations_are_declared_for_owner_co_agent_trusted_only() {
     let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        vec!["join_voice", "leave_voice", "reaction", "reply", "resolve"]
+        vec![
+            "join_voice",
+            "leave_voice",
+            "reaction",
+            "reply",
+            "resolve",
+            "send_ui"
+        ]
     );
     for name in ["join_voice", "leave_voice"] {
         let d = arr.iter().find(|d| d["name"] == name).unwrap();

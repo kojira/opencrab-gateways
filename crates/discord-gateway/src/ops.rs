@@ -119,6 +119,7 @@ pub fn operation_declarations(reply_files: bool) -> Value {
             "background",
             "read_only",
         ),
+        crate::a2ui::send_ui_declaration(),
     ])
 }
 
@@ -145,6 +146,8 @@ pub struct DiscordInvokeHandler {
     voice: Option<Arc<VoiceManager>>,
     /// core の outbox（`attachment_outbox_root`）。None なら reply の `files` は Rejected。
     outbox_root: Option<PathBuf>,
+    /// A2UI（`send_ui`・D-1110）。None なら send_ui は理由を返す。
+    a2ui: Option<Arc<crate::a2ui::A2ui>>,
 }
 
 impl DiscordInvokeHandler {
@@ -162,12 +165,19 @@ impl DiscordInvokeHandler {
             targets,
             voice,
             outbox_root: None,
+            a2ui: None,
         }
     }
 
     /// reply の `files` を読む core の outbox を設定する（D-1079）。
     pub fn with_outbox_root(mut self, outbox_root: Option<PathBuf>) -> Self {
         self.outbox_root = outbox_root;
+        self
+    }
+
+    /// `send_ui` の描画と応答の受け口（D-1110）。
+    pub fn with_a2ui(mut self, a2ui: Option<Arc<crate::a2ui::A2ui>>) -> Self {
+        self.a2ui = a2ui;
         self
     }
 }
@@ -326,6 +336,12 @@ impl InvokeHandler for DiscordInvokeHandler {
                 };
                 voice_outcome(voice.leave(session_key).await)
             }
+            "send_ui" => match &self.a2ui {
+                Some(a2ui) => a2ui.send_ui(session_key, payload).await,
+                None => InvokeOutcome::Ok(
+                    json!({"ok": false, "error": "UI is not available in this gateway"}),
+                ),
+            },
             // 宣言外は正常な core からは来ない。fail-closed（§5.1）。
             _ => InvokeOutcome::Rejected,
         }
@@ -349,18 +365,31 @@ mod tests {
     fn declarations_are_sorted_and_callback_free() {
         let decls = operation_declarations(false);
         let arr = decls.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(arr.len(), 6);
         let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "name UTF-8 昇順（DESIGN-DI §3.1）");
         assert_eq!(
             names,
-            vec!["join_voice", "leave_voice", "reaction", "reply", "resolve"]
+            vec![
+                "join_voice",
+                "leave_voice",
+                "reaction",
+                "reply",
+                "resolve",
+                "send_ui"
+            ]
         );
         for d in arr {
             assert!(d["callback_schema"].is_null(), "フェーズ1は callback なし");
-            assert_eq!(d["sub_engine"], "not_exposed");
+            // send_ui は旧 core と同じく sub-engine から遮断（blocked）。
+            let expected = if d["name"] == "send_ui" {
+                "blocked"
+            } else {
+                "not_exposed"
+            };
+            assert_eq!(d["sub_engine"], expected);
             assert_eq!(d["sharing"], "conversation_bound");
             assert!(d["authorization"]["allowed_callers"].is_array());
         }

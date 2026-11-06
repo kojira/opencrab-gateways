@@ -13,6 +13,12 @@ fn d1110_core_accepts_the_discord_operations_with_send_ui() {
             .find(|d| d.name == "send_ui")
             .expect("send_ui is declared");
         assert_eq!(send_ui.policy.dispatch.as_str(), "inline");
+        // D-1121: say is a valid utterance operation for core.
+        let say = decls
+            .iter()
+            .find(|d| d.name == "say")
+            .expect("say is declared");
+        assert_eq!(say.policy.dispatch.as_str(), "utterance");
         opencrab_extgate::operations::validate_runtime_compatibility(
             &decls,
             opencrab_extgate::operations::FinalDelivery::OperationDriven,

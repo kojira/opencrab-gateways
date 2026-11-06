@@ -1,10 +1,11 @@
 //! Discord gateway の DI 能力宣言と invoke handler（設計 §7・§9A / DESIGN-DI-EXTENSION §3/§5）。
 //!
-//! フェーズ1最小の callback なし能力: `reaction` / `reply` / `resolve`（name UTF-8 昇順）。全 write は
+//! フェーズ1最小の callback なし能力: `reaction` / `reply` / `resolve` / `say`（name UTF-8 昇順）。全 write は
 //! 非同期・callback なし（`callback_schema=null`）。core は常時 detach で invoke し、決着を次 turn が
 //! 消費する。短縮参照(uN/eN)は core が origin/snowflake へ解決済みで payload に入る（`"format":
 //! "short-ref"` 標示 field のみ）。gateway は origin → (channel,message) を導いて REST を叩く（層分離）。
-//! 通常発言（say）は能力ではなく素の本文＝[`crate::post`]。system reaction と emoji 詳細スキーマは
+//! 素の本文は通常発言（[`crate::post`]）。`say` 能力は同じ送信経路で通常発言を送る（D-1121。サブタスクなど
+//! 素の本文が配送されない走行からも投稿できるように）。system reaction と emoji 詳細スキーマは
 //! D17-05/D17-12（profile data）裁定後の後続スライス。
 
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ use opencrab_gate_client::{InvokeHandler, InvokeOutcome};
 
 use crate::map::parse_origin;
 use crate::reply_files::load_reply_files;
-use crate::transport::{DiscordTransport, ReplyFile, TransportOutcome};
+use crate::transport::{DiscordTransport, TransportOutcome};
 use crate::voice::session::VoiceManager;
 
 /// #915: 1 binding 内の発話 id → Discord 投稿先。発話 id は既存の say delivery_id /
@@ -119,20 +120,40 @@ pub fn operation_declarations(reply_files: bool) -> Value {
             "background",
             "read_only",
         ),
+        decl(
+            "say",
+            "返信ではない新しい発言を、この会話のチャンネルに投稿する。text に本文。ツールを使わずに本文を書いても同じく新しい発言として投稿される。結果は返らない。この呼び出しだけではターンは終わらない。これで終えるなら、同じ応答の最後の行に NO_REPLY だけを書く。This posts a new standalone message in this conversation's channel (not a reply). Writing plain text without any tool is also posted the same way. This call returns nothing. It does not end the turn by itself; to end the turn, write NO_REPLY alone on the final line of this same response.",
+            say_input(reply_files),
+            "utterance",
+            "utterance",
+        ),
         crate::a2ui::send_ui_declaration(),
     ])
 }
 
 /// reply の input_schema。`files` は outbox があるときだけ宣言する。
 fn reply_input(reply_files: bool) -> Value {
-    let mut input = json!({"type": "object", "required": ["event", "text"], "properties": {
+    let input = json!({"type": "object", "required": ["event", "text"], "properties": {
         "event": {"type": "string", "description": "返信先メッセージの短縮参照（例 e7）", "format": "short-ref"},
         "text": {"type": "string", "description": "返信本文"}
     }});
-    if reply_files {
+    with_files(input, reply_files, "返信")
+}
+
+/// say の input_schema（D-1121）。`files` は reply と同じ形で、outbox があるときだけ宣言する。
+fn say_input(reply_files: bool) -> Value {
+    let input = json!({"type": "object", "required": ["text"], "properties": {
+        "text": {"type": "string", "description": "投稿本文（2000字を超えると分けて投稿する）"}
+    }});
+    with_files(input, reply_files, "投稿")
+}
+
+/// reply / say 共通の `files`（ワークスペースのファイル・D-1079）を足す。
+fn with_files(mut input: Value, files: bool, what: &str) -> Value {
+    if files {
         input["properties"]["files"] = json!({
             "type": "array",
-            "description": "返信に添付するワークスペースのファイル（ワークスペースからの相対パス・最大10個）。Workspace-relative paths of files to attach to this reply (at most 10).",
+            "description": format!("{what}に添付するワークスペースのファイル（ワークスペースからの相対パス・最大10個）。Workspace-relative paths of files to attach (at most 10)."),
             "items": {"type": "string", "format": "workspace-file"}
         });
     }
@@ -148,6 +169,8 @@ pub struct DiscordInvokeHandler {
     outbox_root: Option<PathBuf>,
     /// A2UI（`send_ui`・D-1110）。None なら send_ui は理由を返す。
     a2ui: Option<Arc<crate::a2ui::A2ui>>,
+    /// この instance の agent。`say` が session key（binding address）から channel を引くのに使う。
+    agent_id: Option<String>,
 }
 
 impl DiscordInvokeHandler {
@@ -166,6 +189,7 @@ impl DiscordInvokeHandler {
             voice,
             outbox_root: None,
             a2ui: None,
+            agent_id: None,
         }
     }
 
@@ -173,6 +197,39 @@ impl DiscordInvokeHandler {
     pub fn with_outbox_root(mut self, outbox_root: Option<PathBuf>) -> Self {
         self.outbox_root = outbox_root;
         self
+    }
+
+    /// `say` の送り先（session key の channel）を引くための agent（D-1121）。
+    pub fn with_agent_id(mut self, agent_id: &str) -> Self {
+        self.agent_id = Some(agent_id.to_string());
+        self
+    }
+
+    /// 投稿できた発話の後始末（reply / say 共通）: VC で読み上げ、発話 id → 投稿先を記録する。
+    async fn after_post(
+        &self,
+        call_id: &str,
+        session_key: &str,
+        channel: &str,
+        text: &str,
+        outcome: TransportOutcome,
+    ) -> InvokeOutcome {
+        if let TransportOutcome::Ok(result) = &outcome {
+            if let Some(voice) = &self.voice {
+                voice.speak_posted(channel, text);
+            }
+            if let Some(message_id) = result.get("message_id").and_then(Value::as_str) {
+                targets_for(&self.targets, session_key)
+                    .await
+                    .lock()
+                    .await
+                    .insert(
+                        call_id.to_string(),
+                        (channel.to_string(), message_id.to_string()),
+                    );
+            }
+        }
+        to_invoke_outcome(outcome)
     }
 
     /// `send_ui` の描画と応答の受け口（D-1110）。
@@ -203,50 +260,6 @@ fn to_invoke_outcome(out: TransportOutcome) -> InvokeOutcome {
     }
 }
 
-/// reply DI 本文を Discord 上限で分割して配送する。
-///
-/// 設計 §6.2 は reply の exact API payload / result shape を**要裁定・未確認**とするため、ここは
-/// 最小として delivery canon の「長文 chunk」を say と同じ規則（[`crate::post::split_for_discord`]）で
-/// 適用する。分割時は **先頭チャンクだけを reply（reference 付き）**、以降は同 channel の通常投稿として
-/// **発生順に逐次**送る。fail-fast（既送分はそのまま・以降送らない・自動再送 0）。返す result は say と
-/// 同じく**最後のチャンク**の outcome（message id）。※ 分割時に返す eN が「返信そのもの」ではなく
-/// 末尾の続きメッセージを指す点は要裁定（統括判断）。
-async fn deliver_reply(
-    transport: &Arc<dyn DiscordTransport>,
-    channel_id: &str,
-    message_id: &str,
-    text: &str,
-    files: Vec<ReplyFile>,
-) -> TransportOutcome {
-    let mut last: Option<TransportOutcome> = None;
-    // 添付は先頭チャンク（返信）にだけ付ける。
-    let mut files = Some(files).filter(|f| !f.is_empty());
-    for (i, chunk) in crate::post::split_for_discord(text).into_iter().enumerate() {
-        let out = if i == 0 {
-            match files.take() {
-                Some(files) => {
-                    transport
-                        .reply_message_with_files(channel_id, message_id, &chunk, files)
-                        .await
-                }
-                None => {
-                    transport
-                        .reply_message(channel_id, message_id, &chunk)
-                        .await
-                }
-            }
-        } else {
-            transport.create_message(channel_id, &chunk).await
-        };
-        match out {
-            ok @ TransportOutcome::Ok(_) => last = Some(ok),
-            // fail-fast: Rejected / Indeterminate はそのまま返し以降のチャンクは送らない。
-            other => return other,
-        }
-    }
-    last.unwrap_or(TransportOutcome::Rejected)
-}
-
 #[async_trait]
 impl InvokeHandler for DiscordInvokeHandler {
     async fn handle(
@@ -270,20 +283,27 @@ impl InvokeHandler for DiscordInvokeHandler {
                 else {
                     return InvokeOutcome::Rejected;
                 };
-                let outcome = deliver_reply(&self.transport, &ch, &msg, text, files).await;
-                if let (TransportOutcome::Ok(_), Some(voice)) = (&outcome, &self.voice) {
-                    voice.speak_posted(&ch, text);
-                }
-                if let TransportOutcome::Ok(result) = &outcome {
-                    if let Some(message_id) = result.get("message_id").and_then(Value::as_str) {
-                        targets_for(&self.targets, session_key)
-                            .await
-                            .lock()
-                            .await
-                            .insert(call_id.to_string(), (ch.clone(), message_id.to_string()));
-                    }
-                }
-                to_invoke_outcome(outcome)
+                let outcome =
+                    crate::post::deliver(&self.transport, &ch, Some(&msg), text, files).await;
+                self.after_post(call_id, session_key, &ch, text, outcome)
+                    .await
+            }
+            "say" => {
+                let Some(text) = str_field(payload, "text").filter(|t| !t.trim().is_empty()) else {
+                    return InvokeOutcome::Rejected;
+                };
+                let Some(ch) = self.agent_id.as_deref().and_then(|agent| {
+                    crate::map::parse_address(agent, session_key).map(|(_, channel)| channel)
+                }) else {
+                    return InvokeOutcome::Rejected;
+                };
+                let Some(files) = load_reply_files(payload, self.outbox_root.as_deref()).await
+                else {
+                    return InvokeOutcome::Rejected;
+                };
+                let outcome = crate::post::deliver(&self.transport, &ch, None, text, files).await;
+                self.after_post(call_id, session_key, &ch, text, outcome)
+                    .await
             }
             "reaction" => {
                 let (Some(event), Some(emoji)) =
@@ -365,7 +385,7 @@ mod tests {
     fn declarations_are_sorted_and_callback_free() {
         let decls = operation_declarations(false);
         let arr = decls.as_array().unwrap();
-        assert_eq!(arr.len(), 6);
+        assert_eq!(arr.len(), 7);
         let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -378,6 +398,7 @@ mod tests {
                 "reaction",
                 "reply",
                 "resolve",
+                "say",
                 "send_ui"
             ]
         );
@@ -393,7 +414,7 @@ mod tests {
             assert_eq!(d["sharing"], "conversation_bound");
             assert!(d["authorization"]["allowed_callers"].is_array());
         }
-        for name in ["reaction", "reply"] {
+        for name in ["reaction", "reply", "say"] {
             let description = arr
                 .iter()
                 .find(|d| d["name"] == name)
@@ -550,10 +571,10 @@ mod tests {
     async fn short_reply_is_single_reply_call() {
         use crate::transport::testfake::RecordingTransport;
         let rec = Arc::new(RecordingTransport::default());
-        let out = deliver_reply(
+        let out = crate::post::deliver(
             &(rec.clone() as Arc<dyn DiscordTransport>),
             "100",
-            "200",
+            Some("200"),
             "hi",
             Vec::new(),
         )
@@ -567,10 +588,10 @@ mod tests {
         use crate::transport::testfake::RecordingTransport;
         let rec = Arc::new(RecordingTransport::default());
         // 2500 字 → 2 チャンク: [0]=reply(reference 付き) / [1]=通常投稿。
-        let out = deliver_reply(
+        let out = crate::post::deliver(
             &(rec.clone() as Arc<dyn DiscordTransport>),
             "100",
-            "200",
+            Some("200"),
             &"あ".repeat(2500),
             Vec::new(),
         )
@@ -601,10 +622,10 @@ mod tests {
             fail_at: Some(1),
             ..Default::default()
         });
-        let out = deliver_reply(
+        let out = crate::post::deliver(
             &(rec.clone() as Arc<dyn DiscordTransport>),
             "100",
-            "200",
+            Some("200"),
             &"い".repeat(5000),
             Vec::new(),
         )

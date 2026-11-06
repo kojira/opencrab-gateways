@@ -73,6 +73,7 @@ fn reply_declares_files_only_when_outbox_is_configured() {
             "reaction",
             "reply",
             "resolve",
+            "say",
             "send_ui"
         ]
     );
@@ -278,4 +279,101 @@ fn size_cap_is_checked_on_descriptors_before_reading() {
         descriptor(1),
         descriptor(MAX_REPLY_FILE_BYTES + 1)
     ]));
+}
+
+// ---- D-1121: say（返信ではない新しい発言） ----
+
+const AGENT: &str = "agent-a";
+const SESSION: &str = "discord-agent-a-100-200";
+
+fn say_handler(rec: &Arc<RecordingTransport>, outbox: Option<&Path>) -> DiscordInvokeHandler {
+    handler(rec, outbox).with_agent_id(AGENT)
+}
+
+#[test]
+fn say_is_declared_like_reply_and_files_follow_the_outbox() {
+    for files in [false, true] {
+        let decls = operation_declarations(files);
+        let say = decls
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == "say")
+            .expect("say is declared")
+            .clone();
+        let reply = reply_decl(&decls);
+        for key in [
+            "dispatch",
+            "effect",
+            "sub_engine",
+            "sharing",
+            "authorization",
+        ] {
+            assert_eq!(say[key], reply[key], "{key}");
+        }
+        assert_eq!(say["input_schema"]["required"], json!(["text"]));
+        let files_of = |d: &Value| {
+            d["input_schema"]["properties"].get("files").map(|f| {
+                let mut f = f.clone();
+                f.as_object_mut().unwrap().remove("description");
+                f
+            })
+        };
+        assert_eq!(files_of(&say), files_of(&reply), "files は reply と同じ形");
+        assert_eq!(files_of(&say).is_some(), files);
+    }
+}
+
+#[tokio::test]
+async fn say_posts_to_the_sessions_channel_through_the_plain_say_path() {
+    let rec = Arc::new(RecordingTransport::default());
+    let out = say_handler(&rec, None)
+        .handle("c1", SESSION, "say", &json!({"text": "ひとこと"}))
+        .await;
+    assert!(matches!(out, InvokeOutcome::Ok(_)), "Ok で返る");
+    assert_eq!(rec.kinds(), vec!["say"], "返信ではない通常投稿");
+    assert_eq!(rec.bodies(), vec!["ひとこと".to_string()]);
+    // 長文は素の say と同じく分割して逐次投稿する。
+    let rec = Arc::new(RecordingTransport::default());
+    say_handler(&rec, None)
+        .handle("c2", SESSION, "say", &json!({"text": "あ".repeat(2500)}))
+        .await;
+    assert_eq!(rec.kinds(), vec!["say", "say"]);
+    assert_eq!(rec.bodies().concat(), "あ".repeat(2500));
+}
+
+#[tokio::test]
+async fn say_attaches_files_to_the_first_message_only() {
+    let outbox = tempfile::tempdir().unwrap();
+    let a = stage(outbox.path(), "a.png", b"first-image");
+    let rec = Arc::new(RecordingTransport::default());
+    let out = say_handler(&rec, Some(outbox.path()))
+        .handle(
+            "c1",
+            SESSION,
+            "say",
+            &json!({"text": "い".repeat(2500), "files": [a]}),
+        )
+        .await;
+    assert!(matches!(out, InvokeOutcome::Ok(_)));
+    assert_eq!(rec.kinds(), vec!["say", "say"], "返信は付かない");
+    assert_eq!(
+        rec.file_names(),
+        vec![vec!["a.png".to_string()], vec![]],
+        "添付は先頭の投稿にだけ付く"
+    );
+}
+
+#[tokio::test]
+async fn say_without_a_channel_or_text_sends_nothing() {
+    let rec = Arc::new(RecordingTransport::default());
+    // agent が分からない（session key から channel を引けない）。
+    let out = handler(&rec, None)
+        .handle("c1", SESSION, "say", &json!({"text": "hi"}))
+        .await;
+    assert_rejected_without_transport(&rec, out).await;
+    let out = say_handler(&rec, None)
+        .handle("c2", SESSION, "say", &json!({"text": "  "}))
+        .await;
+    assert_rejected_without_transport(&rec, out).await;
 }

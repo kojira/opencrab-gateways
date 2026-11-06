@@ -19,6 +19,7 @@ fn voice_operations_are_declared_for_owner_co_agent_trusted_only() {
             "reaction",
             "reply",
             "resolve",
+            "say",
             "send_ui"
         ]
     );

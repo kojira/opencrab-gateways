@@ -38,11 +38,12 @@ pub trait DiscordTransport: Send + Sync {
         message_id: &str,
         content: &str,
     ) -> TransportOutcome;
-    /// ファイル付きの返信（reply DI の `files`）。全ファイルを 1 通の返信に添付する。
-    async fn reply_message_with_files(
+    /// ファイル付きの投稿（reply / say DI の `files`）。全ファイルを 1 通に添付する。`reply_to` が
+    /// あればその message への返信、無ければ channel への通常投稿。
+    async fn send_with_files(
         &self,
         channel_id: &str,
-        message_id: &str,
+        reply_to: Option<&str>,
         content: &str,
         files: Vec<ReplyFile>,
     ) -> TransportOutcome;
@@ -137,31 +138,32 @@ impl DiscordTransport for DryRunTransport {
         );
         TransportOutcome::Ok(json!({"dry_run": true, "kind": "reply", "message_id": own_id}))
     }
-    async fn reply_message_with_files(
+    async fn send_with_files(
         &self,
         channel_id: &str,
-        message_id: &str,
+        reply_to: Option<&str>,
         content: &str,
         files: Vec<ReplyFile>,
     ) -> TransportOutcome {
         // ファイルの中身はログに出さない（名前・サイズ・sha256 だけ）。
         let own_id = next_dry_run_message_id();
+        let kind = if reply_to.is_some() { "reply" } else { "say" };
         let files: Vec<serde_json::Value> = files
             .iter()
             .map(|f| json!({"name": f.name, "size": f.bytes.len(), "sha256": f.sha256}))
             .collect();
         tracing::info!(
             target: DRY_RUN_LOG_TARGET,
-            kind = "reply",
+            kind,
             channel = channel_id,
-            message = message_id,
+            message = reply_to.unwrap_or(&own_id),
             reply_id = %own_id,
             emoji = "",
             body = %content,
             files = %serde_json::Value::Array(files),
             "DRY_RUN discord op (not sent)"
         );
-        TransportOutcome::Ok(json!({"dry_run": true, "kind": "reply", "message_id": own_id}))
+        TransportOutcome::Ok(json!({"dry_run": true, "kind": kind, "message_id": own_id}))
     }
     async fn add_reaction(
         &self,
@@ -275,25 +277,28 @@ impl DiscordTransport for SerenityTransport {
         }
     }
 
-    async fn reply_message_with_files(
+    async fn send_with_files(
         &self,
         channel_id: &str,
-        message_id: &str,
+        reply_to: Option<&str>,
         content: &str,
         files: Vec<ReplyFile>,
     ) -> TransportOutcome {
-        let (Some(ch), Some(mid)) = (channel(channel_id), message(message_id)) else {
+        let Some(ch) = channel(channel_id) else {
             return TransportOutcome::Rejected;
         };
         // サイズ超過（413）や添付権限なし（403）は classify_write_err で Rejected になる。
-        let builder = CreateMessage::new()
-            .content(content)
-            .reference_message((ch, mid))
-            .add_files(
-                files
-                    .into_iter()
-                    .map(|f| CreateAttachment::bytes(f.bytes, f.name)),
-            );
+        let mut builder = CreateMessage::new().content(content).add_files(
+            files
+                .into_iter()
+                .map(|f| CreateAttachment::bytes(f.bytes, f.name)),
+        );
+        if let Some(reply_to) = reply_to {
+            let Some(mid) = message(reply_to) else {
+                return TransportOutcome::Rejected;
+            };
+            builder = builder.reference_message((ch, mid));
+        }
         match ch.send_message(&self.http, builder).await {
             Ok(m) => TransportOutcome::Ok(json!({"message_id": m.id.get().to_string()})),
             Err(e) => classify_write_err(&e),
@@ -407,7 +412,7 @@ pub(crate) mod testfake {
     #[derive(Default)]
     pub(crate) struct RecordingTransport {
         /// (kind, body) の呼び出し列。kind は "say"（create_message）/ "reply"（reply_message・
-        /// reply_message_with_files）。
+        /// send_with_files）。
         pub calls: Mutex<Vec<(String, String)>>,
         /// 呼び出しごとの添付ファイル名（calls と同じ index・添付なしは空）。
         pub files: Mutex<Vec<Vec<String>>>,
@@ -484,15 +489,16 @@ pub(crate) mod testfake {
         ) -> TransportOutcome {
             self.record_write("reply", content)
         }
-        async fn reply_message_with_files(
+        async fn send_with_files(
             &self,
             _channel_id: &str,
-            _message_id: &str,
+            reply_to: Option<&str>,
             content: &str,
             files: Vec<ReplyFile>,
         ) -> TransportOutcome {
             let names = files.into_iter().map(|f| f.name).collect();
-            self.record_write_with_files("reply", content, names)
+            let kind = if reply_to.is_some() { "reply" } else { "say" };
+            self.record_write_with_files(kind, content, names)
         }
         async fn add_reaction(&self, _c: &str, _m: &str, _e: &str) -> TransportOutcome {
             TransportOutcome::Ok(json!({"reacted": true}))

@@ -128,7 +128,8 @@ pub fn spawn_instance_with_voice(
         voice.clone(),
     )
     .with_outbox_root(attachment_outbox_root.clone())
-    .with_a2ui(a2ui.clone());
+    .with_a2ui(a2ui.clone())
+    .with_agent_id(&cfg.agent_id);
 
     // D-1091: the environment the operator declared for this instance (empty = the previous
     // frame). Names only in the log; the values never reach a log line.

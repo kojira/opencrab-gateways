@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::transport::{DiscordTransport, TransportOutcome};
+use crate::transport::{DiscordTransport, ReplyFile, TransportOutcome};
 
 /// Discord の 1 メッセージ最大文字数（コードポイント数）。超過分は分割送信する。
 pub(crate) const DISCORD_MAX_CHARS: usize = 2000;
@@ -28,27 +28,57 @@ pub enum SayDelivery {
 
 /// say を channel の通常投稿として配送する。`channel_id` は binding address から解決する。
 ///
-/// 旧 `discord::gateway::send_to_channel` と同じ流儀:
-/// 分割チャンクを**発生順に逐次投稿**し、途中失敗は **fail-fast**（既送分はそのまま・以降は
-/// 送らない・自動再送 0＝§6.4-4）。返す message id は成功時の**最後のチャンク**のもの。
+/// 送り方は [`deliver`]（reply / say DI と同じ 1 本の送信経路）。返す message id は成功時の
+/// **最後のチャンク**のもの。
 pub async fn deliver_say(
     transport: &Arc<dyn DiscordTransport>,
     channel_id: &str,
     text: &str,
 ) -> SayDelivery {
-    // create_message の Ok は投稿できたメッセージ id を載せる（production=serenity 実 id・
-    // dry-run=合成 id）。分割時は最後の成功チャンクの id を対応表へ返す。
-    let mut last_id = None;
-    for chunk in split_for_discord(text) {
-        match transport.create_message(channel_id, &chunk).await {
-            TransportOutcome::Ok(v) => last_id = message_id_of(&v),
-            TransportOutcome::Rejected => return SayDelivery::Failed("rejected".into()),
-            TransportOutcome::Indeterminate => return SayDelivery::Failed("indeterminate".into()),
+    match deliver(transport, channel_id, None, text, Vec::new()).await {
+        TransportOutcome::Ok(v) => SayDelivery::Posted {
+            message_id: message_id_of(&v),
+        },
+        TransportOutcome::Rejected => SayDelivery::Failed("rejected".into()),
+        TransportOutcome::Indeterminate => SayDelivery::Failed("indeterminate".into()),
+    }
+}
+
+/// 本文を Discord 上限で分割して channel へ送る（素の say・say DI・reply DI の共通の送信経路）。
+///
+/// 旧 `discord::gateway::send_to_channel` と同じ流儀: 分割チャンクを**発生順に逐次投稿**し、
+/// 途中失敗は **fail-fast**（既送分はそのまま・以降は送らない・自動再送 0＝§6.4-4）。
+/// `reply_to` があれば先頭チャンクだけをその message への返信にし、以降は同 channel の通常投稿。
+/// `files` は先頭チャンクにだけ添付する。返す outcome は**最後のチャンク**のもの（message id）。
+pub(crate) async fn deliver(
+    transport: &Arc<dyn DiscordTransport>,
+    channel_id: &str,
+    reply_to: Option<&str>,
+    text: &str,
+    files: Vec<ReplyFile>,
+) -> TransportOutcome {
+    let mut last: Option<TransportOutcome> = None;
+    let mut files = Some(files).filter(|f| !f.is_empty());
+    for (i, chunk) in split_for_discord(text).into_iter().enumerate() {
+        let out = match (i, files.take(), reply_to) {
+            (0, Some(files), reply_to) => {
+                transport
+                    .send_with_files(channel_id, reply_to, &chunk, files)
+                    .await
+            }
+            (0, None, Some(message_id)) => {
+                transport
+                    .reply_message(channel_id, message_id, &chunk)
+                    .await
+            }
+            _ => transport.create_message(channel_id, &chunk).await,
+        };
+        match out {
+            ok @ TransportOutcome::Ok(_) => last = Some(ok),
+            other => return other,
         }
     }
-    SayDelivery::Posted {
-        message_id: last_id,
-    }
+    last.unwrap_or(TransportOutcome::Rejected)
 }
 
 /// `TransportOutcome::Ok` の JSON から message_id を取り出す（欠落時は `None`。production=serenity

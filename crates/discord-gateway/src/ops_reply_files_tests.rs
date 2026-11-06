@@ -283,9 +283,8 @@ fn size_cap_is_checked_on_descriptors_before_reading() {
 
 // ---- D-1121: say（返信ではない新しい発言） ----
 
-const AGENT: &str = "c56f19e0-095b-43b7-b8c1-78dff6cf4f6d";
-const SESSION: &str =
-    "discord-c56f19e0-095b-43b7-b8c1-78dff6cf4f6d-1465697209541726362-1541924559815442573";
+const AGENT: &str = "agent-a";
+const SESSION: &str = "discord-agent-a-100-200";
 
 fn say_handler(rec: &Arc<RecordingTransport>, outbox: Option<&Path>) -> DiscordInvokeHandler {
     handler(rec, outbox).with_agent_id(AGENT)

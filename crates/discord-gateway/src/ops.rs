@@ -20,7 +20,7 @@ use opencrab_gate_client::{InvokeHandler, InvokeOutcome};
 
 use crate::map::parse_origin;
 use crate::reply_files::load_reply_files;
-use crate::transport::{DiscordTransport, ReplyFile, TransportOutcome};
+use crate::transport::{DiscordTransport, TransportOutcome};
 use crate::voice::session::VoiceManager;
 
 /// #915: 1 binding 内の発話 id → Discord 投稿先。発話 id は既存の say delivery_id /

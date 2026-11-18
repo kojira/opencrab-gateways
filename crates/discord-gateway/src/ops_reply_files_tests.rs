@@ -81,7 +81,8 @@ fn reply_declares_files_only_when_outbox_is_configured() {
     let files = &with["input_schema"]["properties"]["files"];
     assert_eq!(files["type"], "array");
     assert_eq!(files["items"]["type"], "string");
-    assert_eq!(files["items"]["format"], "workspace-file");
+    assert_eq!(files["items"]["x-opencrab-workspace-file"], true);
+    assert!(files["items"].get("format").is_none());
     // files は任意。必須は従来どおり event と text。
     assert_eq!(with["input_schema"]["required"], json!(["event", "text"]));
     // 宣言は決定的（digest が起動ごとに変わらない）。

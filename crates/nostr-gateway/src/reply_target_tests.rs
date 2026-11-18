@@ -56,8 +56,8 @@ fn reply_declares_event_as_a_short_ref() {
         .find(|d| d["name"] == "reply")
         .expect("reply declared");
     assert_eq!(
-        reply["input_schema"]["properties"]["event"]["format"],
-        "short-ref"
+        reply["input_schema"]["properties"]["event"]["x-opencrab-short-ref"],
+        true
     );
     let required = reply["input_schema"]["required"].as_array().unwrap();
     assert!(required.iter().any(|v| v == "event"));

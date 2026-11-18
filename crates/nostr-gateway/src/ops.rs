@@ -47,7 +47,7 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
     let str_prop = |desc: &str| json!({"type": "string", "description": desc});
     // 短縮参照フィールド（uN/eN/cN）。core はこの標示 field だけを実 ID へ解決する（レビュー要望）。
     let ref_prop =
-        |desc: &str| json!({"type": "string", "description": desc, "format": "short-ref"});
+        |desc: &str| json!({"type": "string", "description": desc, "x-opencrab-short-ref": true});
     // follow/unfollow の一括指定。core が短縮参照を解決するのは top-level の文字列 field だけ
     // なので、配列側は hex か npub を渡してもらい、gateway が hex へ直す（D-1088）。
     let follow_users_prop = || {
@@ -187,7 +187,7 @@ pub fn operation_declarations_with_files(enabled: bool) -> Value {
             if matches!(op["name"].as_str(), Some("reply" | "say")) {
                 op["input_schema"]["properties"]["files"] = json!({
                     "type":"array",
-                    "items":{"type":"string", "format":"workspace-file"},
+                    "items":{"type":"string", "x-opencrab-workspace-file":true},
                     "description":"Workspace files, up to 10 and 100 MiB total. Supported images, videos, MP3, PDF, text/code and fonts only; ZIP/CSV/WAV and unknown types are not supported."
                 });
                 let description = op["description"].as_str().unwrap().to_owned();

@@ -2,8 +2,8 @@
 //!
 //! フェーズ1最小の callback なし能力: `reaction` / `reply` / `resolve` / `say`（name UTF-8 昇順）。全 write は
 //! 非同期・callback なし（`callback_schema=null`）。core は常時 detach で invoke し、決着を次 turn が
-//! 消費する。短縮参照(uN/eN)は core が origin/snowflake へ解決済みで payload に入る（`"format":
-//! "short-ref"` 標示 field のみ）。gateway は origin → (channel,message) を導いて REST を叩く（層分離）。
+//! 消費する。短縮参照(uN/eN)は core が origin/snowflake へ解決済みで payload に入る（`"x-opencrab-short-ref":
+//! true` 標示 field のみ）。gateway は origin → (channel,message) を導いて REST を叩く（層分離）。
 //! 素の本文は通常発言（[`crate::post`]）。`say` 能力は同じ送信経路で通常発言を送る（D-1121。サブタスクなど
 //! 素の本文が配送されない走行からも投稿できるように）。system reaction と emoji 詳細スキーマは
 //! D17-05/D17-12（profile data）裁定後の後続スライス。
@@ -44,7 +44,7 @@ pub(crate) async fn targets_for(
 /// hello の `operations` 配列（§7.2・フェーズ1最小・name UTF-8 昇順）。
 ///
 /// `reply_files` は placement に core の outbox（`attachment_outbox_root`）があるときだけ true。
-/// true のときだけ reply に `files`（`"format": "workspace-file"`）を宣言する（D-1079）。
+/// true のときだけ reply に `files`（`"x-opencrab-workspace-file": true`）を宣言する（D-1079）。
 pub fn operation_declarations(reply_files: bool) -> Value {
     // 投稿・操作系は sub-engine へ出さない（not_exposed）。イベント参照は conversation_bound
     // （DI-02 の既存 gateway tool 可視性規則に対応・D17-13 で legacy `discord_add_reaction` の
@@ -73,7 +73,7 @@ pub fn operation_declarations(reply_files: bool) -> Value {
     let str_prop = |desc: &str| json!({"type": "string", "description": desc});
     // 短縮参照フィールド（uN/eN）。core はこの標示 field だけを実 ID へ解決する。
     let ref_prop =
-        |desc: &str| json!({"type": "string", "description": desc, "format": "short-ref"});
+        |desc: &str| json!({"type": "string", "description": desc, "x-opencrab-short-ref": true});
     json!([
         decl_for(
             "join_voice",
@@ -134,7 +134,7 @@ pub fn operation_declarations(reply_files: bool) -> Value {
 /// reply の input_schema。`files` は outbox があるときだけ宣言する。
 fn reply_input(reply_files: bool) -> Value {
     let input = json!({"type": "object", "required": ["event", "text"], "properties": {
-        "event": {"type": "string", "description": "返信先メッセージの短縮参照（例 e7）", "format": "short-ref"},
+        "event": {"type": "string", "description": "返信先メッセージの短縮参照（例 e7）", "x-opencrab-short-ref": true},
         "text": {"type": "string", "description": "返信本文"}
     }});
     with_files(input, reply_files, "返信")
@@ -154,7 +154,7 @@ fn with_files(mut input: Value, files: bool, what: &str) -> Value {
         input["properties"]["files"] = json!({
             "type": "array",
             "description": format!("{what}に添付するワークスペースのファイル（ワークスペースからの相対パス・最大10個）。Workspace-relative paths of files to attach (at most 10)."),
-            "items": {"type": "string", "format": "workspace-file"}
+            "items": {"type": "string", "x-opencrab-workspace-file": true}
         });
     }
     input
@@ -444,12 +444,16 @@ mod tests {
         let arr = decls.as_array().unwrap();
         let reply = arr.iter().find(|d| d["name"] == "reply").unwrap();
         assert_eq!(
-            reply["input_schema"]["properties"]["event"]["format"],
-            "short-ref"
+            reply["input_schema"]["properties"]["event"]["x-opencrab-short-ref"],
+            true
         );
+        // D-1134: the marker is not a JSON Schema `format` (LLM providers reject unknown formats).
+        assert!(reply["input_schema"]["properties"]["event"]
+            .get("format")
+            .is_none());
         // text は生本文なので短縮参照ではない。
         assert!(reply["input_schema"]["properties"]["text"]
-            .get("format")
+            .get("x-opencrab-short-ref")
             .is_none());
     }
 

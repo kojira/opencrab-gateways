@@ -714,7 +714,8 @@ fn attachment_root_survives_placement_serialization() {
         for op in declarations.as_array().unwrap() {
             let expected = enabled && matches!(op["name"].as_str(), Some("reply" | "say"));
             assert_eq!(
-                op["input_schema"]["properties"]["files"]["items"]["format"] == "workspace-file",
+                op["input_schema"]["properties"]["files"]["items"]["x-opencrab-workspace-file"]
+                    == true,
                 expected
             );
         }

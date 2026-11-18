@@ -1,7 +1,7 @@
 //! `follow` / `unfollow` の対象指定（D-1088）。
 //!
 //! 受け付ける形は 2 つ:
-//! - `user`: 1 件だけの短縮参照。core が宣言 schema の `"format":"short-ref"` を見て
+//! - `user`: 1 件だけの短縮参照。core が宣言 schema の `"x-opencrab-short-ref": true` を見て
 //!   pubkey hex へ解決してから渡してくる（`u2` → hex）。未解決のまま来たら拒否する。
 //! - `users`: 一括指定の配列。core が短縮参照を解決するのは top-level の文字列 field だけ
 //!   なので、ここには hex / npub / nprofile を渡す（gateway が hex へ直す）。

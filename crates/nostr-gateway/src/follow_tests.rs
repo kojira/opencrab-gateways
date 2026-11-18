@@ -334,7 +334,7 @@ fn declarations_advertise_batch_users_and_npub() {
         let schema = &declaration["input_schema"];
         let properties = &schema["properties"];
         assert_eq!(
-            properties["user"]["format"], "short-ref",
+            properties["user"]["x-opencrab-short-ref"], true,
             "{name}: user は core が解決する短縮参照フィールドのまま"
         );
         assert_eq!(

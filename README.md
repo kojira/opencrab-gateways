@@ -27,10 +27,9 @@ python3 scripts/core-rev.py   # prints the locked core rev
 ```
 
 Deploy gateways only together with a core built from that rev. The release package carries it in a
-`core-rev` file, and the production deployer (`opencrab-prod-runtime-deploy.py gateways`, in the
-private `opencrab-deploy` repository) refuses a gateways package whose `core-rev` is not the running
-core commit. Core and each gateway (nostr, discord, web) are deployed separately: a gateways deploy
-stops only the gateways whose binary changed. To move to a newer core, update the `rev` in
+`core-rev` file; a deployment should refuse a gateways package whose `core-rev` is not the running
+core commit. Core and each gateway (nostr, discord, web) can be deployed separately: every gateway
+reconnects to core by itself, so replacing one does not require stopping the others. To move to a newer core, update the `rev` in
 `Cargo.toml`, run `cargo update -p opencrab-gate-client`, and let CI pass.
 
 ## Build and test

@@ -1,6 +1,6 @@
 //! 1 instance の UDS client と watch lane。
 //!
-//! watch は bind ack の後にだけ起動する（DESIGN-NOSTRGATE §6 #16）。
+//! watch は core の UDS への接続が成り立ってから起動する（D-1099 で bind は無い）。
 //! 切断で child を止め、読取済み未送信は破棄する。再送はしない。
 
 use std::path::PathBuf;

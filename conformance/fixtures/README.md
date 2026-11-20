@@ -7,7 +7,7 @@
 | ファイル | 範囲 |
 |---|---|
 | `ids.json` | 共有識別子。placement と prelude の源 |
-| `hello-bind-said-dedup.json` | hello / bind / said / 同 origin 再送 |
+| `hello-said-dedup.json` | hello / said / 同 origin 再送 |
 | `say-three-results.json` | say 受理 / empty text の external_rejected / 第3結果（ok/err 捏造なしで SUT close。時間則は見ない） |
 | `activity.json` | activity started/ended と completed_no_reply |
 | `activity-origin.json` | activity started に additive `origin` を載せても従来どおり started/ended を配送（subset 規約＝追加 field 無視の実証・R2） |
@@ -20,17 +20,16 @@
 | `frame-non-object.json` | 非 object JSON で close |
 | `frame-duplicate.json` | duplicate member で close |
 | `live-queue-overflow.json` | live queue 容量 32 超過で external_rejected |
-| `http-post-and-routes.json` | 403 / 202 / 409 / 旧 route 404 |
-| `disconnect-unacked.json` | 未 ack 503 と切断後 503 |
-| `bind-conflict.json` | 同一 address の後勝ち bind で close（WEBGATE §8.1） |
-| `reconnect.json` | production spawn 経路の再 hello / bind |
+| `http-post-and-routes.json` | `ok.seq=null` の 403 not_admitted / 202 / turn 実行中の別 UUID も 202 / 旧 route 404 |
+| `disconnect-and-unknown-conversation.json` | gateway の記録に無い会話は 404、切断後は SSE `gate_error` と POST 503 `disconnect` |
+| `reconnect.json` | production spawn 経路の再 hello（D-1099 で bind は無い） |
 
 ## スキーマ
 
 ```text
 {
   name: string,
-  prelude: "none" | "hello" | "hello_bind",
+  prelude: "none" | "hello",   // D-1099: bind は無い
   steps: Step[]
 }
 

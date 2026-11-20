@@ -10,7 +10,7 @@ nostr-gateway instance /path/to/placement.json
 nostr-gateway settings /path/to/daemon.json 0.0.0.0:8794
 ```
 
-`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。reconcile は子を止め、core の gate UDS に `hello` の前の `provision`（instance id、kind `nostr`、agent、`enabled`、固定の中立 config `{"delivery_mode":"tool_driven"}`、address 1 つ。binding id は `uuid5(instance_id, address)`）を送り、返った revision で子を起動する。core のクレデンシャルは要らない。`instance` はplacementに従ってcore UDSへ接続し、watch childを起動する。`daemon` と `instance` は HTTP listen と server proxy を作らない（設定画面は別プロセスの `settings` が引数の bind で listen する）。
+`daemon` はgateway専用SQLite、ローカルadmin UDS、instance childのreconcileを所有する。daemon 自身は core に接続しない（`core_socket` は子に渡すだけ）。reconcile は設定が変わった instance の子を止めて起動し直す。core には事前の登録も provision も無い（D-1099）。`instance` はplacementに従ってcore UDSへ接続し、`hello` で instance id と agent id を名乗り（core が instance を見つけるか作る）、watch childを起動する。`daemon` と `instance` は HTTP listen と server proxy を作らない（設定画面は別プロセスの `settings` が引数の bind で listen する）。
 
 ```json
 {
@@ -31,11 +31,11 @@ nostr-gateway settings /path/to/daemon.json 0.0.0.0:8794
 
 ## placement
 
-`http_bind` は置かない。`core_socket` は絶対 path。`nostaro_bin` は nonempty。instance ごとに UDS 1 本。`config_b64` の decode バイトが hello `config_digest` の源。canonical config は relays / filter / self_pubkey / `name` / watches と optional `delivery_mode`。`name` は必須（空なら fail-loud）。秘密を含めない。
+`http_bind` は置かない。`core_socket` は絶対 path。`nostaro_bin` は nonempty。instance ごとに UDS 1 本。instance は `instance_id` / `agent_id` / `address`（core の session key）/ `config_b64`（gateway だけが読む設定。core には送らない）。canonical config は relays / filter / self_pubkey / `name` / watches / access と optional `delivery_mode`。`name` は必須（空なら fail-loud）。秘密を含めない。
 
 default(メンション)車線は常設。watch は追加車線。同じ `address` の binding 1 枚を共有する。
 メンション車線の nostaro argv は `--match=any` に加え、instance config の `name` を `--keyword`、`self_pubkey` を `--npub`（p タグ対象）として付ける。kind は 1 と 7。hex pubkey の keyword は付けない（本文 substring にならない）。`--no-mention-only` は付けない。条件ゼロの空網にはしない。この車線の said は `route=immediate`（束ね待ちしない）。`beyond_self` は false。
-watch child は bind ack の後にだけ起動する。切断で child を止め、読取済み未送信は破棄して再送しない。
+watch child は core の UDS への接続が成り立ってから起動する（D-1099 で bind は無くなった）。切断で child を止め、読取済み未送信は破棄して再送しない。
 `SaidOutcome` は Accepted / NotAdmitted / Disconnected / WireErr を記録し、`store_error` / `bad_request` はカウンタに残す。turn 実行中の said は core の session queue 32 に積む。`PostRefuse::Busy`（`said refused; binding busy`）はキュー満杯の応答にだけ使う。
 watch の有効フィルタは `filter_json`。アンカー `beyond_self` は watch 設定値（`!p_self` の代用はしない）。
 タイムライン車線の Bundle は `interval_secs` ごとに flush する。`max_items` は 1 周期の上限件数（省略時 50）。超過分は新しい方から `max_items` 件を残し、古い分は捨てる。捨てた件数は warn と `bundle_discarded` カウンタに残す（会話本文には出さない）。manifest / `bundle_id` / `count` / `[NOSTRBUNDLE/V1 …]` は残した分だけ。
@@ -66,8 +66,7 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 
 ## 関連
 
-- 本設計: `DESIGN-NOSTRGATE.md`
-- 線の契約: `DESIGN-EXTGATE-V3.md`
+- 線の契約: core リポジトリの `docs/design/external-gate.md`（D-1099 以前の版。今の動きはコードが正）
 - V3 client: `opencrab-gate-client`
 
 ## 設定画面（D-1097）

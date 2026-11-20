@@ -162,7 +162,7 @@ pub fn map_message(msg: &IncomingMessage, self_bot_id: &str) -> Option<MappedSai
     })
 }
 
-/// 受信 message の binding address（core が bind ack していれば購読集合）。
+/// 受信 message の address（チャンネルごと。core の session key になる）。
 pub fn address_of(agent_id: &str, msg: &IncomingMessage) -> String {
     let guild = msg.guild_id.as_deref().unwrap_or("");
     address_for(agent_id, guild, &msg.channel_id)

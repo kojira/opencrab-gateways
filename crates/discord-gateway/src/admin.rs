@@ -105,7 +105,7 @@ async fn handle(
 }
 
 /// `create`: a bot for an agent that has none, under a fresh instance id. The daemon's next
-/// reconcile provisions it in core and starts the bot.
+/// reconcile starts the bot (D-1099: core needs no registration).
 fn create(request: &Request, store: &DiscordStore, key: &[u8; 32]) -> Result<Value> {
     let agent_id = request.agent_id.as_deref().context("agent_id required")?;
     let plan = crate::admin_settings::plan_create(

@@ -19,11 +19,15 @@ UDS 切断後も HTTP listen は落とさない。指数 backoff（200ms…8s）
 
 ## 配置
 
-operator が書いた placement JSON を argv で渡す。
+operator が書いた placement JSON を argv で渡す（本番の起動はこの形）。
 
 ```text
-web-gateway /path/to/placement.json
+web-gateway /path/to/placement.json            # instance と同じ
+web-gateway instance /path/to/placement.json
+web-gateway daemon /path/to/daemon.json         # gateway の DB と admin UDS を持つ別の起動形
 ```
+
+`daemon` の設定は `{database_path, admin_socket, admin_instance_ids?, conversations_path?}`（知らないキーは起動しない）。`http_bind` と `core_socket` と instance は DB から読む。`conversations_path` を省くと DB の隣の `web-conversations.db`。
 
 `http_bind` は loopback のみ。`core_socket` は絶対 path。instanceごとに`agent_id`とUDSを1本ずつ定義し、同じ`agent_id`の重複は拒否する。hello は `instance_id` と `agent_id` を名乗るだけ（core が instance を見つけるか作る）。
 
@@ -45,5 +49,4 @@ frame parser と in-process HTTP は rust-unit に分離し、共通 conformance
 
 ## 関連
 
-- 本設計: `DESIGN-WEBGATE.md`
-- 線の契約: `DESIGN-EXTGATE-V3.md`（変更しない）
+- 線の契約: core リポジトリの `docs/design/external-gate.md`（D-1099 以前の版。今の動きはコードが正）

@@ -26,8 +26,12 @@ The core crates are git dependencies pinned to one `kojira/opencrab` rev in `Car
 python3 scripts/core-rev.py   # prints the locked core rev
 ```
 
-Deploy gateways only together with a core built from that rev. To move to a newer core, update the
-`rev` in `Cargo.toml`, run `cargo update -p opencrab-gate-client`, and let CI pass.
+Deploy gateways only together with a core built from that rev. The release package carries it in a
+`core-rev` file, and the production deployer (`opencrab-prod-runtime-deploy.py gateways`, in the
+private `opencrab-deploy` repository) refuses a gateways package whose `core-rev` is not the running
+core commit. Core and each gateway (nostr, discord, web) are deployed separately: a gateways deploy
+stops only the gateways whose binary changed. To move to a newer core, update the `rev` in
+`Cargo.toml`, run `cargo update -p opencrab-gate-client`, and let CI pass.
 
 ## Build and test
 
@@ -41,6 +45,17 @@ OPENCRAB_SERVER_BIN=/path/to/opencrab-server cargo test --workspace --all-featur
 
 CI checks out the locked core rev, builds `opencrab-server` from it, and runs the tests and the
 conformance suite against both the Rust and the Node implementation.
+
+## Tool-schema markers
+
+Gateways declare their operations (tools) to core with a JSON Schema per operation. Two fields are
+marked for core with vendor keywords, not with JSON Schema `format` (LLM providers reject unknown
+formats):
+
+| Keyword | Meaning |
+|---|---|
+| `"x-opencrab-short-ref": true` | Core turns the short reference the agent writes (`e7`, `u3`) into the real message id before invoking the gateway |
+| `"x-opencrab-workspace-file": true` | Core copies the agent's workspace file into its outbox and passes a descriptor (see below) |
 
 ## Discord placement: attachments
 

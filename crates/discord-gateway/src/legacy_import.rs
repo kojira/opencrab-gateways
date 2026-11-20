@@ -4,7 +4,8 @@
 //!
 //! Every file is checked before anything is written, and the rows are written in one
 //! transaction: either all instances are imported or none. Nothing is asked of core: the
-//! instances keep their ids, and the first reconcile provisions them.
+//! instances keep their ids, and the first reconcile starts their bots (D-1099: core needs no
+//! registration; each bot says hello with its instance id).
 
 use crate::config::{canonicalize_config_b64, decode_config_b64, parse_instance_config, Placement};
 use crate::store::DiscordStore;
@@ -57,7 +58,7 @@ struct Planned {
 }
 
 /// Imports the instance-mode setup into an empty store under the same instance ids; the
-/// daemon's first reconcile then provisions them in core as they are.
+/// daemon's first reconcile then starts them as they are.
 pub fn import_legacy(
     store: &DiscordStore,
     import: &LegacyImport,

@@ -1,4 +1,4 @@
-//! Discord gateway の DI 能力宣言と invoke handler（設計 §7・§9A / DESIGN-DI-EXTENSION §3/§5）。
+//! Discord gateway の DI 能力宣言と invoke handler。
 //!
 //! フェーズ1最小の callback なし能力: `reaction` / `reply` / `resolve` / `say`（name UTF-8 昇順）。全 write は
 //! 非同期・callback なし（`callback_schema=null`）。core は常時 detach で invoke し、決着を次 turn が
@@ -389,7 +389,7 @@ mod tests {
         let names: Vec<&str> = arr.iter().map(|d| d["name"].as_str().unwrap()).collect();
         let mut sorted = names.clone();
         sorted.sort();
-        assert_eq!(names, sorted, "name UTF-8 昇順（DESIGN-DI §3.1）");
+        assert_eq!(names, sorted, "name UTF-8 昇順");
         assert_eq!(
             names,
             vec![

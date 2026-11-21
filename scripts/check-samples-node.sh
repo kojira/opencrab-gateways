@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# samples/node の独立性を static に見る（DESIGN-SAMPLES-NODE.md §5）。
+# samples/node の独立性を static に見る。
 #
 # merge CI の共通 conformance 行列と一緒に必須。ビルドの成否には現れない
 # 依存・import を入口で止める。

@@ -1,4 +1,4 @@
-//! DESIGN-WEBGATE §5.1: 実 opencrab-server + 実 UDS + web-gateway プロセス。
+//! 実 opencrab-server + 実 UDS + web-gateway プロセス。
 //! send → said → turn → say → SSE 確定を 1 本で見る。LLM は injection（解放ゲート付き mock）。
 
 use rusqlite::Connection;

@@ -1,4 +1,4 @@
-//! Nostr gateway の DI 能力宣言と invoke handler（DESIGN-DI-EXTENSION §9.2 / §9A）。
+//! Nostr gateway の DI 能力宣言と invoke handler。
 //!
 //! hello に載せる能力宣言（reply/reaction/repost/say/follow/unfollow/kind0/upload/resolve）と、core からの
 //! invoke を nostaro CLI 実行へ写す handler。短縮参照(uN/eN/cN)は core が解決済みで payload に入る:

@@ -2,7 +2,7 @@
 //! 返信は明示 `reply` DI 能力が担うので、say に reply target を暗黙設定しない（設計 §6.1・DI-16）。
 //! dry-run / production の分岐は [`crate::transport`] の実装差で吸収する（say も invoke も同一 transport）。
 //!
-//! 2000 字超の本文は Discord 上限（設計 §1.2-4 / DESIGN-DISCORD-GATE.md:61）に合わせて分割する。
+//! 2000 字超の本文は Discord の上限（`DISCORD_MAX_CHARS`）に合わせて分割する。
 //! 分割規則は旧 `discord::gateway::split_message`（行優先・文字境界・順序保証）を移植したもの。
 
 use std::sync::Arc;

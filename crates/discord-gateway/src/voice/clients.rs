@@ -76,7 +76,7 @@ pub async fn synthesize_choice(
     }
 }
 
-/// ZEN-TTS サーバー（kojira/zen-tts-server）の `POST /synthesize`。
+/// ZEN-TTS サーバー（kojira/zen-tts-http）の `POST /synthesize`。
 async fn zen_synthesize(
     http: &reqwest::Client,
     tts: &TtsSettings,

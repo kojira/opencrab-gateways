@@ -12,7 +12,7 @@ placement schema は Rust と同一: `{http_bind,core_socket,conversations:[{ses
 
 ready は `http_bind` への listen 成立だけ。config / listen failure は listen 前に nonzero exit。UDS 切断後も HTTP listen は落とさない。
 
-## 固定値（WEBGATE §8）
+## 固定値（Rust の web-gateway と同じ）
 
 - live queue 容量 32。overflow は `external_rejected`
 - SSE error event 名 `gate_error`

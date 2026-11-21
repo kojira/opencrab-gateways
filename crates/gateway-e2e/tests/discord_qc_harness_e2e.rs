@@ -1,4 +1,4 @@
-//! Discord gateway フェーズ1 のオフライン E2E（DESIGN-DISCORD-GATE v17）。
+//! Discord gateway フェーズ1 のオフライン E2E。
 //!
 //! トークン・ネットワーク・serenity 接続なしで実配線を通す決定的 E2E。
 

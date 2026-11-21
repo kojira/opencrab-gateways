@@ -69,7 +69,7 @@ jobs:
       - name: No private identifiers
         run: bash scripts/check-no-private-identifiers.sh
 
-  # DESIGN-SAMPLES-NODE.md §5: sample は workspace build の必須対象ではないが、
+  # sample は workspace build の必須対象ではないが、
   # merge CI の共通 conformance 行列には必須。既定 SUT は Rust binary。
   # Node 列は OPENCRAB_CONFORMANCE_SUT で path だけ差し替える（言語名分岐なし）。
   # Node の exact version は samples/node/.node-version。

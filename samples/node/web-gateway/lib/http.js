@@ -89,7 +89,6 @@ function wireStatus(code) {
       return 400;
     case "subject_unknown":
       return 404;
-    case "instance_not_ready":
     case "instance_conflict":
     case "instance_active":
       return 409;

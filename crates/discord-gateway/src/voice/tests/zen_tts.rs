@@ -24,7 +24,7 @@ pub struct ZenRecorded {
     pub analyze_requests: Mutex<Vec<serde_json::Value>>,
 }
 
-/// A stand-in for kojira/zen-tts-server (`/health`, `/voices`, `/synthesize`).
+/// A stand-in for kojira/zen-tts-http (`/health`, `/voices`, `/synthesize`).
 pub async fn spawn_zen() -> (String, Arc<ZenRecorded>) {
     let recorded = Arc::new(ZenRecorded::default());
     let app = Router::new()

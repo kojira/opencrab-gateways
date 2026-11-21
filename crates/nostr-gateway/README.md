@@ -66,7 +66,7 @@ watch の有効フィルタは `filter_json`。アンカー `beyond_self` は wa
 
 ## 関連
 
-- 線の契約: core リポジトリの `docs/design/external-gate.md`（D-1099 以前の版。今の動きはコードが正）
+- 線の契約: core リポジトリの `docs/design/external-gate.md`（食い違うときは core のコードが正）
 - V3 client: `opencrab-gate-client`
 
 ## 設定画面（D-1097）

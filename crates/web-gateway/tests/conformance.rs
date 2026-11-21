@@ -1,4 +1,4 @@
-//! DESIGN-SAMPLES-NODE §1: process harness。SUT は argv[1]=placement.json。
+//! process harness。SUT は argv[1]=placement.json。
 //! InstanceClient / router() / parse_frame_bytes は import しない。
 
 use std::collections::BTreeMap;

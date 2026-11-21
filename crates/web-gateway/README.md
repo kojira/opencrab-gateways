@@ -6,14 +6,14 @@ Web 会話の独立 binary。HTTP/SSE を V3 protocol=3（UDS）へ変換する�
 
 | method / path | 役割 |
 |---|---|
-| `POST /api/web-conversations` | `{agent_id,name}`からgatewayがsession key（`extgate-<uuid>`）を採番し、対象instanceへ`open`を送る。core が返した session を gateway の会話記録に残し、`201 ready`。接続前は`503 instance_not_ready` |
+| `POST /api/web-conversations` | `{agent_id,name}`からgatewayがsession key（`extgate-<uuid>`）を採番し、対象instanceへ`open`を送る。core が返した session を gateway の会話記録に残し、`201 ready`。その agent の instance が無ければ `409 instance_unavailable`、接続前は`503 instance_not_ready` |
 | `GET /api/web-conversations/{session_id}` | Web gateway自身の会話記録で所有と状態（`ready` / `unavailable`）を返す。非所有は404 |
 | `POST /api/web-conversations/{session_id}/messages` | body exact `{client_message_id,text,attachments}` → V3 `said`。`202` は said ack まで |
 | `GET /api/web-conversations/{session_id}/events` | say / activity / `completed_no_reply` の SSE |
 | `GET\|POST /rooms/{room}/messages` | 404。alias しない |
 | `GET /chat` | 404。redirect しない |
 
-`session_id`はgatewayが作ったsession key（core はこれを session として扱う・D-1099）。どの instance の会話かは gateway の会話記録（`conversations_path`）が決める。記録に無い session は`404`、所有 instance が切断中は`503`。turn 実行中の別 UUID は said を送り、core の session queue 32 が直列化する。キュー満杯は `ok.seq=null` → `403 {state:"not_admitted"}`。`409 conversation_busy` は `PostRefuse::Busy` のときだけ（キュー満杯を client が Busy に写したとき）。`ok.seq=null` は `403 {state:"not_admitted"}`。said 応答は 10 秒で打ち切り、`disconnect` 相当で pending を落とす。wire close の SSE は `event: gate_error`（ブラウザ予約の `error` とぶつからない）。
+`session_id`はgatewayが作ったsession key（core はこれを session として扱う・D-1099）。どの instance の会話かは gateway の会話記録（`conversations_path`）が決める。記録に無い session は`404`、所有 instance が切断中は`503`。turn 実行中の別 UUID は said を送り、core の session queue 32 が直列化する。キュー満杯は `ok.seq=null` → `403 {state:"not_admitted"}`。`409 conversation_busy` は `PostRefuse::Busy` のときだけ（キュー満杯を client が Busy に写したとき）。said 応答は 10 秒で打ち切り、`disconnect` 相当で pending を落とす。wire close の SSE は `event: gate_error`（ブラウザ予約の `error` とぶつからない）。
 
 UDS 切断後も HTTP listen は落とさない。指数 backoff（200ms…8s）で再接続し、hello を送り直す（core への登録は無い）。切断中の message POST は `503 disconnect`、events は SSE `gate_error`（code=`disconnect`）。tracing filter は `opencrab_web_gateway` / `opencrab_gate_client` と binary 名 `web_gateway`。hello / said / say / close を info に残す。V3 client / wire / json は `opencrab-gate-client` を使う。
 
@@ -49,4 +49,4 @@ frame parser と in-process HTTP は rust-unit に分離し、共通 conformance
 
 ## 関連
 
-- 線の契約: core リポジトリの `docs/design/external-gate.md`（D-1099 以前の版。今の動きはコードが正）
+- 線の契約: core リポジトリの `docs/design/external-gate.md`（食い違うときは core のコードが正）

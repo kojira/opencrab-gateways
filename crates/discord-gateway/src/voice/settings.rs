@@ -43,7 +43,7 @@ pub struct TtsSettings {
     /// agent ごとの VOICEVOX スタイル ID。無い agent は `default_voice`。
     #[serde(default)]
     pub agent_voices: BTreeMap<String, String>,
-    /// ZEN-TTS サーバー（kojira/zen-tts-server）の接続先と既定値（D-1103）。
+    /// ZEN-TTS サーバー（kojira/zen-tts-http）の接続先と既定値（D-1103）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zen: Option<ZenSettings>,
     /// bot（agent）ごとの読み上げ。`agent_voices` より優先する（D-1103）。

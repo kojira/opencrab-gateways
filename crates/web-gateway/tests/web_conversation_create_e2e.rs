@@ -1,4 +1,4 @@
-//! DESIGN-WEBGATE §7.4 connected / disconnected プロセス E2E。
+//! 会話作成の connected / disconnected プロセス E2E。
 //! Binding PUTは使わず、Web gateway自身のPOST /api/web-conversationsだけがbindingを作る。
 
 include!("web_conversation_create_e2e/support.rs");

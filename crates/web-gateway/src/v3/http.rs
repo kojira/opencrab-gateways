@@ -324,7 +324,7 @@ fn wire_status(code: &str) -> StatusCode {
     match code {
         "bad_request" => StatusCode::BAD_REQUEST,
         "subject_unknown" => StatusCode::NOT_FOUND,
-        "instance_not_ready" | "instance_conflict" | "instance_active" => StatusCode::CONFLICT,
+        "instance_conflict" | "instance_active" => StatusCode::CONFLICT,
         "store_error" => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_GATEWAY,
     }

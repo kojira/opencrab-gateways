@@ -48,13 +48,13 @@ opencrab-discord-gateway = { path = "crates/discord-gateway" }
 
 # core（kojira/opencrab）。gateway が試験済みの core はこの rev 1 つだけ。
 # 本番では core の commit がこの rev と一致する組み合わせだけを配備する。
-opencrab-gate-client = { git = "https://github.com/kojira/opencrab", rev = "aa8ba3f5782bbf2f8b316846cd6aa7232a407c8c" }
-opencrab-db = { git = "https://github.com/kojira/opencrab", rev = "aa8ba3f5782bbf2f8b316846cd6aa7232a407c8c" }
-opencrab-extgate = { git = "https://github.com/kojira/opencrab", rev = "aa8ba3f5782bbf2f8b316846cd6aa7232a407c8c", default-features = false }
-opencrab-server = { git = "https://github.com/kojira/opencrab", rev = "aa8ba3f5782bbf2f8b316846cd6aa7232a407c8c" }
-opencrab-llm = { git = "https://github.com/kojira/opencrab", rev = "aa8ba3f5782bbf2f8b316846cd6aa7232a407c8c" }
-opencrab-actions = { git = "https://github.com/kojira/opencrab", rev = "aa8ba3f5782bbf2f8b316846cd6aa7232a407c8c" }
-opencrab-gateway = { git = "https://github.com/kojira/opencrab", rev = "aa8ba3f5782bbf2f8b316846cd6aa7232a407c8c" }
+opencrab-gate-client = { git = "https://github.com/kojira/opencrab", rev = "f9aebe1e11d718be2fb73c5cf8cf3758940fd740" }
+opencrab-db = { git = "https://github.com/kojira/opencrab", rev = "f9aebe1e11d718be2fb73c5cf8cf3758940fd740" }
+opencrab-extgate = { git = "https://github.com/kojira/opencrab", rev = "f9aebe1e11d718be2fb73c5cf8cf3758940fd740", default-features = false }
+opencrab-server = { git = "https://github.com/kojira/opencrab", rev = "f9aebe1e11d718be2fb73c5cf8cf3758940fd740" }
+opencrab-llm = { git = "https://github.com/kojira/opencrab", rev = "f9aebe1e11d718be2fb73c5cf8cf3758940fd740" }
+opencrab-actions = { git = "https://github.com/kojira/opencrab", rev = "f9aebe1e11d718be2fb73c5cf8cf3758940fd740" }
+opencrab-gateway = { git = "https://github.com/kojira/opencrab", rev = "f9aebe1e11d718be2fb73c5cf8cf3758940fd740" }
 
 [profile.dev]
 debug = 1
